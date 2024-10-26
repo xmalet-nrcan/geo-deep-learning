@@ -76,4 +76,4 @@ data:
     csv_root_folder: /gpfs/fs5/nrcan/nrcan_geobase/work/transfer/work/deep_learning/models/multi/RGB/quarte_classes/DG_PS_SP_NB_QC_NFL/maxar_rgb/wv_geoeye_quickbird
     patches_root_folder: /gpfs/fs5/nrcan/nrcan_geobase/work/transfer/work/deep_learning/models/multi/RGB/quarte_classes/DG_PS_SP_NB_QC_NFL/maxar_rgb/wv_geoeye_quickbird
 
-ckpt_path: /space/partner/nrcan/geobase/work/transfer/work/deep_learning/mlflow/mlruns/887366126356049876/4532d69b64464c748f887973596f330a/checkpoints/model-epoch=04-val_loss=0.53.ckpt
+ckpt_path: /space/partner/nrcan/geobase/work/transfer/work/deep_learning/mlflow/mlruns/887366126356049876/974d906674f248cd874088b6ba94cce6/checkpoints/model-epoch=05-val_loss=0.51.ckpt
