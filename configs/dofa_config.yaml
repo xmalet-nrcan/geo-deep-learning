@@ -4,7 +4,13 @@ seed_everything: true
 trainer:
   accelerator: "gpu"
   devices: -1
-  strategy: "ddp"
+  strategy:
+    class_path: lightning.pytorch.strategies.DDPStrategy
+    init_args:
+      find_unused_parameters: false
+      gradient_as_bucket_view: true
+      static_graph: true
+  sync_batchnorm: true
   logger:
     class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
     init_args:
@@ -59,8 +65,8 @@ lr_scheduler:
 data:
   class_path: datamodules.imagery_NonGeoDataModule.BlueSkyNonGeoDataModule
   init_args:
-    batch_size: 24
-    num_workers: 8
+    batch_size: 64
+    num_workers: 4
     data_type_max: 255
     patch_size:
     - 512
