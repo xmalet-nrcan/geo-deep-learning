@@ -36,8 +36,8 @@ trainer:
         mode: "min"
         save_top_k: 1
         filename: "model-{epoch:02d}-{val_loss:.2f}"
-  max_epochs: 2
-  min_epochs: 1
+  max_epochs: 20
+  min_epochs: 2
 
 model:
   class_path: tasks_with_models.segmentation_dofa.SegmentationDOFA
@@ -46,7 +46,7 @@ model:
     pretrained: True
     image_size: [512, 512]
     in_channels: 3
-    max_samples: 6
+    max_samples: 18
     num_classes: 5
     mean: ${data.init_args.mean}
     std: ${data.init_args.std}
