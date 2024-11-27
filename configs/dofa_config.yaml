@@ -23,7 +23,8 @@ trainer:
       init_args:
         monitor: "val_loss"
         mode: "min"
-        patience: 1
+        verbose: True
+        patience: 20
     - class_path: tools.callbacks.segmentation_callback.SegmentationCallback
       init_args:
         max_samples: 3
@@ -57,7 +58,8 @@ model:
         mode: "multiclass"
     class_labels: ["background", "fore", "hydro", "roads", "buildings"]
     class_colors: ["#000000", "#008000", "#0000FF", "#FFFF00", "#FF0000"]
-
+    weights_from_checkpoint_path: null
+    
 optimizer:
   class_path: Adam
   init_args:
@@ -69,7 +71,7 @@ lr_scheduler:
     monitor: "val_loss"
     mode: "min"
     factor: 0.1
-    patience: 2
+    patience: 20
 
 data:
   class_path: datamodules.imagery_NonGeoDataModule.BlueSkyNonGeoDataModule
