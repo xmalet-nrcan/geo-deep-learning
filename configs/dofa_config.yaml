@@ -71,7 +71,9 @@ lr_scheduler:
     monitor: "val_loss"
     mode: "min"
     factor: 0.1
-    patience: 20
+    patience: 10
+    cooldown: 2
+    min_lr: 2e-8
 
 data:
   class_path: datamodules.imagery_NonGeoDataModule.BlueSkyNonGeoDataModule
