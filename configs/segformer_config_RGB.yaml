@@ -8,13 +8,14 @@ trainer:
     init_args:
       find_unused_parameters: false
       gradient_as_bucket_view: true
+      static_graph: true
   gradient_clip_val: 1.0
   precision: "16-mixed"
   sync_batchnorm: true
   logger:
     class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
     init_args:
-      save_dir: /space/partner/nrcan/geobase/work/transfer/work/deep_learning/mlflow/mlruns/
+      save_dir: /home/valhassa/Projects/geo-deep-learning/logs
       log_model: all
       experiment_name: "gdl_experiment"
       run_name: "gdl_run"
@@ -42,19 +43,17 @@ trainer:
   max_epochs: 10
 
 model:
-  class_path: tasks_with_models.segmentation_dofa.SegmentationDOFA
+  class_path: tasks_with_models.segmentation_segformer.SegmentationSegformer
   init_args:
-    encoder: "dofa_base" # "dofa_base" or "dofa_large"
-    pretrained: True
-    image_size: [512, 512]
-    wavelengths: [0.665, 0.549, 0.481]
+    encoder: "mit_b0" # "mit_b0", "mit_b1", "mit_b2", "mit_b3", "mit_b4", "mit_b5"
     in_channels: 3
-    max_samples: 18
+    weights: imagenet
+    max_samples: 6
     num_classes: 5
     mean: ${data.init_args.mean}
     std: ${data.init_args.std}
     data_type_max: ${data.init_args.data_type_max}
-    loss: 
+    loss:
       class_path: segmentation_models_pytorch.losses.DiceLoss
       init_args:
         mode: "multiclass"
@@ -63,11 +62,11 @@ model:
     weights_from_checkpoint_path: null
     
 optimizer:
-  class_path: Adam
+  class_path: AdamW
   init_args:
     lr: 6e-5
 
-lr_scheduler: 
+lr_scheduler:
   class_path: ReduceLROnPlateau
   init_args:
     monitor: "val_loss"
@@ -80,21 +79,21 @@ lr_scheduler:
 data:
   class_path: datamodules.imagery_NonGeoDataModule.BlueSkyNonGeoDataModule
   init_args:
-    batch_size: 32
-    num_workers: 6
+    batch_size: 4
+    num_workers: 8
     data_type_max: 255
     patch_size:
     - 512
     - 512
     mean:
-    - 0.399
-    - 0.428
-    - 0.399
+    - 0.3992
+    - 0.4283
+    - 0.3998
     std:
-    - 0.167
-    - 0.180
-    - 0.158
-    csv_root_folder: /gpfs/fs5/nrcan/nrcan_geobase/work/transfer/work/deep_learning/models/multi/RGB/quarte_classes/DG_PS_SP_NB_QC_NFL/maxar_rgb/wv_geoeye_quickbird
-    patches_root_folder: /gpfs/fs5/nrcan/nrcan_geobase/work/transfer/work/deep_learning/models/multi/RGB/quarte_classes/DG_PS_SP_NB_QC_NFL/maxar_rgb/wv_geoeye_quickbird
+    - 0.1672
+    - 0.1800
+    - 0.1584
+    csv_root_folder: /export/sata01/wspace/test_dir/multi/all_rgb_data/patches/4cls_RGB
+    patches_root_folder: /export/sata01/wspace/test_dir/multi/all_rgb_data/patches/4cls_RGB
 
 ckpt_path: null

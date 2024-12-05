@@ -8,7 +8,6 @@ trainer:
     init_args:
       find_unused_parameters: false
       gradient_as_bucket_view: true
-      static_graph: true
   gradient_clip_val: 1.0
   precision: "16-mixed"
   sync_batchnorm: true
@@ -43,11 +42,13 @@ trainer:
   max_epochs: 10
 
 model:
-  class_path: tasks_with_models.segmentation_segformer.SegmentationSegformer
+  class_path: tasks_with_models.segmentation_dofa.SegmentationDOFA
   init_args:
-    encoder: "mit_b0" # "mit_b0", "mit_b1", "mit_b2", "mit_b3", "mit_b4", "mit_b5"
+    encoder: "dofa_base" # "dofa_base", "dofa_large"
+    pretrained: True
+    image_size: [512, 512]
+    wavelengths: [0.665, 0.549, 0.481]
     in_channels: 3
-    weights: imagenet
     max_samples: 6
     num_classes: 5
     mean: ${data.init_args.mean}
@@ -62,7 +63,7 @@ model:
     weights_from_checkpoint_path: null
     
 optimizer:
-  class_path: AdamW
+  class_path: Adam
   init_args:
     lr: 6e-5
 
@@ -86,13 +87,13 @@ data:
     - 512
     - 512
     mean:
-    - 0.399
-    - 0.428
-    - 0.399
+    - 0.3992
+    - 0.4283
+    - 0.3998
     std:
-    - 0.167
-    - 0.180
-    - 0.158
+    - 0.1672
+    - 0.1800
+    - 0.1584
     csv_root_folder: /export/sata01/wspace/test_dir/multi/all_rgb_data/patches/4cls_RGB
     patches_root_folder: /export/sata01/wspace/test_dir/multi/all_rgb_data/patches/4cls_RGB
 
