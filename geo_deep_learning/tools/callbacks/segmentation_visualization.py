@@ -1,61 +1,76 @@
+"""Visualization callback for segmentation models."""
+
+import logging
+
+from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.utilities import rank_zero_only
-from tools.visualization import visualize_prediction
-from tools.utils import denormalization
-from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
 
 class VisualizationCallback(Callback):
-    def __init__(self, max_samples=3, mean=None, std=None, num_classes=None, 
-                 data_type_max=255, class_colors=None):
-        super().__init__()
+    """Visualization callback on best model save."""
+
+    def __init__(self, max_samples: int = 6) -> None:
+        """
+        Initialize callback.
+
+        Args:
+            max_samples: Maximum number of samples to visualize
+
+        """
         self.max_samples = max_samples
-        self.mean = mean
-        self.std = std
-        self.num_classes = num_classes + 1 if num_classes == 1 else num_classes
-        self.data_type_max = data_type_max
-        self.class_colors = class_colors
         self.current_batch = None
         self.current_outputs = None
+        self.last_best_score = None
 
     def on_validation_batch_end(
-        self, trainer, pl_module, outputs, batch, batch_idx
-    ):
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,  # noqa: ARG002
+        outputs: object,
+        batch: object,
+        batch_idx: int,  # noqa: ARG002
+    ) -> None:
+        """Store the last validation batch for visualization."""
         if trainer.is_global_zero:
             self.current_batch = batch
             self.current_outputs = outputs
 
     @rank_zero_only
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        # Check if we saved a checkpoint this batch
-        if hasattr(trainer, 'checkpoint_callback') and trainer.checkpoint_callback.best_model_score is not None:
-            current_score = trainer.callback_metrics.get('val_loss')
-            if current_score == trainer.checkpoint_callback.best_model_score:
-                self._log_visualizations(trainer)
+    def on_train_epoch_end(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+    ) -> None:
+        """Trigger visualization when best model is saved."""
+        if (
+            hasattr(trainer, "checkpoint_callback")
+            and trainer.checkpoint_callback.best_model_score is not None
+        ):
+            current_best_score = trainer.checkpoint_callback.best_model_score
+            if self.last_best_score != current_best_score:
+                self.last_best_score = current_best_score
+                self._log_visualizations(trainer, pl_module)
 
-    def _log_visualizations(self, trainer):
-        if self.current_batch is None or self.current_outputs is None:
+    def _log_visualizations(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Delegate visualization to model-specific implementation."""
+        if not hasattr(pl_module, "_log_visualizations"):
+            logger.warning(
+                "Model %s does not implement _log_visualizations",
+                type(pl_module).__name__,
+            )
             return
-            
         try:
-            image_batch = self.current_batch["image"]
-            mask_batch = self.current_batch["mask"]
-            batch_image_name = self.current_batch["image_name"]
-            
-            N = min(self.max_samples, len(image_batch))
-            for i in range(N):
-                image = image_batch[i]
-                image_name = batch_image_name[i]
-                image = denormalization(image, self.mean, self.std, self.data_type_max)
-                fig = visualize_prediction(
-                    image, mask_batch[i], self.current_outputs[i],
-                    image_name, self.num_classes, class_colors=self.class_colors
-                )
-                # artifact_file = f"val/{Path(image_name).stem}/epoch_{trainer.current_epoch}.png"
-                artifact_file = f"val/{Path(image_name).stem}/idx_{i}_epoch_{trainer.current_epoch}.png"
-                trainer.logger.experiment.log_figure(
-                    figure=fig,
-                    artifact_file=artifact_file,
-                    run_id=trainer.logger.run_id
-                )
-        except Exception as e:
-            print(f"Error in visualization: {e}")
+            if self.current_batch is None or self.current_outputs is None:
+                logger.warning("No batch or outputs to visualize")
+                return
+            pl_module._log_visualizations(  # noqa: SLF001
+                trainer,
+                self.current_batch,
+                self.current_outputs,
+                self.max_samples,
+            )
+        except Exception:
+            logger.exception("Error during visualization logging")

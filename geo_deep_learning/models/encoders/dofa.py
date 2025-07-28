@@ -1,43 +1,17 @@
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License.
+"""Dynamic One-For-All (DOFA) v2 encoder."""
 
-"""Dynamic One-For-All (DOFA) models."""
-
-from functools import partial
-from typing import Any
 import math
-import torch
-import warnings
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.nn.init as init
-from timm.models.vision_transformer import Block
-from torch import Tensor
 
-def resize(input,
-           size=None,
-           scale_factor=None,
-           mode='nearest',
-           align_corners=None,
-           warning=True):
-    if warning:
-        if size is not None and align_corners:
-            input_h, input_w = tuple(int(x) for x in input.shape[2:])
-            output_h, output_w = tuple(int(x) for x in size)
-            if output_h > input_h or output_w > output_h:
-                if ((output_h > 1 and output_w > 1 and input_h > 1
-                     and input_w > 1) and (output_h - 1) % (input_h - 1)
-                        and (output_w - 1) % (input_w - 1)):
-                    warnings.warn(
-                        f'When align_corners={align_corners}, '
-                        'the output would more aligned if '
-                        f'input size {(input_h, input_w)} is `x+1` and '
-                        f'out size {(output_h, output_w)} is `nx+1`')
-                    
-    return F.interpolate(input, size, scale_factor, mode, align_corners)
+import torch
+import torch.nn.functional as fn
+from timm.models.vision_transformer import VisionTransformer
+from torch import Tensor, nn
+from torch.nn import init
+
 
 def position_embedding(embed_dim: int, pos: Tensor) -> Tensor:
-    """Compute the 1D sine/cosine position embedding.
+    """
+    Compute the 1D sine/cosine position embedding.
 
     Args:
         embed_dim: Output dimension D for each position. Must be even.
@@ -47,39 +21,46 @@ def position_embedding(embed_dim: int, pos: Tensor) -> Tensor:
         Position embeddings of size (M, D).
 
     Raises:
-        AssertionError: If *embed_dim* is not even.
+        ValueError: If embed_dim is not even.
+
     """
-    assert embed_dim % 2 == 0
+    if embed_dim % 2 != 0:
+        msg = "embed_dim must be even"
+        raise ValueError(msg)
+
     omega = torch.arange(embed_dim // 2, dtype=torch.float32, device=pos.device)
     omega /= embed_dim / 2.0
     omega = 1.0 / 10000**omega  # (D/2,)
 
     pos = pos.reshape(-1)  # (M,)
-    out = torch.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
+    out = torch.einsum("m,d->md", pos, omega)  # (M, D/2), outer product
 
     emb_sin = torch.sin(out)  # (M, D/2)
     emb_cos = torch.cos(out)  # (M, D/2)
 
-    emb = torch.cat([emb_sin, emb_cos], dim=1)  # (M, D)
-    return emb
+    return torch.cat([emb_sin, emb_cos], dim=1)
 
 
+def dofa_encoder_base() -> dict[str, Tensor]:
+    """Load DOFA encoder base model."""
+    url: str = "https://hf.co/earthflow/DOFA/resolve/main/dofav2_vit_base_e150.pth"
+    return torch.hub.load_state_dict_from_url(
+        url,
+        progress=True,
+        map_location="cpu",
+        weights_only=True,
+    )
 
-def dofa_encoder_base(pretrained: bool = True, *args: Any, **kwargs: Any):
-    url: str = "https://huggingface.co/XShadow/DOFA/resolve/main/DOFA_ViT_base_e100.pth"
-    model_dict = torch.hub.load_state_dict_from_url(url, progress=True, map_location='cpu')
-    del model_dict["mask_token"]
-    del model_dict["norm.weight"], model_dict["norm.bias"]
-    del model_dict["projector.weight"], model_dict["projector.bias"]
-    return model_dict
 
-def dofa_encoder_large(pretrained: bool = True, *args: Any, **kwargs: Any):
-    url: str = "https://huggingface.co/XShadow/DOFA/resolve/main/DOFA_ViT_large_e100.pth"
-    model_dict = torch.hub.load_state_dict_from_url(url, progress=True, map_location='cpu')
-    del model_dict["mask_token"]
-    del model_dict["norm.weight"], model_dict["norm.bias"]
-    del model_dict["projector.weight"], model_dict["projector.bias"]
-    return model_dict
+def dofa_encoder_large() -> dict[str, Tensor]:
+    """Load DOFA encoder large model."""
+    url: str = "https://hf.co/earthflow/DOFA/resolve/main/dofav2_vit_large_e150.pth"
+    return torch.hub.load_state_dict_from_url(
+        url,
+        progress=True,
+        map_location="cpu",
+        weights_only=True,
+    )
 
 
 class TransformerWeightGenerator(nn.Module):
@@ -93,56 +74,65 @@ class TransformerWeightGenerator(nn.Module):
         num_heads: int = 4,
         num_layers: int = 1,
     ) -> None:
-        """Initialize a new TransformerWeightGenerator instance.
+        """
+        Initialize a new TransformerWeightGenerator instance.
 
         Args:
             input_dim: Input dimensions.
             output_dim: Output dimensions.
             embed_dim: Embedding dimensions.
-            num_heads: Number of heads.
-            num_layers: Number of layers.
+            num_heads: Number of attention heads.
+            num_layers: Number of transformer layers.
+
         """
         super().__init__()
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=input_dim,
             nhead=num_heads,
-            activation='gelu',
+            activation="gelu",
             norm_first=False,
             batch_first=False,
-            dropout=False,
+            dropout=0.0,  # No dropout for better performance
         )
         self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_layers, enable_nested_tensor=False
+            encoder_layer,
+            num_layers=num_layers,
+            enable_nested_tensor=False,
         )
 
-        # Linear layer to map transformer output to desired weight shape
+        # Linear layers for weight and bias generation
         self.fc_weight = nn.Linear(input_dim, output_dim)
         self.fc_bias = nn.Linear(input_dim, embed_dim)
+
+        # Learnable tokens
         self.wt_num = 128
         self.weight_tokens = nn.Parameter(torch.empty([self.wt_num, input_dim]))
         self.bias_token = nn.Parameter(torch.empty([1, input_dim]))
 
-        # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is
-        # too big (2.)
+        # Initialize with normal distribution
         torch.nn.init.normal_(self.weight_tokens, std=0.02)
         torch.nn.init.normal_(self.bias_token, std=0.02)
 
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        """Forward pass of the model.
+        """
+        Forward pass of the model.
 
         Args:
-            x: Input mini-batch of size (seq_len, batch, input_dim).
+            x: Input position embeddings of shape (seq_len, batch, input_dim).
 
         Returns:
-            Weight and bias.
+            Tuple of (weights, bias).
+
         """
         pos_wave = x
         x = torch.cat([self.weight_tokens, pos_wave], dim=0)
         x = torch.cat([x, self.bias_token], dim=0)
+
         transformer_output = self.transformer_encoder(x)
         weights = self.fc_weight(transformer_output[self.wt_num : -1] + pos_wave)
-        # Using the last output to generate bias
         bias = self.fc_bias(transformer_output[-1])
+
         return weights, bias
 
 
@@ -150,10 +140,12 @@ class FCResLayer(nn.Module):
     """Fully-connected residual layer."""
 
     def __init__(self, linear_size: int = 128) -> None:
-        """Initialize a new FCResLayer instance.
+        """
+        Initialize a new FCResLayer instance.
 
         Args:
-            linear_size: Size of linear layer.
+            linear_size: Size of linear layers.
+
         """
         super().__init__()
         self.l_size = linear_size
@@ -163,13 +155,15 @@ class FCResLayer(nn.Module):
         self.w2 = nn.Linear(self.l_size, self.l_size)
 
     def forward(self, x: Tensor) -> Tensor:
-        """Forward pass of the model.
+        """
+        Forward pass with residual connection.
 
         Args:
-            x: Input mini-batch.
+            x: Input tensor.
 
         Returns:
-            Output of the model.
+            Output tensor with residual connection.
+
         """
         y = self.w1(x)
         y = self.nonlin1(y)
@@ -183,114 +177,169 @@ class DOFAEmbedding(nn.Module):
     """Dynamic One-For-All (DOFA) embedding."""
 
     def __init__(
-        self, dynamic_embed_dim: int, kernel_size: int = 3, embed_dim: int = 1024
+        self,
+        wv_planes: int,
+        dynamic_embed_dim: int = 128,
+        kernel_size: int = 14,
+        embed_dim: int = 768,
+        *,
+        convert_patch_14_to_16: bool = False,
     ) -> None:
-        """Initialize a new DOFAEmbedding instance.
+        """
+        Initialize a new DOFAEmbedding instance.
 
         Args:
+            wv_planes: Number of wavelength planes.
             dynamic_embed_dim: Dimensions of dynamic weight generator.
-            kernel_size: Kernel size of the depth-wise convolution.
-            embed_dim: Embedding dimensions.
+            kernel_size: Kernel size of the convolution (14 for v2).
+            embed_dim: Output embedding dimensions.
+            convert_patch_14_to_16: If True, convert patch size from 14 to 16.
+
         """
         super().__init__()
+        self.wv_planes = wv_planes
         self.dynamic_embed_dim = dynamic_embed_dim
         self.kernel_size = kernel_size
         self.embed_dim = embed_dim
+        self.convert_patch_14_to_16 = convert_patch_14_to_16
         self._num_kernel = self.kernel_size * self.kernel_size * self.embed_dim
         self.patch_size = (kernel_size, kernel_size)
-        self.num_patches = -1
 
         self.weight_generator = TransformerWeightGenerator(
-            dynamic_embed_dim, self._num_kernel, embed_dim
+            wv_planes,
+            self._num_kernel,
+            embed_dim,
         )
         self.scaler = 0.01
 
-        self.fclayer = FCResLayer(dynamic_embed_dim)
+        self.fclayer = FCResLayer(wv_planes)
 
         self._init_weights()
 
-    def _init_weight(self, m: object) -> None:
-        """Initialize weights of a single layer.
-
-        Args:
-            m: A single layer.
-        """
+    def _init_weight(self, m: nn.Module) -> None:
+        """Initialize weights of a single layer."""
         if isinstance(m, nn.Linear):
             init.xavier_uniform_(m.weight)
-            m.bias.data.fill_(0.01)
+            if m.bias is not None:
+                m.bias.data.fill_(0.01)
 
     def _init_weights(self) -> None:
-        """Initialize weights of all layers."""
+        """Initialize all weights in the module."""
         self.weight_generator.apply(self._init_weight)
         self.fclayer.apply(self._init_weight)
 
     def forward(self, x: Tensor, wavelengths: Tensor) -> tuple[Tensor, Tensor]:
-        """Forward pass of the model.
+        """
+        Forward pass of the embedding layer.
 
         Args:
-            x: Input mini-batch.
+            x: Input image tensor of shape [B, C, H, W].
             wavelengths: Wavelengths of each spectral band (μm).
 
-        Return:
-            Output mini-batch and wavelengths.
+        Returns:
+            Tuple of (embedded features [B, L, D], processed wavelengths).
+
         """
         inplanes = wavelengths.size(0)
-        # wv_feats: 9,128 -> 9, 3x3x3
+
+        # Generate position embeddings from wavelengths
         waves = position_embedding(self.dynamic_embed_dim, wavelengths * 1000)
         waves = self.fclayer(waves)
-        weight, bias = self.weight_generator(waves)  # 3x3x3
 
-        dynamic_weight = weight.view(inplanes, self.kernel_size, self.kernel_size, self.embed_dim)
-        dynamic_weight = dynamic_weight.permute([3,0,1,2])
-        
+        # Generate dynamic weights and bias
+        weight, bias = self.weight_generator(waves)
+
+        # Reshape weights for convolution
+        dynamic_weight = weight.view(
+            inplanes,
+            self.kernel_size,
+            self.kernel_size,
+            self.embed_dim,
+        )
+        dynamic_weight = dynamic_weight.permute([3, 0, 1, 2])
+
         if bias is not None:
             bias = bias.view([self.embed_dim]) * self.scaler
 
         weights = dynamic_weight * self.scaler
 
-        dynamic_out = F.conv2d(
-            x, weights, bias=bias, stride=self.kernel_size, padding=1, dilation=1
+        # Handle patch size conversion if needed
+        if self.convert_patch_14_to_16:
+            _kernel_size = 14
+            if self.kernel_size != _kernel_size:
+                msg = f"convert_patch_14_to_16 works with kernel_size={_kernel_size}"
+                raise ValueError(msg)
+
+            weights = fn.interpolate(
+                weights,
+                size=(16, 16),
+                mode="bicubic",
+                align_corners=False,
+            )
+            stride = 16
+        else:
+            stride = self.kernel_size
+
+        dynamic_out = fn.conv2d(
+            x,
+            weights,
+            bias=bias,
+            stride=stride,
+            padding=1,
+            dilation=1,
         )
 
-        x = dynamic_out
-        x = x.flatten(2).transpose(1, 2)
-        
+        x = dynamic_out.flatten(2).transpose(1, 2)
+
         return x, waves
 
 
 class DOFA(nn.Module):
     """
-    Dynamic One-For-All (DOFA) Encoder.
+    Dynamic One-For-All (DOFA) v2 Encoder with improved architecture.
 
-    Reference implementation:
+    This version uses patch size 14 and integrates with timm's VisionTransformer
+    for better performance and standardization.
 
+    References:
+    * https://github.com/zhu-xlab/DOFA
     * https://github.com/microsoft/torchgeo/blob/main/torchgeo/models/dofa.py
-    * https://github.com/zhu-xlab/DOFA/blob/master/downstream_tasks/segmentation/models/dofa_vit.py
-    
+
     """
-    def __init__(self,
-                 encoder_name: str = 'dofa_base',
-                 pretrained: bool = True,
-                 img_size: tuple = (224, 224),
-                 wavelengths: list[float] = [0.665, 0.549, 0.481],
-                 patch_size: int = 16,
-                 embed_dim: int = 768,
-                 num_heads: int = 12,
-                 depth: int = 12,
-                 mlp_ratio: int = 4,
-                 qkv_bias: bool = True,
-                 drop_rate: float = 0.0,
-                 attn_drop_rate: float = 0.0,
-                 drop_path_rate: float = 0.0,
-                 pre_norm: bool = False,
-                 final_norm: bool = False,
-                 interpolate_mode: str ='bicubic',
-                 norm_layer: type[nn.Module] = partial(nn.LayerNorm, eps=1e-6),
-                 out_layers: int | list[int] = -1,
-                 ):
+
+    def __init__(  # noqa: PLR0913
+        self,
+        encoder_name: str = "dofa_base",
+        img_size: int | tuple[int, int] = 224,
+        patch_size: int = 14,
+        embed_dim: int = 768,
+        num_heads: int = 12,
+        depth: int = 12,
+        mlp_ratio: float = 4.0,
+        drop_rate: float = 0.0,
+        attn_drop_rate: float = 0.0,
+        drop_path_rate: float = 0.1,
+        interpolate_mode: str = "bicubic",
+        out_layers: int | list[int] = -1,
+        *,
+        pretrained: bool = True,
+        qkv_bias: bool = True,
+        init_values: float = 1e-5,
+        dynamic_img_size: bool = True,
+        final_norm: bool = True,
+        convert_patch_14_to_16: bool = False,
+    ) -> None:
+        """Initialize DOFAv2 Encoder."""
+        super().__init__()
+
         self.encoder_name = encoder_name
         self.pretrained = pretrained
+
+        # Handle image size
+        if isinstance(img_size, int):
+            img_size = (img_size, img_size)
         self.img_size = img_size
+
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -300,147 +349,322 @@ class DOFA(nn.Module):
         self.drop_rate = drop_rate
         self.drop_path_rate = drop_path_rate
         self.attn_drop_rate = attn_drop_rate
-        self.wavelengths = wavelengths
-        self.pre_norm = pre_norm
         self.final_norm = final_norm
-        self.out_layers = out_layers
         self.interpolate_mode = interpolate_mode
-        
+        self.dynamic_img_size = dynamic_img_size
+        self.convert_patch_14_to_16 = convert_patch_14_to_16
+
+        # Parse output layers
         if isinstance(out_layers, int):
             if out_layers == -1:
-                out_layers= depth - 1
+                out_layers = depth - 1
             self.out_layers = [out_layers]
-        elif isinstance(out_layers, list) or isinstance(out_layers, tuple):
-            self.out_layers = out_layers
+        elif isinstance(out_layers, (list, tuple)):
+            self.out_layers = list(out_layers)
         else:
-            raise TypeError('out_indices must be type of int, list or tuple')
+            msg = "out_layers must be type of int, list or tuple"
+            raise TypeError(msg)
 
-        super().__init__()
-        
-        self.patch_embed = DOFAEmbedding(dynamic_embed_dim=128, kernel_size=16, embed_dim=self.embed_dim)
-        self.num_patches = (self.img_size[0] // patch_size) ** 2
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches + 1, self.embed_dim))
-        self.drop_after_pos = nn.Dropout(p=self.drop_rate)
-        
-        self.blocks = nn.ModuleList([Block(self.embed_dim, 
-                                           self.num_heads, 
-                                           self.mlp_ratio, 
-                                           self.qkv_bias, 
-                                           norm_layer=norm_layer) for i in range(self.depth)])
+        # Adjust output layers based on model size
+        if encoder_name == "dofa_large" and self.out_layers == [
+            11,
+        ]:  # Default last layer
+            self.out_layers = [21]  # v2 large has different indices
+
+        # Create patch embedding layer
+        self.patch_embed = DOFAEmbedding(
+            wv_planes=128,
+            dynamic_embed_dim=128,
+            kernel_size=14,
+            embed_dim=self.embed_dim,
+            convert_patch_14_to_16=self.convert_patch_14_to_16,
+        )
+
+        # Calculate number of patches
+        effective_patch_size = 16 if convert_patch_14_to_16 else 14
+        self.num_patches = (self.img_size[0] // effective_patch_size) ** 2
+
+        # Create VisionTransformer model from timm
+        model_args = {
+            "img_size": self.img_size,
+            "patch_size": effective_patch_size,
+            "embed_dim": self.embed_dim,
+            "depth": self.depth,
+            "num_heads": self.num_heads,
+            "mlp_ratio": self.mlp_ratio,
+            "qkv_bias": self.qkv_bias,
+            "drop_rate": self.drop_rate,
+            "attn_drop_rate": self.attn_drop_rate,
+            "drop_path_rate": self.drop_path_rate,
+            "init_values": init_values,
+            "num_classes": 0,
+            "dynamic_img_size": self.dynamic_img_size,
+        }
+        self.model = VisionTransformer(**model_args)
+
+        # Remove the default patch embedding projection
+        del self.model.patch_embed.proj
+
+        # Final normalization layer
+        self.norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
+
+        # Initialize weights
         self.init_weights()
-    
-    def init_weights(self):
+
+    def init_weights(self) -> None:
+        """Initialize or load pretrained weights."""
         if self.pretrained:
-            # print(f"Loading pretrained weights for {self.encoder_name}")
-            if self.encoder_name == 'dofa_base':
+            if self.encoder_name == "dofa_base":
                 model_dict = dofa_encoder_base()
-            elif self.encoder_name == 'dofa_large':
+            elif self.encoder_name == "dofa_large":
                 model_dict = dofa_encoder_large()
-            
-            if 'pos_embed' in model_dict.keys():
-                if self.pos_embed.shape != model_dict['pos_embed'].shape:
-                    # print(f"Resize the pos_embed shape from {model_dict['pos_embed'].shape} to {self.pos_embed.shape}")
-                    h, w = self.img_size
-                    pos_size = int(math.sqrt(model_dict['pos_embed'].shape[1] - 1))
-                    model_dict['pos_embed'] = self.resize_pos_embed(model_dict['pos_embed'], 
-                                                                    (h // self.patch_size, w // self.patch_size), 
-                                                                    (pos_size, pos_size), self.interpolate_mode)
-            missing_keys, unexpected_keys = self.load_state_dict(model_dict, strict=False)
-            assert not missing_keys
-            assert not unexpected_keys
-        
-    def _pos_embeding(self, patched_img, hw_shape, pos_embed):
-        """Positioning embeding method.
-
-        Resize the pos_embed, if the input image size doesn't match
-            the training size.
-        Args:
-            patched_img (torch.Tensor): The patched image, it should be
-                shape of [B, L1, C].
-            hw_shape (tuple): The downsampled image resolution.
-            pos_embed (torch.Tensor): The pos_embed weighs, it should be
-                shape of [B, L2, c].
-        Return:
-            torch.Tensor: The pos encoded image feature.
-        """
-        assert patched_img.ndim == 3 and pos_embed.ndim == 3, \
-            'the shapes of patched_img and pos_embed must be [B, L, C]'
-        x_len, pos_len = patched_img.shape[1], pos_embed.shape[1]
-        if x_len != pos_len:
-            if pos_len == (self.img_size[0] // self.patch_size) * (
-                    self.img_size[1] // self.patch_size) + 1:
-                pos_h = self.img_size[0] // self.patch_size
-                pos_w = self.img_size[1] // self.patch_size
             else:
-                raise ValueError(
-                    'Unexpected shape of pos_embed, got {}.'.format(
-                        pos_embed.shape))
-            pos_embed = self.resize_pos_embed(pos_embed, hw_shape,
-                                            (pos_h, pos_w),
-                                            self.interpolate_mode)
-        return self.drop_after_pos(patched_img + pos_embed)
-        
-    @staticmethod
-    def resize_pos_embed(pos_embed, input_shpae, pos_shape, mode):
-        """Resize pos_embed weights.
+                msg = f"Unknown encoder name: {self.encoder_name}"
+                raise ValueError(msg)
 
-        Resize pos_embed using bicubic interpolate method.
-        Args:
-            pos_embed (torch.Tensor): Position embedding weights.
-            input_shpae (tuple): Tuple for (downsampled input image height,
-                downsampled input image width).
-            pos_shape (tuple): The resolution of downsampled origin training
-                image.
-            mode (str): Algorithm used for upsampling:
-                ``'nearest'`` | ``'linear'`` | ``'bilinear'`` | ``'bicubic'`` |
-                ``'trilinear'``. Default: ``'nearest'``
-        Return:
-            torch.Tensor: The resized pos_embed of shape [B, L_new, C]
+            # Handle position embedding size mismatch
+            if (
+                self.img_size != (224, 224)
+                and "model.pos_embed" in model_dict
+                and self.model.pos_embed.shape != model_dict["model.pos_embed"].shape
+            ):
+                h, w = self.img_size
+                effective_patch_size = 16 if self.convert_patch_14_to_16 else 14
+                pos_size = int(math.sqrt(model_dict["model.pos_embed"].shape[1] - 1))
+                model_dict["model.pos_embed"] = self._resize_pos_embed(
+                    model_dict["model.pos_embed"],
+                    (h // effective_patch_size, w // effective_patch_size),
+                    (pos_size, pos_size),
+                    self.interpolate_mode,
+                )
+
+            # Load state dict
+            missing_keys, unexpected_keys = self.load_state_dict(
+                model_dict,
+                strict=True,
+            )
+
+            # Allow certain missing keys for encoder-only usage
+            allowed_missing = {
+                "norm.weight",
+                "norm.bias",
+                "fc_norm.weight",
+                "fc_norm.bias",
+                "head.weight",
+                "head.bias",
+            }
+            actual_missing = set(missing_keys) - allowed_missing
+
+            if actual_missing:
+                msg = f"Missing required keys in state dict: {actual_missing}"
+                raise RuntimeError(msg)
+            if unexpected_keys:
+                msg = f"Unexpected keys in state dict: {unexpected_keys}"
+                raise RuntimeError(msg)
+
+    @staticmethod
+    def _resize_pos_embed(
+        pos_embed: Tensor,
+        input_shape: tuple[int, int],
+        pos_shape: tuple[int, int],
+        mode: str,
+    ) -> Tensor:
         """
-        assert pos_embed.ndim == 3, 'shape of pos_embed must be [B, L, C]'
+        Resize position embeddings.
+
+        Args:
+            pos_embed: Position embedding weights [B, L, C].
+            input_shape: Target shape (H, W).
+            pos_shape: Original shape (H, W).
+            mode: Interpolation mode.
+
+        Returns:
+            Resized position embeddings.
+
+        """
+        expected_ndim = 3
+        if pos_embed.ndim != expected_ndim:
+            msg = f"pos_embed must have shape [B, L, C], but got {pos_embed.ndim}"
+            raise ValueError(msg)
+
         pos_h, pos_w = pos_shape
         cls_token_weight = pos_embed[:, 0]
-        pos_embed_weight = pos_embed[:, (-1 * pos_h * pos_w):]
+        pos_embed_weight = pos_embed[:, (-1 * pos_h * pos_w) :]
+
         pos_embed_weight = pos_embed_weight.reshape(
-            1, pos_h, pos_w, pos_embed.shape[2]).permute(0, 3, 1, 2)
-        pos_embed_weight = resize(
-            pos_embed_weight, size=input_shpae, align_corners=False, mode=mode)
+            1,
+            pos_h,
+            pos_w,
+            pos_embed.shape[2],
+        ).permute(0, 3, 1, 2)
+
+        pos_embed_weight = fn.interpolate(
+            pos_embed_weight,
+            size=input_shape,
+            mode=mode,
+            align_corners=False,
+        )
+
         cls_token_weight = cls_token_weight.unsqueeze(1)
         pos_embed_weight = torch.flatten(pos_embed_weight, 2).transpose(1, 2)
-        pos_embed = torch.cat((cls_token_weight, pos_embed_weight), dim=1)
-        return pos_embed
-        
-    def forward(self, x: Tensor):
-        B = x.shape[0]
-        if self.wavelengths is None:
-            raise ValueError("Wavelengths must be provided")
-        wavelist = torch.tensor(self.wavelengths, device=x.device).float()
-        self.waves = wavelist
-        
-        x, _ = self.patch_embed(x, self.waves)
-        hw = self.img_size[0] // self.patch_embed.kernel_size
-        hw_shape = (hw, hw)
-        cls_tokens = self.cls_token.expand(B, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
-        x = self._pos_embeding(x, hw_shape, self.pos_embed)
-        partial_norm = partial(nn.LayerNorm, eps=1e-6)
-        pre_norm = partial_norm(self.embed_dim)
-        final_norm = partial_norm(self.embed_dim)
-        
-        if self.pre_norm:
-            x = pre_norm(x)
-        outs = []
-        
-        for i, blk in enumerate(self.blocks):
+
+        return torch.cat((cls_token_weight, pos_embed_weight), dim=1)
+
+    def forward_features(self, x: Tensor, wavelengths: Tensor) -> list[Tensor]:
+        """
+        Forward pass through the encoder, extracting features.
+
+        Args:
+            x: Input image tensor of shape [B, C, H, W].
+            wavelengths: Wavelengths of each spectral band (μm).
+
+        Returns:
+            List of feature maps from specified layers.
+
+        """
+        expected_ndim = 2
+        if wavelengths.dim() == expected_ndim:
+            # If all samples in batch have same wavelengths, use first sample
+            if torch.allclose(wavelengths, wavelengths[0:1].expand_as(wavelengths)):
+                wavelengths = wavelengths[0]  # Shape: [C]
+            else:
+                msg = "DOFA cannot handle different wavelengths within a batch"
+                raise ValueError(msg)
+
+        # Embed patches using dynamic convolution
+        x, _ = self.patch_embed(x, wavelengths)
+
+        batch_size, length, channels = x.shape
+        hw = int(math.sqrt(length))
+
+        # Reshape for dynamic image size if enabled
+        if self.dynamic_img_size:
+            x = x.view(batch_size, hw, hw, channels)
+
+        # Add position embeddings
+        x = self.model._pos_embed(x)  # noqa: SLF001
+
+        # Apply patch dropout if in training mode
+        x = self.model.patch_drop(x)
+
+        # Pre-normalization if exists
+        x = self.model.norm_pre(x)
+
+        # Collect output features
+        out_features = []
+
+        # Apply transformer blocks
+        for i, blk in enumerate(self.model.blocks):
             x = blk(x)
-            if i == len(self.blocks) - 1:
-                if self.final_norm:
-                    x = final_norm(x)
             if i in self.out_layers:
-                out = x[:, 1:]
-                B, _, C = out.shape
-                out = out.reshape(B, hw_shape[0], hw_shape[1], C).permute(0, 3, 1, 2).contiguous()
-                outs.append(out)
-        
-        return outs
+                # Extract features without class token
+                feat = x[:, 1:] if self.model.has_class_token else x
+
+                # Reshape to spatial format
+                batch_size, length, channels = feat.shape
+                feat = (
+                    feat.reshape(batch_size, hw, hw, channels)
+                    .permute(0, 3, 1, 2)
+                    .contiguous()
+                )
+                out_features.append(feat)
+
+        # Apply final normalization
+        if self.final_norm:
+            x = self.model.norm(x)
+
+            # If last layer is requested and not already added
+            if (self.depth - 1) in self.out_layers and len(out_features) < len(
+                self.out_layers,
+            ):
+                feat = x[:, 1:] if self.model.has_class_token else x
+                batch_size, length, channels = feat.shape
+                feat = (
+                    feat.reshape(batch_size, hw, hw, channels)
+                    .permute(0, 3, 1, 2)
+                    .contiguous()
+                )
+                out_features.append(feat)
+
+        return out_features
+
+    def forward(self, x: Tensor, wavelengths: Tensor) -> list[Tensor]:
+        """
+        Forward pass of the model.
+
+        Args:
+            x: Input image tensor of shape [B, C, H, W].
+            wavelengths: Wavelengths of each spectral band (μm).
+
+        Returns:
+            List of feature maps from specified layers.
+
+        """
+        return self.forward_features(x, wavelengths)
+
+
+# Factory functions for easy model creation
+def create_dofa_base(
+    img_size: int | tuple[int, int] = 224,
+    out_layers: int | list[int] | None = None,
+    *,
+    pretrained: bool = True,
+    **kwargs: object,
+) -> DOFA:
+    """
+    Create DOFA base model.
+
+    Args:
+        img_size: Input image size.
+        out_layers: Layers to extract features from.
+        pretrained: Whether to load pretrained weights.
+        **kwargs: Additional arguments for DOFA.
+
+    Returns:
+        DOFA base model instance.
+
+    """
+    return DOFA(
+        encoder_name="dofa_base",
+        img_size=img_size,
+        patch_size=14,
+        embed_dim=768,
+        num_heads=12,
+        depth=12,
+        out_layers=out_layers or [4, 6, 10, 11],
+        pretrained=pretrained,
+        **kwargs,
+    )
+
+
+def create_dofa_large(
+    img_size: int | tuple[int, int] = 224,
+    out_layers: int | list[int] | None = None,
+    *,
+    pretrained: bool = True,
+    **kwargs: object,
+) -> DOFA:
+    """
+    Create DOFA large model.
+
+    Args:
+        img_size: Input image size.
+        out_layers: Layers to extract features from.
+        pretrained: Whether to load pretrained weights.
+        **kwargs: Additional arguments for DOFA.
+
+    Returns:
+        DOFA large model instance.
+
+    """
+    return DOFA(
+        encoder_name="dofa_large",
+        img_size=img_size,
+        patch_size=14,
+        embed_dim=1024,
+        num_heads=16,
+        depth=24,
+        out_layers=out_layers or [5, 9, 15, 21],
+        pretrained=pretrained,
+        **kwargs,
+    )
