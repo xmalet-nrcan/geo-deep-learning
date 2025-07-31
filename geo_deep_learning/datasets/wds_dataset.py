@@ -3,7 +3,6 @@
 import json
 import logging
 import math
-from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,14 +11,131 @@ import torch
 import webdataset as wds
 import yaml
 from pytorch_lightning.utilities import rank_zero_only
-from torch.utils.data import IterableDataset
 
 from geo_deep_learning.tools.utils import normalization, standardization
 
 logger = logging.getLogger(__name__)
 
 
-class ShardedDataset(IterableDataset):
+@rank_zero_only
+def log_dataset(
+    sensor_name: str,
+    split: str,
+    shard_count: int | None = None,
+    patch_count: int | None = None,
+    *,
+    valid: bool = False,
+) -> None:
+    """Log dataset(only on rank 0)."""
+    if valid:
+        logger.info(
+            "Created dataset for %s %s split (%s shards) with %s patches",
+            sensor_name,
+            split,
+            shard_count,
+            patch_count,
+        )
+    else:
+        logger.warning(
+            "No shards found for %s %s split",
+            sensor_name,
+            split,
+        )
+
+
+def load_sensor_configs(config_path: str) -> dict[str, dict[str, str]]:
+    """Load sensor configurations from a YAML file."""
+    with Path(config_path).open() as f:
+        return yaml.safe_load(f)
+
+
+def create_shard_split_paths(
+    manifest_path: str,
+    split: str,
+    parent_dir: str | None = None,
+) -> tuple[list[str], int]:
+    """
+    Create shard split paths from a manifest file.
+
+    Args:
+        manifest_path: Path to the manifest file
+        split: Split name (e.g., "trn", "val", "tst")
+        parent_dir: Optional parent directory for the split shards
+
+    Returns:
+        Tuple of list of shard paths for the specified split and patch count
+
+    """
+    if parent_dir is None:
+        shard_parent_path = Path(manifest_path).parent / split
+    else:
+        shard_parent_path = Path(parent_dir) / split
+    with Path(manifest_path).open() as f:
+        data = json.load(f)
+    shard_data = data["shards"][split]
+    patch_count = data["statistics"]["patch_counts"][split]
+    return (
+        [(shard_parent_path / item["path"]).as_posix() for item in shard_data],
+        patch_count,
+    )
+
+
+def create_sensor_datasets(
+    sensor_configs_path: str,
+    **common_kwargs: object,
+) -> dict[str, Any]:
+    """
+    Create multiple sensor datasets from configuration.
+
+    Args:
+        sensor_configs_path: Path to the sensor configurations YAML file
+        **common_kwargs: Common arguments for all datasets
+
+    Returns:
+        Dict mapping sensor_name -> MultiSensorWebDataset
+
+    """
+    sensor_configs = load_sensor_configs(sensor_configs_path)
+    datasets = {}
+    for sensor_name, config in sensor_configs.items():
+        try:
+            datasets[sensor_name] = {}
+            for split in ["trn", "val", "tst"]:
+                shard_paths, patch_count = create_shard_split_paths(
+                    manifest_path=config["manifest_path"],
+                    split=split,
+                    parent_dir=config["parent_dir"],
+                )
+                if len(shard_paths) == 0:
+                    log_dataset(sensor_name, split, valid=False)
+                    continue
+                datasets[sensor_name][split] = ShardedDataset(
+                    sensor_name=sensor_name,
+                    shard_paths=shard_paths,
+                    patch_count=patch_count,
+                    normalization_stats_path=config["stats_path"],
+                    split=split,
+                    **common_kwargs,
+                )
+
+                log_dataset(
+                    sensor_name,
+                    split,
+                    len(shard_paths),
+                    patch_count,
+                    valid=True,
+                )
+        except Exception:
+            logger.exception(
+                "Failed to create dataset for %s %s split",
+                sensor_name,
+                split,
+            )
+
+    return datasets
+
+
+class ShardedDataset:
     """
     High-performance WebDataset for multi-sensor Earth observation data.
 
@@ -36,7 +152,6 @@ class ShardedDataset(IterableDataset):
         normalization_stats_path: str,
         model_type: str = "clay",  # "clay", "dofa", "unified"
         split: str = "trn",
-        transforms: Callable | None = None,
         batch_size: int = 16,
         epoch_size: int | None = None,
         wavelength_keys: list[str] | None = None,
@@ -51,7 +166,6 @@ class ShardedDataset(IterableDataset):
             normalization_stats_path: Path to normalization statistics JSON
             model_type: Output format - "clay", "dofa", or "unified"
             split: Data split - "trn", "val", "tst"
-            transforms: Optional transforms to apply to images
             batch_size: Batch size
             epoch_size: Size of epoch (for infinite streaming)
             wavelength_keys: Optional list of metadata keys for wavelengths
@@ -63,10 +177,9 @@ class ShardedDataset(IterableDataset):
         self.shard_paths = shard_paths
         self.model_type = model_type
         self.split = split
-        self.transforms = transforms
         self.batch_size = batch_size
         self.epoch_size = epoch_size
-        self.shuffle_buffer = 1000
+        self.shuffle_buffer = 50000
         self.patch_count = patch_count
         self.norm_stats = self._load_normalization_stats(normalization_stats_path)
         self.wavelength_keys = wavelength_keys
@@ -81,56 +194,12 @@ class ShardedDataset(IterableDataset):
         stats = data["statistics"][self.sensor_name]
 
         return {
-            "mean": torch.tensor(stats["mean"], dtype=torch.float32),
-            "std": torch.tensor(stats["std"], dtype=torch.float32),
+            "mean": torch.tensor(stats["mean"], dtype=torch.float32).view(-1, 1, 1),
+            "std": torch.tensor(stats["std"], dtype=torch.float32).view(-1, 1, 1),
             "band_count": stats["band_count"],
             "patch_count": stats["patch_count"],
             "dtype": stats["dtype"],
         }
-
-    def _create_webdataset_pipeline(self) -> wds.WebDataset:
-        """Create optimized WebDataset pipeline for HPC."""
-        shard_list = sorted(self.shard_paths)
-        if self.split == "trn" and torch.distributed.is_initialized():
-            world_size = torch.distributed.get_world_size()
-            rank = torch.distributed.get_rank()
-            rank_shards = shard_list[rank::world_size]
-            logger.debug(
-                "[Rank %d/%d] %s %s: Assigned %d/%d shards. First shard: %s",
-                rank,
-                world_size,
-                self.sensor_name,
-                self.split,
-                len(rank_shards),
-                len(shard_list),
-                rank_shards[0] if rank_shards else "None",
-            )
-
-            if not rank_shards:
-                logger.warning(
-                    "Rank %d has no shards! Consider having more shards than ranks.",
-                    rank,
-                )
-                return iter([])
-            shard_list = rank_shards
-        else:
-            logger.debug(
-                "Not using distributed training - using all %d shards",
-                len(shard_list),
-            )
-        shard_shuffle = self.shuffle_buffer if self.split == "trn" else False
-        dataset = wds.WebDataset(
-            urls=shard_list,
-            shardshuffle=shard_shuffle,
-            nodesplitter=None if self.split == "tst" else wds.split_by_node,
-            workersplitter=None if self.split == "tst" else wds.split_by_worker,
-            empty_check=False,
-        )
-        if self.split == "trn":
-            dataset = dataset.shuffle(self.shuffle_buffer)
-        dataset = dataset.decode()
-        dataset = dataset.map(self._process_sample, handler=wds.warn_and_continue)
-        return dataset.batched(self.batch_size, partial=True)
 
     def _process_sample(self, sample: dict[str, Any]) -> dict[str, Any]:
         """
@@ -151,16 +220,7 @@ class ShardedDataset(IterableDataset):
 
         # Apply sensor-specific normalization
         image = normalization(image)
-        mean = self.norm_stats["mean"].view(-1, 1, 1)
-        std = self.norm_stats["std"].view(-1, 1, 1)
-        image = standardization(image, mean, std)
-
-        # Apply transforms if provided
-        if self.transforms and self.split == "trn":
-            transform_sample = {"image": image, "mask": label}
-            transform_sample = self.transforms(transform_sample)
-            image = transform_sample["image"]
-            label = transform_sample["mask"]
+        image = standardization(image, self.norm_stats["mean"], self.norm_stats["std"])
 
         # Prepare output based on model type
         if self.model_type == "clay":
@@ -186,7 +246,7 @@ class ShardedDataset(IterableDataset):
         lon = metadata["metadata"].get("coordinates_lon", 0.0)
         latlon_tensor = self._encode_spatial(lat, lon)
         return {
-            "pixels": image,
+            "image": image,
             "mask": label,
             "platform": self.sensor_name,
             "time": time_tensor,
@@ -206,7 +266,7 @@ class ShardedDataset(IterableDataset):
         """Prepare output in DOFA format."""
         wavelengths = self._extract_wavelengths(metadata)
         return {
-            "pixels": image,
+            "image": image,
             "mask": label,
             "platform": self.sensor_name,
             "image_name": key,
@@ -224,7 +284,7 @@ class ShardedDataset(IterableDataset):
     ) -> dict[str, Any]:
         """Prepare unified output with all metadata."""
         return {
-            "pixels": image,
+            "image": image,
             "mask": label,
             "platform": self.sensor_name,
             "image_name": key,
@@ -317,127 +377,33 @@ class ShardedDataset(IterableDataset):
             logger.warning("Error extracting wavelengths: %s", e)
             return torch.tensor([0.0] * len(wavelengths_keys), dtype=torch.float32)
 
-    def __iter__(self) -> Iterator[dict[str, Any]]:
-        """Return iterator for WebDataset."""
-        if self.dataset is None:
-            self.dataset = self._create_webdataset_pipeline()
-        return iter(self.dataset)
+    def build_web_dataset(self) -> wds.WebDataset:
+        """Create optimized WebDataset pipeline for HPC."""
+        shard_list = sorted(self.shard_paths)
 
-    @staticmethod
-    def create_shard_split_paths(
-        manifest_path: str,
-        split: str,
-        parent_dir: str | None = None,
-    ) -> tuple[list[str], int]:
-        """
-        Create shard split paths from a manifest file.
-
-        Args:
-            manifest_path: Path to the manifest file
-            split: Split name (e.g., "trn", "val", "tst")
-            parent_dir: Optional parent directory for the split shards
-
-        Returns:
-            Tuple of list of shard paths for the specified split and patch count
-
-        """
-        if parent_dir is None:
-            shard_parent_path = Path(manifest_path).parent / split
-        else:
-            shard_parent_path = Path(parent_dir) / split
-        with Path(manifest_path).open() as f:
-            data = json.load(f)
-        shard_data = data["shards"][split]
-        patch_count = data["statistics"]["patch_counts"][split]
-        return (
-            [(shard_parent_path / item["path"]).as_posix() for item in shard_data],
-            patch_count,
-        )
-
-
-def load_sensor_configs(config_path: str) -> dict[str, dict[str, str]]:
-    """Load sensor configurations from a YAML file."""
-    with Path(config_path).open() as f:
-        return yaml.safe_load(f)
-
-
-@rank_zero_only
-def log_dataset(
-    sensor_name: str,
-    split: str,
-    shard_count: int | None = None,
-    patch_count: int | None = None,
-    *,
-    valid: bool = False,
-) -> None:
-    """Log dataset(only on rank 0)."""
-    if valid:
-        logger.info(
-            "Created dataset for %s %s split (%s shards) with %s patches",
-            sensor_name,
-            split,
-            shard_count,
-            patch_count,
-        )
-    else:
-        logger.warning(
-            "No shards found for %s %s split",
-            sensor_name,
-            split,
-        )
-
-
-def create_sensor_datasets(
-    sensor_configs_path: str,
-    **common_kwargs: object,
-) -> dict[str, ShardedDataset]:
-    """
-    Create multiple sensor datasets from configuration.
-
-    Args:
-        sensor_configs_path: Path to the sensor configurations YAML file
-        **common_kwargs: Common arguments for all datasets
-
-    Returns:
-        Dict mapping sensor_name -> MultiSensorWebDataset
-
-    """
-    sensor_configs = load_sensor_configs(sensor_configs_path)
-    datasets = {}
-    for sensor_name, config in sensor_configs.items():
-        try:
-            for split in ["trn", "val", "tst"]:
-                shard_paths, patch_count = ShardedDataset.create_shard_split_paths(
-                    manifest_path=config["manifest_path"],
-                    split=split,
-                    parent_dir=config["parent_dir"],
-                )
-                if sensor_name not in datasets:
-                    datasets[sensor_name] = {}
-                if len(shard_paths) == 0:
-                    log_dataset(sensor_name, split, valid=False)
-                    continue
-                datasets[sensor_name][split] = ShardedDataset(
-                    sensor_name=sensor_name,
-                    shard_paths=shard_paths,
-                    patch_count=patch_count,
-                    normalization_stats_path=config["stats_path"],
-                    split=split,
-                    **common_kwargs,
-                )
-
-                log_dataset(
-                    sensor_name,
-                    split,
-                    len(shard_paths),
-                    patch_count,
-                    valid=True,
-                )
-        except Exception:
-            logger.exception(
-                "Failed to create dataset for %s %s split",
-                sensor_name,
-                split,
+        if self.split == "trn":
+            if torch.distributed.is_initialized():
+                world_size = torch.distributed.get_world_size()
+                rank = torch.distributed.get_rank()
+                shard_list = shard_list[rank::world_size]
+            dataset = wds.WebDataset(
+                urls=shard_list,
+                shardshuffle=self.shuffle_buffer,
+                nodesplitter=wds.split_by_node,
+                workersplitter=wds.split_by_worker,
+                empty_check=False,
             )
-
-    return datasets
+            dataset = dataset.shuffle(self.shuffle_buffer)
+        else:
+            dataset = wds.WebDataset(
+                urls=shard_list,
+                shardshuffle=False,
+                nodesplitter=None if self.split == "tst" else wds.split_by_node,
+                workersplitter=wds.split_by_worker,
+                empty_check=False,
+            )
+        return (
+            dataset.decode()
+            .map(self._process_sample, handler=wds.warn_and_continue)
+            .batched(self.batch_size, partial=self.split != "trn")
+        )
