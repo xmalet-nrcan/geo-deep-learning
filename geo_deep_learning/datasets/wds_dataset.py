@@ -115,6 +115,7 @@ def create_sensor_datasets(
                     patch_count=patch_count,
                     normalization_stats_path=config["stats_path"],
                     split=split,
+                    wavelength_keys=config.get("wavelength_keys"),
                     **common_kwargs,
                 )
 
@@ -200,10 +201,14 @@ class ShardedDataset:
             data = json.load(f)
 
         stats = data["statistics"][self.sensor_name]
+        mean = (
+            torch.tensor(stats["mean"], dtype=torch.float32).div(255.0).view(-1, 1, 1)
+        )
+        std = torch.tensor(stats["std"], dtype=torch.float32).div(255.0).view(-1, 1, 1)
 
         return {
-            "mean": torch.tensor(stats["mean"], dtype=torch.float32).view(-1, 1, 1),
-            "std": torch.tensor(stats["std"], dtype=torch.float32).view(-1, 1, 1),
+            "mean": mean,
+            "std": std,
             "band_count": stats["band_count"],
             "patch_count": stats["patch_count"],
             "dtype": stats["dtype"],
