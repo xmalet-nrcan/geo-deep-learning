@@ -83,7 +83,9 @@ class MultiSensorDataModule(LightningDataModule):
         train_datasets = {}
         for sensor_name, splits in self.datasets.items():
             if "trn" in splits:
-                train_datasets[sensor_name] = splits["trn"]
+                wds_dataset = splits["trn"].build_web_dataset()
+                if wds_dataset is not None:
+                    train_datasets[sensor_name] = wds_dataset
 
         if not train_datasets:
             logger.warning("No training datasets found!")
@@ -92,13 +94,9 @@ class MultiSensorDataModule(LightningDataModule):
         if len(train_datasets) == 1:
             # Single sensor
             sensor_name = next(iter(train_datasets.keys()))
-            sensor_dataset = train_datasets[sensor_name].build_web_dataset()
+            sensor_dataset = train_datasets[sensor_name]
         else:
             # Multiple sensors
-            train_datasets = {
-                name: dataset.build_web_dataset()
-                for name, dataset in train_datasets.items()
-            }
             sensor_dataset = self._create_mixed_dataset(train_datasets)
 
         self.train_loader = WebLoader(
@@ -117,7 +115,9 @@ class MultiSensorDataModule(LightningDataModule):
         val_datasets = {}
         for sensor_name, splits in self.datasets.items():
             if "val" in splits:
-                val_datasets[sensor_name] = splits["val"]
+                wds_dataset = splits["val"].build_web_dataset()
+                if wds_dataset is not None:
+                    val_datasets[sensor_name] = wds_dataset
 
         if not val_datasets:
             logger.warning("No validation datasets found!")
@@ -126,13 +126,9 @@ class MultiSensorDataModule(LightningDataModule):
         if len(val_datasets) == 1:
             # Single sensor
             sensor_name = next(iter(val_datasets.keys()))
-            sensor_dataset = val_datasets[sensor_name].build_web_dataset()
+            sensor_dataset = val_datasets[sensor_name]
         else:
             # Multiple sensors
-            val_datasets = {
-                name: dataset.build_web_dataset()
-                for name, dataset in val_datasets.items()
-            }
             sensor_dataset = self._create_mixed_dataset(val_datasets)
 
         self.val_loader = WebLoader(
@@ -149,7 +145,9 @@ class MultiSensorDataModule(LightningDataModule):
         test_datasets = {}
         for sensor_name, splits in self.datasets.items():
             if "tst" in splits:
-                test_datasets[sensor_name] = splits["tst"]
+                wds_dataset = splits["tst"].build_web_dataset()
+                if wds_dataset is not None:
+                    test_datasets[sensor_name] = wds_dataset
 
         if not test_datasets:
             logger.info("No test datasets found - this is optional")
@@ -158,13 +156,9 @@ class MultiSensorDataModule(LightningDataModule):
         if len(test_datasets) == 1:
             # Single sensor
             sensor_name = next(iter(test_datasets.keys()))
-            sensor_dataset = test_datasets[sensor_name].build_web_dataset()
+            sensor_dataset = test_datasets[sensor_name]
         else:
             # Multiple sensors
-            test_datasets = {
-                name: dataset.build_web_dataset()
-                for name, dataset in test_datasets.items()
-            }
             sensor_dataset = self._create_mixed_dataset(test_datasets)
 
         self.test_loader = WebLoader(
