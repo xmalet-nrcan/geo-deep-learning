@@ -3,13 +3,18 @@
 # Adapted from https://github.com/facebookresearch/dinov3/
 
 import logging
+import math
 from collections.abc import Sequence
 from functools import partial
 from typing import Literal
 
 import torch
+import torch.nn.functional as fn
 import torch.nn.init
+import torch.utils.checkpoint as cp
 from torch import Tensor, nn
+
+from geo_deep_learning.models.utils import MSDeformAttn
 
 from .dinov3_layers import (
     LayerScale,
@@ -406,14 +411,674 @@ def vit_large(patch_size: int = 16, **kwargs: object) -> DinoVisionTransformer:
     )
 
 
-# if __name__ == "__main__":
-#     model = vit_large()
-#     model.init_weights()
-#     weights = ""
-#     state_dict = torch.load(weights, weights_only=True)
-#     # print(state_dict.keys())
-#     # print(model.state_dict().keys())
-#     model.load_state_dict(state_dict, strict=True)
-#     image = torch.randn(1, 3, 224, 224)
-#     output = model(image)
-#     print(output.shape)
+def drop_path(x: Tensor, drop_prob: float = 0.0, training: bool = False) -> Tensor:  # noqa: FBT001, FBT002
+    """Drop path."""
+    if drop_prob == 0.0 or not training:
+        return x
+    keep_prob = 1 - drop_prob
+    shape = (x.shape[0],) + (1,) * (
+        x.ndim - 1
+    )  # work with diff dim tensors, not just 2D ConvNets
+    random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
+    if keep_prob > 0.0:
+        random_tensor.div_(keep_prob)
+    return x * random_tensor
+
+
+class DropPath(nn.Module):
+    """Drop paths (Stochastic Depth) per sample."""
+
+    def __init__(self, drop_prob: float = 0.0) -> None:
+        """Initialize DropPath."""
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Forward pass."""
+        return drop_path(x, self.drop_prob, self.training)
+
+
+def get_reference_points(spatial_shapes: Tensor, device: str | torch.device) -> Tensor:
+    """Get reference points."""
+    reference_points_list = []
+    for _, (h_, w_) in enumerate(spatial_shapes):
+        ref_y, ref_x = torch.meshgrid(
+            torch.linspace(0.5, h_ - 0.5, h_, dtype=torch.float32, device=device),
+            torch.linspace(0.5, w_ - 0.5, w_, dtype=torch.float32, device=device),
+        )
+        ref_y = ref_y.reshape(-1)[None] / h_
+        ref_x = ref_x.reshape(-1)[None] / w_
+        ref = torch.stack((ref_x, ref_y), -1)
+        reference_points_list.append(ref)
+    reference_points = torch.cat(reference_points_list, 1)
+    return reference_points[:, :, None]
+
+
+def deform_inputs(x: Tensor, patch_size: int) -> tuple[Tensor, Tensor]:
+    """Deform inputs."""
+    bs, c, h, w = x.shape
+    spatial_shapes = torch.as_tensor(
+        [(h // 8, w // 8), (h // 16, w // 16), (h // 32, w // 32)],
+        dtype=torch.long,
+        device=x.device,
+    )
+    level_start_index = torch.cat(
+        (spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]),
+    )
+    reference_points = get_reference_points(
+        [(h // patch_size, w // patch_size)],
+        x.device,
+    )
+    deform_inputs1 = [reference_points, spatial_shapes, level_start_index]
+
+    spatial_shapes = torch.as_tensor(
+        [(h // patch_size, w // patch_size)],
+        dtype=torch.long,
+        device=x.device,
+    )
+    level_start_index = torch.cat(
+        (spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]),
+    )
+    reference_points = get_reference_points(
+        [(h // 8, w // 8), (h // 16, w // 16), (h // 32, w // 32)],
+        x.device,
+    )
+    deform_inputs2 = [reference_points, spatial_shapes, level_start_index]
+
+    return deform_inputs1, deform_inputs2
+
+
+class ConvFFN(nn.Module):
+    """ConvFFN."""
+
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: int | None = None,
+        out_features: int | None = None,
+        act_layer: nn.Module = nn.GELU,
+        drop: float = 0.0,
+    ) -> None:
+        """Initialize ConvFFN."""
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.dwconv = DWConv(hidden_features)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x: Tensor, h: int, w: int) -> Tensor:
+        """Forward pass."""
+        x = self.fc1(x)
+        x = self.dwconv(x, h, w)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        return self.drop(x)
+
+
+class DWConv(nn.Module):
+    """DWConv."""
+
+    def __init__(self, dim: int = 768) -> None:
+        """Initialize DWConv."""
+        super().__init__()
+        self.dwconv = nn.Conv2d(dim, dim, 3, 1, 1, bias=True, groups=dim)
+
+    def forward(self, x: Tensor, h: int, w: int) -> Tensor:
+        """Forward pass."""
+        b, n, c = x.shape
+        n = n // 21
+        x1 = x[:, 0 : 16 * n, :].transpose(1, 2).view(b, c, h * 2, w * 2).contiguous()
+        x2 = x[:, 16 * n : 20 * n, :].transpose(1, 2).view(b, c, h, w).contiguous()
+        x3 = x[:, 20 * n :, :].transpose(1, 2).view(b, c, h // 2, w // 2).contiguous()
+        x1 = self.dwconv(x1).flatten(2).transpose(1, 2)
+        x2 = self.dwconv(x2).flatten(2).transpose(1, 2)
+        x3 = self.dwconv(x3).flatten(2).transpose(1, 2)
+        return torch.cat([x1, x2, x3], dim=1)
+
+
+class Extractor(nn.Module):
+    """Extractor."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        dim: int,
+        num_heads: int = 6,
+        n_points: int = 4,
+        n_levels: int = 1,
+        deform_ratio: float = 1.0,
+        with_cffn: bool = True,  # noqa: FBT001, FBT002
+        cffn_ratio: float = 0.25,
+        drop: float = 0.0,
+        drop_path: float = 0.0,
+        norm_layer: nn.Module = partial(nn.LayerNorm, eps=1e-6),  # noqa: B008
+        with_cp: bool = False,  # noqa: FBT001, FBT002
+    ) -> None:
+        """Initialize Extractor."""
+        super().__init__()
+        self.query_norm = norm_layer(dim)
+        self.feat_norm = norm_layer(dim)
+        self.attn = MSDeformAttn(
+            d_model=dim,
+            n_levels=n_levels,
+            n_heads=num_heads,
+            n_points=n_points,
+            ratio=deform_ratio,
+        )
+        self.with_cffn = with_cffn
+        self.with_cp = with_cp
+        if with_cffn:
+            self.ffn = ConvFFN(
+                in_features=dim,
+                hidden_features=int(dim * cffn_ratio),
+                drop=drop,
+            )
+            self.ffn_norm = norm_layer(dim)
+            self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+    def forward(  # noqa: PLR0913
+        self,
+        query: Tensor,
+        reference_points: Tensor,
+        feat: Tensor,
+        spatial_shapes: Tensor,
+        level_start_index: Tensor,
+        h: int,
+        w: int,
+    ) -> Tensor:
+        """Forward pass."""
+
+        def _inner_forward(query: Tensor, feat: Tensor) -> Tensor:
+            attn = self.attn(
+                self.query_norm(query),
+                reference_points,
+                self.feat_norm(feat),
+                spatial_shapes,
+                level_start_index,
+                None,
+            )
+            query = query + attn
+
+            if self.with_cffn:
+                query = query + self.drop_path(self.ffn(self.ffn_norm(query), h, w))
+            return query
+
+        if self.with_cp and query.requires_grad:
+            query = cp.checkpoint(_inner_forward, query, feat)
+        else:
+            query = _inner_forward(query, feat)
+
+        return query
+
+
+class InteractionBlockWithCls(nn.Module):
+    """InteractionBlockWithCls."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        dim: int,
+        num_heads: int = 6,
+        n_points: int = 4,
+        norm_layer: nn.Module = partial(nn.LayerNorm, eps=1e-6),  # noqa: B008
+        drop: float = 0.0,
+        drop_path: float = 0.0,
+        with_cffn: bool = True,  # noqa: FBT001, FBT002
+        cffn_ratio: float = 0.25,
+        init_values: float = 0.0,  # noqa: ARG002
+        deform_ratio: float = 1.0,
+        extra_extractor: bool = False,  # noqa: FBT001, FBT002
+        with_cp: bool = False,  # noqa: FBT001, FBT002
+    ) -> None:
+        """Initialize InteractionBlockWithCls."""
+        super().__init__()
+        self.extractor = Extractor(
+            dim=dim,
+            n_levels=1,
+            num_heads=num_heads,
+            n_points=n_points,
+            norm_layer=norm_layer,
+            deform_ratio=deform_ratio,
+            with_cffn=with_cffn,
+            cffn_ratio=cffn_ratio,
+            drop=drop,
+            drop_path=drop_path,
+            with_cp=with_cp,
+        )
+        if extra_extractor:
+            self.extra_extractors = nn.Sequential(
+                *[
+                    Extractor(
+                        dim=dim,
+                        num_heads=num_heads,
+                        n_points=n_points,
+                        norm_layer=norm_layer,
+                        with_cffn=with_cffn,
+                        cffn_ratio=cffn_ratio,
+                        deform_ratio=deform_ratio,
+                        drop=drop,
+                        drop_path=drop_path,
+                        with_cp=with_cp,
+                    )
+                    for _ in range(2)
+                ],
+            )
+        else:
+            self.extra_extractors = None
+
+    def forward(  # noqa: PLR0913
+        self,
+        x: Tensor,
+        c: Tensor,
+        cls: Tensor,
+        deform_inputs1: Tensor,  # noqa: ARG002
+        deform_inputs2: Tensor,
+        h_c: int,
+        w_c: int,
+        h_toks: int,  # noqa: ARG002
+        w_toks: int,  # noqa: ARG002
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Forward pass."""
+        c = self.extractor(
+            query=c,
+            reference_points=deform_inputs2[0],
+            feat=x,
+            spatial_shapes=deform_inputs2[1],
+            level_start_index=deform_inputs2[2],
+            h=h_c,
+            w=w_c,
+        )
+        if self.extra_extractors is not None:
+            for extractor in self.extra_extractors:
+                c = extractor(
+                    query=c,
+                    reference_points=deform_inputs2[0],
+                    feat=x,
+                    spatial_shapes=deform_inputs2[1],
+                    level_start_index=deform_inputs2[2],
+                    h=h_c,
+                    w=w_c,
+                )
+        return x, c, cls
+
+
+class SpatialPriorModule(nn.Module):
+    """SpatialPriorModule."""
+
+    def __init__(
+        self,
+        inplanes: int = 64,
+        embed_dim: int = 384,
+        with_cp: bool = False,  # noqa: FBT001, FBT002
+    ) -> None:
+        """Initialize SpatialPriorModule."""
+        super().__init__()
+        self.with_cp = with_cp
+
+        self.stem = nn.Sequential(
+            *[
+                nn.Conv2d(3, inplanes, kernel_size=3, stride=2, padding=1, bias=False),
+                nn.SyncBatchNorm(inplanes),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(
+                    inplanes,
+                    inplanes,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                    bias=False,
+                ),
+                nn.SyncBatchNorm(inplanes),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(
+                    inplanes,
+                    inplanes,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                    bias=False,
+                ),
+                nn.SyncBatchNorm(inplanes),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+            ],
+        )
+        self.conv2 = nn.Sequential(
+            *[
+                nn.Conv2d(
+                    inplanes,
+                    2 * inplanes,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                    bias=False,
+                ),
+                nn.SyncBatchNorm(2 * inplanes),
+                nn.ReLU(inplace=True),
+            ],
+        )
+        self.conv3 = nn.Sequential(
+            *[
+                nn.Conv2d(
+                    2 * inplanes,
+                    4 * inplanes,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                    bias=False,
+                ),
+                nn.SyncBatchNorm(4 * inplanes),
+                nn.ReLU(inplace=True),
+            ],
+        )
+        self.conv4 = nn.Sequential(
+            *[
+                nn.Conv2d(
+                    4 * inplanes,
+                    4 * inplanes,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                    bias=False,
+                ),
+                nn.SyncBatchNorm(4 * inplanes),
+                nn.ReLU(inplace=True),
+            ],
+        )
+        self.fc1 = nn.Conv2d(
+            inplanes,
+            embed_dim,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,
+        )
+        self.fc2 = nn.Conv2d(
+            2 * inplanes,
+            embed_dim,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,
+        )
+        self.fc3 = nn.Conv2d(
+            4 * inplanes,
+            embed_dim,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,
+        )
+        self.fc4 = nn.Conv2d(
+            4 * inplanes,
+            embed_dim,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,
+        )
+
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Forward pass."""
+
+        def _inner_forward(x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+            c1 = self.stem(x)
+            c2 = self.conv2(c1)
+            c3 = self.conv3(c2)
+            c4 = self.conv4(c3)
+            c1 = self.fc1(c1)
+            c2 = self.fc2(c2)
+            c3 = self.fc3(c3)
+            c4 = self.fc4(c4)
+
+            bs, dim, _, _ = c1.shape
+            # c1 = c1.view(bs, dim, -1).transpose(1, 2)  # 4s
+            c2 = c2.view(bs, dim, -1).transpose(1, 2)  # 8s
+            c3 = c3.view(bs, dim, -1).transpose(1, 2)  # 16s
+            c4 = c4.view(bs, dim, -1).transpose(1, 2)  # 32s
+
+            return c1, c2, c3, c4
+
+        if self.with_cp and x.requires_grad:
+            outs = cp.checkpoint(_inner_forward, x)
+        else:
+            outs = _inner_forward(x)
+        return outs
+
+
+class DINOv3Adapter(nn.Module):
+    """DINOv3 Multi-Scale Adapter."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        backbone: nn.Module,
+        interaction_indexes: list[int] = [4, 11, 17, 23],  # noqa: B006
+        pretrain_size: int = 512,
+        conv_inplane: int = 64,
+        n_points: int = 4,
+        deform_num_heads: int = 16,
+        drop_path_rate: float = 0.3,
+        init_values: float = 0.0,
+        with_cffn: bool = True,  # noqa: FBT001, FBT002
+        cffn_ratio: float = 0.25,
+        deform_ratio: float = 0.5,
+        add_vit_feature: bool = True,  # noqa: FBT001, FBT002
+        use_extra_extractor: bool = True,  # noqa: FBT001, FBT002
+        with_cp: bool = True,  # noqa: FBT001, FBT002
+    ) -> None:
+        """Initialize DINOv3 Multi-Scale Adapter."""
+        super().__init__()
+        self.backbone = backbone
+        # Important: we freeze the backbone
+        self.backbone.requires_grad_(requires_grad=False)
+
+        self.pretrain_size = (pretrain_size, pretrain_size)
+        self.interaction_indexes = interaction_indexes
+        self.add_vit_feature = add_vit_feature
+        embed_dim = self.backbone.embed_dim
+        self.patch_size = self.backbone.patch_size
+        # print("embed dim", embed_dim)
+        # print("interaction_indexes", self.interaction_indexes)
+        # print("patch_size", self.patch_size)
+
+        block_fn = InteractionBlockWithCls
+        self.level_embed = nn.Parameter(torch.zeros(3, embed_dim))
+        self.spm = SpatialPriorModule(
+            inplanes=conv_inplane,
+            embed_dim=embed_dim,
+            with_cp=False,
+        )
+        self.interactions = nn.Sequential(
+            *[
+                block_fn(
+                    dim=embed_dim,
+                    num_heads=deform_num_heads,
+                    n_points=n_points,
+                    init_values=init_values,
+                    drop_path=drop_path_rate,
+                    norm_layer=partial(nn.LayerNorm, eps=1e-6),
+                    with_cffn=with_cffn,
+                    cffn_ratio=cffn_ratio,
+                    deform_ratio=deform_ratio,
+                    extra_extractor=(
+                        (i == len(self.interaction_indexes) - 1) and use_extra_extractor
+                    ),
+                    with_cp=with_cp,
+                )
+                for i in range(len(self.interaction_indexes))
+            ],
+        )
+        self.up = nn.ConvTranspose2d(embed_dim, embed_dim, 2, 2)
+        self.norm1 = nn.SyncBatchNorm(embed_dim)
+        self.norm2 = nn.SyncBatchNorm(embed_dim)
+        self.norm3 = nn.SyncBatchNorm(embed_dim)
+        self.norm4 = nn.SyncBatchNorm(embed_dim)
+
+        self.up.apply(self._init_weights)
+        self.spm.apply(self._init_weights)
+        self.interactions.apply(self._init_weights)
+        self.apply(self._init_deform_weights)
+        torch.nn.init.normal_(self.level_embed)
+
+    def _init_weights(self, m: nn.Module) -> None:
+        """Initialize weights."""
+        if isinstance(m, nn.Linear):
+            torch.nn.init.trunc_normal_(m.weight, std=0.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, (nn.LayerNorm, nn.BatchNorm2d)):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+        elif isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+            fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+            fan_out //= m.groups
+            m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
+            if m.bias is not None:
+                m.bias.data.zero_()
+
+    def _get_pos_embed(self, pos_embed: Tensor, h: int, w: int) -> Tensor:
+        """Get positional embedding."""
+        pos_embed = pos_embed.reshape(
+            1,
+            self.pretrain_size[0] // self.patch_size,
+            self.pretrain_size[1] // self.patch_size,
+            -1,
+        ).permute(0, 3, 1, 2)
+        return (
+            fn.interpolate(pos_embed, size=(h, w), mode="bicubic", align_corners=False)
+            .reshape(1, -1, h * w)
+            .permute(0, 2, 1)
+        )
+
+    def _init_deform_weights(self, m: nn.Module) -> None:
+        """Initialize deform weights."""
+        if isinstance(m, MSDeformAttn):
+            m._reset_parameters()  # noqa: SLF001
+
+    def _add_level_embed(
+        self,
+        c2: Tensor,
+        c3: Tensor,
+        c4: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Add level embedding."""
+        c2 = c2 + self.level_embed[0]
+        c3 = c3 + self.level_embed[1]
+        c4 = c4 + self.level_embed[2]
+        return c2, c3, c4
+
+    def forward(self, x: Tensor) -> dict[str, Tensor]:
+        """Forward pass."""
+        deform_inputs1, deform_inputs2 = deform_inputs(x, self.patch_size)
+
+        # SPM forward
+        c1, c2, c3, c4 = self.spm(x)
+        c2, c3, c4 = self._add_level_embed(c2, c3, c4)
+
+        c = torch.cat([c2, c3, c4], dim=1)
+        h_c, w_c = x.shape[2] // 16, x.shape[3] // 16
+        h_toks, w_toks = x.shape[2] // self.patch_size, x.shape[3] // self.patch_size
+        bs, _, h, w = x.shape
+
+        with torch.autocast("cuda", torch.bfloat16), torch.no_grad():
+            all_layers = self.backbone.get_intermediate_layers(
+                x,
+                n=self.interaction_indexes,
+                return_class_token=True,
+            )
+
+        x_for_shape, _ = all_layers[0]
+        bs, _, dim = x_for_shape.shape
+        del x_for_shape
+
+        cls, x = (
+            x[
+                :,
+                :1,
+            ],
+            x[
+                :,
+                5:,
+            ],
+        )
+
+        outs: list[Tensor] = []
+        for i, layer in enumerate(self.interactions):
+            x, cls = all_layers[i]
+            _, c, _ = layer(
+                x,
+                c,
+                cls,
+                deform_inputs1,
+                deform_inputs2,
+                h_c,
+                w_c,
+                h_toks,
+                w_toks,
+            )
+            outs.append(x.transpose(1, 2).view(bs, dim, h_toks, w_toks).contiguous())
+
+        # Split & Reshape
+        c2 = c[:, 0 : c2.size(1), :]
+        c3 = c[:, c2.size(1) : c2.size(1) + c3.size(1), :]
+        c4 = c[:, c2.size(1) + c3.size(1) :, :]
+
+        c2 = c2.transpose(1, 2).view(bs, dim, h_c * 2, w_c * 2).contiguous()
+        c3 = c3.transpose(1, 2).view(bs, dim, h_c, w_c).contiguous()
+        c4 = c4.transpose(1, 2).view(bs, dim, h_c // 2, w_c // 2).contiguous()
+        c1 = self.up(c2) + c1
+
+        if self.add_vit_feature:
+            x1, x2, x3, x4 = outs
+
+            x1 = fn.interpolate(
+                x1,
+                size=(4 * h_c, 4 * w_c),
+                mode="bilinear",
+                align_corners=False,
+            )
+            x2 = fn.interpolate(
+                x2,
+                size=(2 * h_c, 2 * w_c),
+                mode="bilinear",
+                align_corners=False,
+            )
+            x3 = fn.interpolate(
+                x3,
+                size=(1 * h_c, 1 * w_c),
+                mode="bilinear",
+                align_corners=False,
+            )
+            x4 = fn.interpolate(
+                x4,
+                size=(h_c // 2, w_c // 2),
+                mode="bilinear",
+                align_corners=False,
+            )
+            c1, c2, c3, c4 = c1 + x1, c2 + x2, c3 + x3, c4 + x4
+
+        # Final Norm
+        f1 = self.norm1(c1)
+        f2 = self.norm2(c2)
+        f3 = self.norm3(c3)
+        f4 = self.norm4(c4)
+
+        return {"1": f1, "2": f2, "3": f3, "4": f4}
+
+
+if __name__ == "__main__":
+    backbone = vit_large()
+    model = DINOv3Adapter(backbone=backbone)
+    # model = vit_large()
+    # model.init_weights()
+    # weights = ""
+    # state_dict = torch.load(weights, weights_only=True)
+    # # print(state_dict.keys())
+    # # print(model.state_dict().keys())
+    # model.load_state_dict(state_dict, strict=True)
+    # image = torch.randn(1, 3, 224, 224)
+    # output = model(image)
+    # for key, value in output.items():
+    #     print(key, value.shape)
