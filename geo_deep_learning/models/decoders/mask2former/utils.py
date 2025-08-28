@@ -60,6 +60,286 @@ def get_norm(norm: str | None, out_channels: int) -> nn.Module | None:
     return norm(out_channels)
 
 
+class SelfAttentionLayer(nn.Module):
+    """Self-attention layer."""
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dropout: float = 0.0,
+        activation: str = "relu",
+        normalize_before: bool = False,  # noqa: FBT001,FBT002
+    ) -> None:
+        """Initialize SelfAttentionLayer."""
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+        self.activation = _get_activation_fn(activation)
+        self.normalize_before = normalize_before
+
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        """Reset parameters."""
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def with_pos_embed(
+        self,
+        tensor: torch.Tensor,
+        pos: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Add positional embedding to tensor."""
+        return tensor if pos is None else tensor + pos
+
+    def forward_post(
+        self,
+        tgt: torch.Tensor,
+        tgt_mask: torch.Tensor | None = None,
+        tgt_key_padding_mask: torch.Tensor | None = None,
+        query_pos: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass."""
+        q = k = self.with_pos_embed(tgt, query_pos)
+        tgt2 = self.self_attn(
+            q,
+            k,
+            value=tgt,
+            attn_mask=tgt_mask,
+            key_padding_mask=tgt_key_padding_mask,
+        )[0]
+        tgt = tgt + self.dropout(tgt2)
+        return self.norm(tgt)
+
+    def forward_pre(
+        self,
+        tgt: torch.Tensor,
+        tgt_mask: torch.Tensor | None = None,
+        tgt_key_padding_mask: torch.Tensor | None = None,
+        query_pos: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass."""
+        tgt2 = self.norm(tgt)
+        q = k = self.with_pos_embed(tgt2, query_pos)
+        tgt2 = self.self_attn(
+            q,
+            k,
+            value=tgt2,
+            attn_mask=tgt_mask,
+            key_padding_mask=tgt_key_padding_mask,
+        )[0]
+        return tgt + self.dropout(tgt2)
+
+    def forward(
+        self,
+        tgt: torch.Tensor,
+        tgt_mask: torch.Tensor | None = None,
+        tgt_key_padding_mask: torch.Tensor | None = None,
+        query_pos: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass."""
+        if self.normalize_before:
+            return self.forward_pre(tgt, tgt_mask, tgt_key_padding_mask, query_pos)
+        return self.forward_post(tgt, tgt_mask, tgt_key_padding_mask, query_pos)
+
+
+class CrossAttentionLayer(nn.Module):
+    """Cross-attention layer."""
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dropout: float = 0.0,
+        activation: str = "relu",
+        normalize_before: bool = False,  # noqa: FBT001,FBT002
+    ) -> None:
+        """Initialize CrossAttentionLayer."""
+        super().__init__()
+        self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+        self.activation = _get_activation_fn(activation)
+        self.normalize_before = normalize_before
+
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        """Reset parameters."""
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def with_pos_embed(
+        self,
+        tensor: torch.Tensor,
+        pos: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Add positional embedding to tensor."""
+        return tensor if pos is None else tensor + pos
+
+    def forward_post(  # noqa: PLR0913
+        self,
+        tgt: torch.Tensor,
+        memory: torch.Tensor,
+        memory_mask: torch.Tensor | None = None,
+        memory_key_padding_mask: torch.Tensor | None = None,
+        pos: torch.Tensor | None = None,
+        query_pos: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass."""
+        tgt2 = self.multihead_attn(
+            query=self.with_pos_embed(tgt, query_pos),
+            key=self.with_pos_embed(memory, pos),
+            value=memory,
+            attn_mask=memory_mask,
+            key_padding_mask=memory_key_padding_mask,
+        )[0]
+        tgt = tgt + self.dropout(tgt2)
+        return self.norm(tgt)
+
+    def forward_pre(  # noqa: PLR0913
+        self,
+        tgt: torch.Tensor,
+        memory: torch.Tensor,
+        memory_mask: torch.Tensor | None = None,
+        memory_key_padding_mask: torch.Tensor | None = None,
+        pos: torch.Tensor | None = None,
+        query_pos: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass."""
+        tgt2 = self.norm(tgt)
+        tgt2 = self.multihead_attn(
+            query=self.with_pos_embed(tgt2, query_pos),
+            key=self.with_pos_embed(memory, pos),
+            value=memory,
+            attn_mask=memory_mask,
+            key_padding_mask=memory_key_padding_mask,
+        )[0]
+        return tgt + self.dropout(tgt2)
+
+    def forward(  # noqa: PLR0913
+        self,
+        tgt: torch.Tensor,
+        memory: torch.Tensor,
+        memory_mask: torch.Tensor | None = None,
+        memory_key_padding_mask: torch.Tensor | None = None,
+        pos: torch.Tensor | None = None,
+        query_pos: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass."""
+        if self.normalize_before:
+            return self.forward_pre(
+                tgt,
+                memory,
+                memory_mask,
+                memory_key_padding_mask,
+                pos,
+                query_pos,
+            )
+        return self.forward_post(
+            tgt,
+            memory,
+            memory_mask,
+            memory_key_padding_mask,
+            pos,
+            query_pos,
+        )
+
+
+class FFNLayer(nn.Module):
+    """Feedforward layer."""
+
+    def __init__(
+        self,
+        d_model: int,
+        dim_feedforward: int = 2048,
+        dropout: float = 0.0,
+        activation: str = "relu",
+        normalize_before: bool = False,  # noqa: FBT001,FBT002
+    ) -> None:
+        """Initialize FFNLayer."""
+        super().__init__()
+        # Implementation of Feedforward model
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        self.norm = nn.LayerNorm(d_model)
+
+        self.activation = _get_activation_fn(activation)
+        self.normalize_before = normalize_before
+
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        """Reset parameters."""
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def with_pos_embed(
+        self,
+        tensor: torch.Tensor,
+        pos: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Add positional embedding to tensor."""
+        return tensor if pos is None else tensor + pos
+
+    def forward_post(self, tgt: torch.Tensor) -> torch.Tensor:
+        """Forward pass."""
+        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout(tgt2)
+        return self.norm(tgt)
+
+    def forward_pre(self, tgt: torch.Tensor) -> torch.Tensor:
+        """Forward pass."""
+        tgt2 = self.norm(tgt)
+        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
+        return tgt + self.dropout(tgt2)
+
+    def forward(self, tgt: torch.Tensor) -> torch.Tensor:
+        """Forward pass."""
+        if self.normalize_before:
+            return self.forward_pre(tgt)
+        return self.forward_post(tgt)
+
+
+class MLP(nn.Module):
+    """Very simple multi-layer perceptron (also called FFN)."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        num_layers: int,
+    ) -> None:
+        """Initialize MLP."""
+        super().__init__()
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers = nn.ModuleList(
+            (
+                nn.Linear(n, k)
+                for n, k in zip([input_dim, *h], [*h, output_dim], strict=False)
+            ),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass."""
+        for i, layer in enumerate(self.layers):
+            x = fn.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+        return x
+
+
 class Conv2d(torch.nn.Conv2d):
     """A wrapper around :class:`torch.nn.Conv2d`."""
 
