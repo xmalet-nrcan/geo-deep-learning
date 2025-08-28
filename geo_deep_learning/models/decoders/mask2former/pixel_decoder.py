@@ -163,7 +163,7 @@ class MSDeformAttnTransformerEncoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
 
     @staticmethod
-    def with_pos_embed(tensor: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+    def with_pos_embed(tensor: torch.Tensor, pos: torch.Tensor | None) -> torch.Tensor:
         """With pos embed."""
         return tensor if pos is None else tensor + pos
 
@@ -318,7 +318,7 @@ class MSDeformAttnPixelDecoder(nn.Module):
                     nn.Conv2d(in_channels, conv_dim, kernel_size=1),
                     nn.GroupNorm(32, conv_dim),
                 )
-                for in_channels in transformer_in_channels[::-1][:-1]
+                for in_channels in transformer_in_channels[::-1]
             ]
             self.input_convs = nn.ModuleList(input_proj_list)
         else:
@@ -408,7 +408,7 @@ class MSDeformAttnPixelDecoder(nn.Module):
         srcs = []
         pos = []
         # Reverse feature maps into top-down order (from low to high resolution)
-        for idx, f in enumerate(self.transformer_in_features[::-1][:-1]):
+        for idx, f in enumerate(self.transformer_in_features[::-1]):
             x = features[f].float()  # deformable detr does not support half precision
             srcs.append(self.input_convs[idx](x))
             pos.append(self.pe_layer(x))
