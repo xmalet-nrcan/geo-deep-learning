@@ -114,3 +114,30 @@ class Mask2FormerHead(nn.Module):
             features,
         )
         return self.predictor(multi_scale_features, mask_features, mask)
+
+
+# if __name__ == "__main__":
+#     from geo_deep_learning.models.encoders.dino_v3 import DINOv3Adapter, vit_large
+
+#     backbone = vit_large()
+#     model = DINOv3Adapter(backbone=backbone)
+
+#     image = torch.randn(1, 3, 224, 224)
+#     features = model(image)
+
+#     decoder = Mask2FormerHead(
+#         input_shape={
+#             "1": [1024, 64, 64, 4],
+#             "2": [1024, 32, 32, 4],
+#             "3": [1024, 16, 16, 4],
+#             "4": [1024, 8, 8, 4],
+#         },
+#         hidden_dim=2048,
+#         num_classes=150,
+#         ignore_value=255,
+#     )
+
+#     output = decoder.predict(features, rescale_to=(224, 224))
+#     print(output.keys())
+#     print(output["pred_logits"].shape)
+#     print(output["pred_masks"].shape)
