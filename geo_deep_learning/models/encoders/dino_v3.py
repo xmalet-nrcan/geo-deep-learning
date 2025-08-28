@@ -1068,17 +1068,17 @@ class DINOv3Adapter(nn.Module):
         return {"1": f1, "2": f2, "3": f3, "4": f4}
 
 
-if __name__ == "__main__":
-    backbone = vit_large()
-    model = DINOv3Adapter(backbone=backbone)
-    # model = vit_large()
-    # model.init_weights()
-    # weights = ""
-    # state_dict = torch.load(weights, weights_only=True)
-    # # print(state_dict.keys())
-    # # print(model.state_dict().keys())
-    # model.load_state_dict(state_dict, strict=True)
-    # image = torch.randn(1, 3, 224, 224)
-    # output = model(image)
-    # for key, value in output.items():
-    #     print(key, value.shape)
+# if __name__ == "__main__":
+# backbone = vit_large()
+# model = DINOv3Adapter(backbone=backbone)
+# model = vit_large()
+# model.init_weights()
+# weights = ""
+# state_dict = torch.load(weights, weights_only=True)
+# # print(state_dict.keys())
+# # print(model.state_dict().keys())
+# model.load_state_dict(state_dict, strict=True)
+# image = torch.randn(1, 3, 224, 224)
+# output = model(image)
+# for key, value in output.items():
+#     print(key, value.shape)
