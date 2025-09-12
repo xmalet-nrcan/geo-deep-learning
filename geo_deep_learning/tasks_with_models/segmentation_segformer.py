@@ -200,17 +200,19 @@ class SegmentationSegformer(LightningModule):
     def forward(self, image: Tensor) -> Tensor:
         """Forward pass."""
         return self.model(image)
-
-    def on_before_batch_transfer(
-        self,
-        batch: dict[str, Any],
-        dataloader_idx: int,  # noqa: ARG002
-    ) -> dict[str, Any]:
-        """On before batch transfer."""
-        if self.trainer.training:
-            aug = self._apply_aug()
-            transformed = aug({"image": batch["image"], "mask": batch["mask"]})
-            batch.update(transformed)
+    
+    def on_after_batch_transfer(self, batch, dataloader_idx):
+        """On after batch transfer."""
+        if not self.trainer.training:
+            return batch
+        device = batch["image"].device
+        aug = self._apply_aug()
+        batch_aug = aug({"image": batch["image"], "mask": batch["mask"]})
+        for key in ['image', 'mask']:
+            if key in batch_aug and batch_aug[key].device != device:
+                batch[key] = batch_aug[key].to(device, non_blocking=True)
+            elif key in batch_aug:
+                batch[key] = batch_aug[key]
         return batch
 
     def training_step(
