@@ -1,4 +1,5 @@
 *__pycache__**
 *.idea**
 *.vscode**
+*uv.lock
 *geo_deep_learning/notebooks*
