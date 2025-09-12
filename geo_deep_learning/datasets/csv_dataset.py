@@ -131,7 +131,7 @@ class CSVDataset(NonGeoDataset):
         mask_name = Path(mask_path).name
         with rio.open(mask_path) as mask:
             mask_array = mask.read().astype(np.int32)
-            mask_tensor = torch.from_numpy(mask_array).float()
+            mask_tensor = torch.from_numpy(mask_array).long()
 
         return mask_tensor, mask_name
 
