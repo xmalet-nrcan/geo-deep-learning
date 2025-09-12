@@ -6,6 +6,7 @@ import logging
 import math
 from collections.abc import Sequence
 from functools import partial
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -393,9 +394,13 @@ class DinoVisionTransformer(nn.Module):
         return self.head(ret["x_norm_clstoken"])
 
 
-def vit_large(patch_size: int = 16, **kwargs: object) -> DinoVisionTransformer:
+def vit_large(
+    patch_size: int = 16,
+    pretrained: bool = True,  # noqa: FBT001, FBT002
+    **kwargs: object,
+) -> DinoVisionTransformer:
     """Vit large. supports weight "dinov3_vitl16_pretrain_sat493m-eadcf0ff.pth"."""
-    return DinoVisionTransformer(
+    model = DinoVisionTransformer(
         patch_size=patch_size,
         pos_embed_rope_rescale_coords=2.0,
         embed_dim=1024,
@@ -409,6 +414,18 @@ def vit_large(patch_size: int = 16, **kwargs: object) -> DinoVisionTransformer:
         untie_global_and_local_cls_norm=True,
         **kwargs,
     )
+    model.init_weights()
+    if pretrained:
+        model_url = "dinov3_vitl16_pretrain_sat493m-eadcf0ff.pth"
+        hub_dir = torch.hub.get_dir()
+        ckpt_path = Path(hub_dir) / "checkpoints" / model_url
+        if ckpt_path.exists():
+            model.load_state_dict(torch.load(ckpt_path, weights_only=True))
+            logger.info("Loaded pretrained weights %s", model_url)
+        else:
+            logger.warning("Pretrained weights %s not found", model_url)
+
+    return model
 
 
 def drop_path(x: Tensor, drop_prob: float = 0.0, training: bool = False) -> Tensor:  # noqa: FBT001, FBT002
@@ -1068,17 +1085,17 @@ class DINOv3Adapter(nn.Module):
         return {"1": f1, "2": f2, "3": f3, "4": f4}
 
 
-if __name__ == "__main__":
-    backbone = vit_large()
-    model = DINOv3Adapter(backbone=backbone)
-    # model = vit_large()
-    # model.init_weights()
-    # weights = ""
-    # state_dict = torch.load(weights, weights_only=True)
-    # # print(state_dict.keys())
-    # # print(model.state_dict().keys())
-    # model.load_state_dict(state_dict, strict=True)
-    # image = torch.randn(1, 3, 224, 224)
-    # output = model(image)
-    # for key, value in output.items():
-    #     print(key, value.shape)
+# if __name__ == "__main__":
+# backbone = vit_large()
+# model = DINOv3Adapter(backbone=backbone)
+# model = vit_large()
+# model.init_weights()
+# weights = ""
+# state_dict = torch.load(weights, weights_only=True)
+# # print(state_dict.keys())
+# # print(model.state_dict().keys())
+# model.load_state_dict(state_dict, strict=True)
+# image = torch.randn(1, 3, 224, 224)
+# output = model(image)
+# for key, value in output.items():
+#     print(key, value.shape)
