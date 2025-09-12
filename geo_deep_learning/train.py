@@ -68,7 +68,7 @@ def main(args: ArgsType = None) -> None:
     cli = GeoDeepLearningCLI(
         save_config_callback=LoggerSaveConfigCallback,
         save_config_kwargs={"overwrite": True},
-        parser_kwargs={"parser_mode": "omegaconf"},
+        parser_kwargs={"parser_mode": "yaml"},
         auto_configure_optimizers=False,
         args=args,
     )
