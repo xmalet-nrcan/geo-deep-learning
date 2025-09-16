@@ -2,6 +2,7 @@
 
 import logging
 
+import torch
 import webdataset as wds
 from lightning.pytorch import LightningDataModule
 from webdataset import WebLoader
@@ -60,6 +61,10 @@ class MultiSensorDataModule(LightningDataModule):
         self.val_loader = None
         self.test_loader = None
 
+        self.trn_patch_count = 0
+        self.val_patch_count = 0
+        self.tst_patch_count = 0
+
     def prepare_data(self) -> None:
         """Prepare data."""
 
@@ -74,9 +79,55 @@ class MultiSensorDataModule(LightningDataModule):
             shardshuffle=self.shardshuffle,
             seed=self.seed,
         )
+        self._compute_patch_counts()
         self._setup_train_loader()
         self._setup_val_loader()
         self._setup_test_loader()
+
+    def _compute_patch_counts(self) -> None:
+        """Collect total patch counts from all sensors."""
+        for splits in self.datasets.values():
+            if "trn" in splits:
+                self.trn_patch_count += splits["trn"].patch_count
+            if "val" in splits:
+                self.val_patch_count += splits["val"].patch_count
+            if "tst" in splits:
+                self.tst_patch_count += splits["tst"].patch_count
+        logger.info(
+            "Total patch counts - Train: %d, Val: %d, Test: %d",
+            self.trn_patch_count,
+            self.val_patch_count,
+            self.tst_patch_count,
+        )
+
+    def _calculate_epoch_size(self, total_patches: int, split: str = "trn") -> int:
+        """
+        Calculate epoch_size based on total patches and distributed setup.
+
+        Args:
+            total_patches: Total number of patches in the dataset
+            split: Dataset split (trn, val, tst)
+
+        Returns:
+            Number of iterations for the epoch
+
+        """
+        world_size = 1
+        if torch.distributed.is_initialized() and split == "trn":
+            world_size = torch.distributed.get_world_size()
+        patches_per_gpu = total_patches // world_size
+        iterations_per_gpu = patches_per_gpu // self.batch_size
+        logger.info(
+            "Auto-calculated epoch_size for %s split: %d iterations "
+            "(total_patches=%d, world_size=%d, batch_size=%d, patches_per_gpu=%d)",
+            split,
+            iterations_per_gpu,
+            total_patches,
+            world_size,
+            self.batch_size,
+            patches_per_gpu,
+        )
+        return iterations_per_gpu
 
     def _setup_train_loader(self) -> None:
         """Set up training loader with sensor mixing."""
@@ -109,6 +160,10 @@ class MultiSensorDataModule(LightningDataModule):
         )
         if self.epoch_size:
             self.train_loader = self.train_loader.with_epoch(self.epoch_size)
+        else:
+            self.train_loader = self.train_loader.with_epoch(
+                self._calculate_epoch_size(self.trn_patch_count, "trn"),
+            )
 
     def _setup_val_loader(self) -> None:
         """Set up validation loader."""
