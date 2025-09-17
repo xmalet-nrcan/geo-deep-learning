@@ -418,7 +418,7 @@ class ShardedDataset:
             dataset = wds.WebDataset(
                 urls=shard_list,
                 shardshuffle=False,
-                nodesplitter=None if self.split == "tst" else wds.split_by_node,
+                nodesplitter=wds.split_by_node,
                 workersplitter=wds.split_by_worker,
                 empty_check=False,
             )
