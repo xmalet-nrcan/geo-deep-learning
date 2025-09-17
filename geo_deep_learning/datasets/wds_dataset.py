@@ -313,7 +313,7 @@ class ShardedDataset:
             if datetime_str.endswith("Z"):
                 datetime_str = datetime_str[:-1] + "+00:00"
 
-            dt = datetime.fromisoformat(datetime_str.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(datetime_str)
 
             # Week of year (1-52 or 53)
             week = dt.isocalendar().week
@@ -362,15 +362,14 @@ class ShardedDataset:
 
     def _extract_wavelengths(self, metadata: dict[str, Any]) -> torch.Tensor:
         """Extract wavelength information for DOFA."""
+        wavelengths_keys = self.wavelength_keys or [
+            "red_wavelength",
+            "green_wavelength",
+            "blue_wavelength",
+            "nir_wavelength",
+        ]
         try:
             meta = metadata["metadata"]
-
-            wavelengths_keys = self.wavelength_keys or [
-                "red_wavelength",
-                "green_wavelength",
-                "blue_wavelength",
-                "nir_wavelength",
-            ]
 
             wavelengths = [
                 float(meta[band]) for band in wavelengths_keys if band in meta
