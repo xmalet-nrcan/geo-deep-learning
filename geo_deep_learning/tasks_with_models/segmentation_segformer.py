@@ -200,15 +200,19 @@ class SegmentationSegformer(LightningModule):
     def forward(self, image: Tensor) -> Tensor:
         """Forward pass."""
         return self.model(image)
-    
-    def on_after_batch_transfer(self, batch, dataloader_idx):
+
+    def on_after_batch_transfer(
+        self,
+        batch: dict[str, Any],
+        dataloader_idx: int,  # noqa: ARG002
+    ) -> dict[str, Any]:
         """On after batch transfer."""
         if not self.trainer.training:
             return batch
         device = batch["image"].device
         aug = self._apply_aug()
         batch_aug = aug({"image": batch["image"], "mask": batch["mask"]})
-        for key in ['image', 'mask']:
+        for key in ["image", "mask"]:
             if key in batch_aug and batch_aug[key].device != device:
                 batch[key] = batch_aug[key].to(device, non_blocking=True)
             elif key in batch_aug:
@@ -291,7 +295,6 @@ class SegmentationSegformer(LightningModule):
             y_hat = y_hat.softmax(dim=1).argmax(dim=1)
 
         metrics = self.iou_classwise_metric(y_hat, y)
-        self.iou_classwise_metric.reset()
         metrics["test_loss"] = loss
 
         if self._total_samples_visualized < self.max_samples:
@@ -312,8 +315,11 @@ class SegmentationSegformer(LightningModule):
             prog_bar=False,
             logger=True,
             on_step=False,
+            on_epoch=True,
+            sync_dist=True,
             rank_zero_only=True,
         )
+        self.iou_classwise_metric.reset()
 
     def _log_visualizations(  # noqa: PLR0913
         self,
