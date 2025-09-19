@@ -759,49 +759,78 @@ def get_encoder(
 
 
 class DynamicChannelEmbed(nn.Module):
-    """Dynamic channel-adaptive patch embedding using positional encodings."""
+    """Dynamic Channel Embed with Cross Attention."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         patch_size: int = 7,
         stride: int = 4,
-        embed_dim: int = 64,
+        embed_dim: int = 64,  # b0=32, b1-b5 = 64
         hidden_dim: int = 128,
+        num_heads: int = 4,  # b0=2, b1-b5 = 4
+        topk_rel: int = 2,  # keep max to 4 for >= 8 channels
+        bottleneck_channels: int = 0,
     ) -> None:
         """Initialize DynamicChannelEmbed."""
         super().__init__()
         self.patch_size = patch_size
         self.stride = stride
         self.embed_dim = embed_dim
-
-        # Channel position encoder
         self.pos_dim = hidden_dim
+        self.num_heads = num_heads
+        self.topk_rel = topk_rel
+        self.bottleneck_channels = bottleneck_channels
 
-        # Dynamic weight generator (lightweight)
         self.weight_gen = nn.Sequential(
             nn.Linear(self.pos_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, embed_dim),
-            nn.Tanh(),  # Bounded weights
+            nn.Tanh(),
         )
 
-        # Shared spatial convolution (not dynamic for efficiency)
-        self.spatial_conv = nn.Conv2d(
-            1,  # Process each channel independently
+        self.spectral_bottleneck: nn.Module | None = None
+        if self.bottleneck_channels and self.bottleneck_channels > 0:
+            self.spectral_bottleneck = nn.LazyConv2d(
+                out_channels=self.bottleneck_channels,
+                kernel_size=1,
+                bias=True,
+            )
+
+        # Depthwise-separable spatial conv
+        self.spatial_pw = nn.Conv2d(1, embed_dim, kernel_size=1, bias=True)
+        self.spatial_dw = nn.Conv2d(
+            embed_dim,
             embed_dim,
             kernel_size=patch_size,
             stride=stride,
             padding=patch_size // 2,
+            groups=embed_dim,
+            bias=True,
         )
 
-        # Channel attention
-        self.channel_attention = nn.Sequential(
-            nn.Conv1d(embed_dim + self.pos_dim, embed_dim // 2, 1),
+        # SDPA projections
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+
+        # Sparse relation scorer (top-k)
+        self.channel_relation_mlp = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
             nn.ReLU(),
-            nn.Conv1d(embed_dim // 2, 1, 1),
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim // 2, 1),
         )
 
-        # Output projection and norm
+        # Stabilized gates
+        self.pre_gate_norm = nn.LayerNorm(embed_dim)
+        self.aggregation_gate = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim // 2, 1),
+            nn.Sigmoid(),
+        )
+
         self.proj = nn.Linear(embed_dim, embed_dim)
         self.norm = nn.LayerNorm(embed_dim)
 
@@ -809,53 +838,116 @@ class DynamicChannelEmbed(nn.Module):
         """Generate sinusoidal position encodings for channels."""
         positions = torch.arange(n_channels, device=device).float()
         dim_t = torch.arange(0, self.pos_dim, 2, device=device).float()
-
         inv_freq = 1.0 / (10000 ** (dim_t / self.pos_dim))
         pos_enc = torch.zeros(n_channels, self.pos_dim, device=device)
-
         pos_enc[:, 0::2] = torch.sin(positions.unsqueeze(1) * inv_freq)
         pos_enc[:, 1::2] = torch.cos(positions.unsqueeze(1) * inv_freq)
-
         return pos_enc
 
-    def forward(self, x: Tensor) -> tuple[Tensor, int, int]:
+    def forward(self, x: Tensor) -> tuple[Tensor, int, int, Tensor | None]:
         """Forward pass."""
-        batch, channels, height, width = x.shape
-        pos_enc = self.get_position_encoding(channels, x.device)
-        channel_weights = self.weight_gen(pos_enc)
-        x_reshaped = x.view(batch * channels, 1, height, width)
-        x_conv = self.spatial_conv(x_reshaped)
-        _, embed_dim, h_out, w_out = x_conv.shape
-        x_conv = x_conv.view(batch, channels, embed_dim, h_out * w_out)
-        channel_weights = channel_weights.unsqueeze(0).unsqueeze(-1)
-        x_weighted = x_conv * channel_weights
-        batch, channels, embed_dim, hw_out = x_weighted.shape
-        pos_enc_expanded = (
-            pos_enc.unsqueeze(0).unsqueeze(-1).expand(batch, -1, -1, hw_out)
-        )
-        x_for_attn = torch.cat(
-            [x_weighted, pos_enc_expanded],
-            dim=2,
-        )
-        x_for_attn = x_for_attn.permute(0, 3, 1, 2).reshape(
-            batch * hw_out,
-            channels,
-            embed_dim + self.pos_dim,
-        )
-        x_for_attn = x_for_attn.transpose(1, 2)
-        attn_scores = self.channel_attention(x_for_attn)
-        attn_scores = (
-            attn_scores.transpose(1, 2)
-            .reshape(batch, hw_out, channels)
-            .permute(0, 2, 1)
-        )
-        attn_scores = fn.softmax(attn_scores, dim=1).unsqueeze(2)
-        x_aggregated = (x_weighted * attn_scores).sum(dim=1)
-        x_aggregated = x_aggregated.transpose(1, 2)
-        x_out = self.proj(x_aggregated)
-        x_out = self.norm(x_out)
+        batch_size, channels, height, width = x.shape
+        device = x.device
 
-        return x_out, h_out, w_out
+        # Optional spectral bottleneck
+        if self.spectral_bottleneck is not None:
+            x = self.spectral_bottleneck(x)
+            channels_eff = x.shape[1]
+        else:
+            channels_eff = channels
+
+        # Channel PE + per-channel weights
+        pos_enc = self.get_position_encoding(channels_eff, device)  # [ch_eff, pos_dim]
+        channel_weights = self.weight_gen(pos_enc)  # [ch_eff, d]
+
+        # Per-channel spatial features
+        spatial_features = []
+        channel_tokens = []
+        for i in range(channels_eff):
+            xi = x[:, i : i + 1]  # [B,1,H,W]
+            feat = self.spatial_pw(xi)  # [B,d,H,W]
+            feat = self.spatial_dw(feat)  # [B,d,H',W']
+            spatial_features.append(feat)
+            token = feat.mean(dim=[2, 3]) + channel_weights[i]  # [B,d]
+            channel_tokens.append(token)
+
+        _, embed_dim, h_out, w_out = spatial_features[0].shape
+        channel_stack = torch.stack(channel_tokens, dim=1)  # [B,ch_eff,d]
+
+        # SDPA over channels
+        d = embed_dim
+        h = self.num_heads
+        assert d % h == 0, "embed_dim must be divisible by num_heads"  # noqa: S101
+        d_head = d // h
+
+        q = (
+            self.q_proj(channel_stack)
+            .view(batch_size, channels_eff, h, d_head)
+            .transpose(1, 2)
+        )
+        k = (
+            self.k_proj(channel_stack)
+            .view(batch_size, channels_eff, h, d_head)
+            .transpose(1, 2)
+        )
+        v = (
+            self.v_proj(channel_stack)
+            .view(batch_size, channels_eff, h, d_head)
+            .transpose(1, 2)
+        )
+
+        attn_out = fn.scaled_dot_product_attention(q, k, v)  # [B,h,C,dh]
+        attn_out = (
+            attn_out.transpose(1, 2).contiguous().view(batch_size, channels_eff, d)
+        )  # [B,C,d]
+
+        # Optional attention weights (for top-k & debugging)
+        with torch.no_grad():
+            scores = (q @ k.transpose(-2, -1)) / (d_head**0.5)  # [B,h,C,C]
+            attn_weights = scores.softmax(dim=-1).mean(dim=1)  # [B,C,C]
+
+        # Edge-sparse relation MLP (top-k)
+        relation_scores: Tensor | None = None
+        if self.topk_rel and self.topk_rel > 0 and channels_eff > 1:
+            k_top = min(self.topk_rel, channels_eff - 1)
+            topk_idx = torch.topk(attn_weights, k=k_top, dim=-1).indices  # [B,C,k]
+            src_rep = attn_out.unsqueeze(2).expand(
+                batch_size,
+                channels_eff,
+                k_top,
+                d,
+            )  # [B,C,k,d]
+            nbr_rep = torch.gather(
+                attn_out.unsqueeze(1).expand(batch_size, channels_eff, channels_eff, d),
+                dim=2,
+                index=topk_idx.unsqueeze(-1).expand(batch_size, channels_eff, k_top, d),
+            )  # [B,C,k,d]
+            pair_feat = torch.cat([src_rep, nbr_rep], dim=-1)  # [B,C,k,2d]
+            pair_feat = pair_feat.reshape(batch_size * channels_eff * k_top, 2 * d)
+            relation_scores = self.channel_relation_mlp(pair_feat).reshape(
+                batch_size,
+                channels_eff,
+                k_top,
+                1,
+            )  # [B,C,k,1]
+
+        # Stabilized gating
+        gated = self.pre_gate_norm(attn_out)  # [B,C,d]
+        gate = self.aggregation_gate(gated).squeeze(-1)  # [B,C]
+        gate = 0.5 + 0.5 * gate  # in [0.5, 1.0]
+
+        # Aggregate spatial features
+        out_map = torch.zeros(batch_size, embed_dim, h_out, w_out, device=device)
+        for i, feat in enumerate(spatial_features):
+            g = gate[:, i].view(batch_size, 1, 1, 1)  # [B,1,1,1]
+            out_map = out_map + feat * g
+
+        # Tokens
+        tokens = out_map.flatten(2).transpose(1, 2)  # [B,H'*W',d]
+        tokens = self.proj(tokens)
+        tokens = self.norm(tokens)
+
+        return tokens, h_out, w_out, relation_scores
 
 
 class DynamicMixTransformer(nn.Module):
@@ -898,7 +990,7 @@ class DynamicMixTransformer(nn.Module):
         """Forward features pass."""
         batch_size = x.shape[0]
         outs = []
-        x, h, w = self.dynamic_patch_embed1(x)
+        x, h, w, _ = self.dynamic_patch_embed1(x)
         for blk in self.block1:
             x = blk(x, h, w)
         x = self.norm1(x)
