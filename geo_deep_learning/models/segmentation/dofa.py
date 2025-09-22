@@ -16,7 +16,6 @@ from geo_deep_learning.models.heads.segmentation_head import (
     SegmentationHead,
     SegmentationOutput,
 )
-from geo_deep_learning.models.necks.multilevel_neck import MultiLevelNeck
 
 from .base import BaseSegmentationModel
 
@@ -36,7 +35,7 @@ class DOFASegmentationModel(BaseSegmentationModel):
         """Initialize DOFA segmentation model."""
         super().__init__(
             DOFAv2,
-            MultiLevelNeck,
+            None,
             UperNetDecoder,
             SegmentationHead,
             SegmentationOutput,
@@ -53,19 +52,12 @@ class DOFASegmentationModel(BaseSegmentationModel):
             msg = f"Invalid encoder: {encoder}"
             raise ValueError(msg)
 
-        self.neck = MultiLevelNeck(
-            in_channels=[self.embed_dim] * 4,
-            out_channels=[self.embed_dim] * 4,
-            scales=[4, 2, 1, 0.5],
-            norm_cfg={"type": "BN"},
-            act_cfg={"type": "ReLU"},
-        )
         self.decoder = UperNetDecoder(
             embed_dim=[self.embed_dim] * 4,
             pool_scales=(1, 2, 3, 6),
             channels=256,
             align_corners=False,
-            scale_modules=False,
+            scale_modules=True,
         )
         self.aux_head = FCNHead(
             in_channels=self.embed_dim,
@@ -83,8 +75,7 @@ class DOFASegmentationModel(BaseSegmentationModel):
     def forward(self, x: torch.Tensor, wavelengths: torch.Tensor) -> SegmentationOutput:
         """Forward pass."""
         image_size = x.shape[2:]
-        x = self.encoder(x, wavelengths)
-        feats = self.neck(x)
+        feats = self.encoder(x, wavelengths)
         x = self.decoder(feats)
         x = self.head(x)
         x = fn.interpolate(
@@ -95,7 +86,7 @@ class DOFASegmentationModel(BaseSegmentationModel):
             align_corners=False,
         )
 
-        aux_x = self.aux_head(feats[-1])
+        aux_x = self.aux_head(feats[2])
         aux_x = fn.interpolate(
             input=aux_x,
             size=image_size,
