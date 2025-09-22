@@ -13,6 +13,7 @@ from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from models.segmentation.dofa import DOFASegmentationModel
+from segmentation_models_pytorch.losses import SoftCrossEntropyLoss
 from tools.utils import denormalization, load_weights_from_checkpoint
 from tools.visualization import visualize_prediction
 from torch import Tensor
@@ -64,6 +65,7 @@ class SegmentationDOFA(LightningModule):
         self.max_samples = max_samples
         self.num_classes = num_classes
         self.threshold = 0.5
+        self.ce_loss = SoftCrossEntropyLoss(smooth_factor=0.1, ignore_index=255)
         self.loss = loss
         num_classes = num_classes + 1 if num_classes == 1 else num_classes
         self.iou_metric = MeanIoU(
@@ -221,8 +223,8 @@ class SegmentationDOFA(LightningModule):
         self.train_samples_count += batch_size
         y = y.squeeze(1).long()
         outputs = self(x, wv)
-        loss_main = self.loss(outputs.out, y)
-        loss_aux = self.loss(outputs.aux, y)
+        loss_main = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
+        loss_aux = self.loss(outputs.aux, y) + self.ce_loss(outputs.aux, y)
         loss = loss_main + 0.4 * loss_aux
         self.log(
             "train_loss",
@@ -259,9 +261,7 @@ class SegmentationDOFA(LightningModule):
         self.val_samples_count += batch_size
         y = y.squeeze(1).long()
         outputs = self(x, wv)
-        loss_main = self.loss(outputs.out, y)
-        loss_aux = self.loss(outputs.aux, y)
-        loss = loss_main + 0.4 * loss_aux
+        loss = self.loss(outputs.out, y)
         self.log(
             "val_loss",
             loss,
@@ -301,9 +301,7 @@ class SegmentationDOFA(LightningModule):
         self.test_samples_count += batch_size
         y = y.squeeze(1).long()
         outputs = self(x, wv)
-        loss_main = self.loss(outputs.out, y)
-        loss_aux = self.loss(outputs.aux, y)
-        loss = loss_main + 0.4 * loss_aux
+        loss = self.loss(outputs.out, y)
         if self.num_classes == 1:
             y_hat = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
         else:
