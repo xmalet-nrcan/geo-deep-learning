@@ -232,10 +232,10 @@ class SegmentationSegformer(LightningModule):
         y = batch["mask"]
         batch_size = x.shape[0]
         y = y.squeeze(1).long()
-        y_hat = self(x)
-        main_loss = self.loss(y_hat.out, y) + self.ce_loss(y_hat.out, y)
+        outputs = self(x)
+        main_loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
         aux_loss = torch.zeros((), device=y.device, dtype=main_loss.dtype)
-        aux = y_hat.aux or {}
+        aux = outputs.aux or {}
         for key, weight in self.aux_weight.items():
             if weight and key in aux:
                 logits = aux[key]
@@ -268,8 +268,8 @@ class SegmentationSegformer(LightningModule):
         y = batch["mask"]
         batch_size = x.shape[0]
         y = y.squeeze(1).long()
-        y_hat = self(x)
-        loss = self.loss(y_hat.out, y)
+        outputs = self(x)
+        loss = self.loss(outputs.out, y)
         self.log(
             "val_loss",
             loss,
@@ -282,9 +282,9 @@ class SegmentationSegformer(LightningModule):
             rank_zero_only=True,
         )
         if self.num_classes == 1:
-            y_hat = (y_hat.sigmoid().squeeze(1) > self.threshold).long()
+            y_hat = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
         else:
-            y_hat = y_hat.softmax(dim=1).argmax(dim=1)
+            y_hat = outputs.out.softmax(dim=1).argmax(dim=1)
 
         return y_hat
 
@@ -298,13 +298,13 @@ class SegmentationSegformer(LightningModule):
         y = batch["mask"]
         batch_size = x.shape[0]
         y = y.squeeze(1).long()
-        y_hat = self(x)
-        loss = self.loss(y_hat.out, y)
+        outputs = self(x)
+        loss = self.loss(outputs.out, y)
 
         if self.num_classes == 1:
-            y_hat = (y_hat.sigmoid().squeeze(1) > self.threshold).long()
+            y_hat = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
         else:
-            y_hat = y_hat.softmax(dim=1).argmax(dim=1)
+            y_hat = outputs.out.softmax(dim=1).argmax(dim=1)
 
         metrics = self.iou_classwise_metric(y_hat, y)
         metrics["test_loss"] = loss
