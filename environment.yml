@@ -1,4 +1,4 @@
-name: geo_ml_env
+name: geo-deep-learning
 channels:
   - pytorch
   - nvidia
@@ -8,7 +8,7 @@ dependencies:
   - geopandas>=0.14.4
   - hydra-core>=1.2.0
   - pip
-  - pynvml>=11.0
+  # - pynvml>=11.0
   - pystac>=1.10.1
   - pytest>=7.1
   - python>=3.11
@@ -19,6 +19,10 @@ dependencies:
   - scikit-image>=0.18
   - torchgeo>=0.5.2
   - torchvision>=0.13
+  - albumentations
+  - opencv
+  - nvidia-ml-py
+  - gdal
   - pip:
     - git+https://github.com/NRCan/geo-inference.git
     - hydra-colorlog>=1.1.0
