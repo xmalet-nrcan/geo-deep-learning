@@ -20,8 +20,10 @@ from rasterio import MemoryFile, DatasetReader
 from rasterio.plot import reshape_as_raster
 from rasterio.shutil import copy as riocopy
 import xml.etree.ElementTree as ET
-from osgeo import gdal, gdalconst, ogr, osr
-
+try:
+    from osgeo import gdal, gdalconst, ogr, osr
+except ImportError:
+    pass
 from shapely.geometry import box, Polygon, Point
 from shapely.geometry.base import BaseGeometry
 from shapely.wkt import loads
