@@ -261,7 +261,7 @@ class SegmentationDOFA(LightningModule):
         self.val_samples_count += batch_size
         y = y.squeeze(1).long()
         outputs = self(x, wv)
-        loss = self.loss(outputs.out, y)
+        loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
         self.log(
             "val_loss",
             loss,
@@ -301,13 +301,12 @@ class SegmentationDOFA(LightningModule):
         self.test_samples_count += batch_size
         y = y.squeeze(1).long()
         outputs = self(x, wv)
-        loss = self.loss(outputs.out, y)
+        loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
         if self.num_classes == 1:
             y_hat = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
         else:
             y_hat = outputs.out.softmax(dim=1).argmax(dim=1)
         metrics = self.iou_classwise_metric(y_hat, y)
-        self.iou_classwise_metric.reset()
         metrics["test_loss"] = loss
 
         if self._total_samples_visualized < self.max_samples:
