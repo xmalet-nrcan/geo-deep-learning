@@ -1,6 +1,9 @@
 import torch
 from torch.nn import functional as F
 
+from models.changeformer.original_change_former import ChangeFormerV6
+
+
 class ScriptModel(torch.nn.Module):
     def __init__(self, 
                  model,
@@ -26,7 +29,10 @@ class ScriptModel(torch.nn.Module):
         self.from_logits = from_logits
         
         input_tensor = torch.rand(input_shape).to(self.device)
-        self.model_scripted = torch.jit.trace(model.eval(), input_tensor)
+        if isinstance(model, ChangeFormerV6):
+            self.model_scripted = torch.jit.trace(model.eval(), (input_tensor,input_tensor))
+        else:
+            self.model_scripted = torch.jit.trace(model.eval(), input_tensor)
     
     def forward(self, input):
         shape = input.shape
