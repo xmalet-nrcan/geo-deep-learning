@@ -7,6 +7,9 @@ from hydra.utils import get_method
 from omegaconf import DictConfig, OmegaConf, open_dict
 from utils.utils import print_config, get_git_hash
 
+logging.getLogger("rasterio").setLevel(logging.ERROR)
+
+
 
 @hydra.main(config_path="config", config_name="gdl_config_template", version_base=None)
 def run_gdl(cfg: DictConfig) -> None:
@@ -77,7 +80,5 @@ def run_gdl(cfg: DictConfig) -> None:
         "\n" + "-" * len(msg) + "\n"
     )
     # ------------------------------------
-
-
 if __name__ == '__main__':
     run_gdl()
