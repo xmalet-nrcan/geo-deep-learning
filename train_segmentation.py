@@ -1,31 +1,31 @@
+import shutil
+import time
 from collections import OrderedDict
 from datetime import datetime
 from numbers import Number
 from pathlib import Path
-import shutil
-import time
 from typing import Sequence
 
-from hydra.utils import to_absolute_path, instantiate
 import numpy as np
-from omegaconf import DictConfig
 import rasterio
-from sklearn.utils import compute_sample_weight
 import torch
+from hydra.utils import to_absolute_path, instantiate
+from omegaconf import DictConfig
+from sklearn.utils import compute_sample_weight
 from torch import optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from models.model_choice import read_checkpoint, define_model, adapt_checkpoint_to_dp_model
-
 from dataset.rcm_create_dataloader import create_pre_post_dataloader
+from models.model_choice import read_checkpoint, define_model, adapt_checkpoint_to_dp_model
 from utils import augmentation as aug
-from utils.script_model import ScriptModel
 from utils.logger import InformationLogger, tsv_line, get_logger, set_tracker
 from utils.loss import verify_weights, define_loss
 from utils.metrics import create_metrics_dict, calculate_batch_metrics
+from utils.script_model import ScriptModel
 from utils.utils import gpu_stats, get_key_def, get_device_ids, set_device
 from utils.visualization import vis_from_batch
+
 # Set the logging file
 logging = get_logger(__name__)  # import logging
 
@@ -183,7 +183,7 @@ def get_num_patches(
         params,
         min_annot_perc,
         attr_vals,
-        experiment_name:str,
+        experiment_name: str,
         compute_sampler_weights=False
 ):
     """
@@ -297,19 +297,19 @@ def vis_from_dataloader(vis_params,
 
 
 def training(train_loader,
-          model,
-          criterion,
-          optimizer,
-          scheduler,
-          num_classes,
-          batch_size,
-          ep_idx,
-          progress_log,
-          device,
-          scale,
-          vis_params,
-          aux_output: bool = False,
-          debug=False):
+             model,
+             criterion,
+             optimizer,
+             scheduler,
+             num_classes,
+             batch_size,
+             ep_idx,
+             progress_log,
+             device,
+             scale,
+             vis_params,
+             aux_output: bool = False,
+             debug=False):
     """
     Train the model and return the metrics of the training epoch
 
@@ -333,7 +333,7 @@ def training(train_loader,
 
     for batch_index, data in enumerate(tqdm(train_loader, desc=f'Iterating train batches with {device.type}')):
         progress_log.open('a', buffering=1).write(tsv_line(ep_idx, 'trn', batch_index, len(train_loader), time.time()))
-        if  'pre_img' in data.keys() and 'post_img' in data.keys():
+        if 'pre_img' in data.keys() and 'post_img' in data.keys():
             inputs = (data['pre_img'].to(device), data['post_img'].to(device))
             labels = data['label'].to(device)
         else:
@@ -343,7 +343,7 @@ def training(train_loader,
         # forward
         optimizer.zero_grad()
         if aux_output:
-                outputs, outputs_aux = model(inputs)
+            outputs, outputs_aux = model(inputs)
         else:
             if 'pre_img' in data.keys() and 'post_img' in data.keys():
                 logging.debug(inputs)
@@ -372,10 +372,11 @@ def training(train_loader,
                                ep_num=ep_idx + 1,
                                scale=scale)
 
-
         if aux_output:
-            loss_main = criterion(outputs, labels) if num_classes > 1 else criterion(outputs, labels.unsqueeze(1).float())
-            loss_aux = criterion(outputs_aux, labels) if num_classes > 1 else criterion(outputs, labels.unsqueeze(1).float())
+            loss_main = criterion(outputs, labels) if num_classes > 1 else criterion(outputs,
+                                                                                     labels.unsqueeze(1).float())
+            loss_aux = criterion(outputs_aux, labels) if num_classes > 1 else criterion(outputs,
+                                                                                        labels.unsqueeze(1).float())
             loss = 0.4 * loss_aux + loss_main
         else:
             if isinstance(outputs, list):
@@ -385,9 +386,9 @@ def training(train_loader,
                     loss += criterion(out, labels.unsqueeze(1).float())
                 loss /= len(outputs)
             else:
-                loss = criterion(outputs, labels) if num_classes > 1 else criterion(outputs, labels.unsqueeze(1).float())
+                loss = criterion(outputs, labels) if num_classes > 1 else criterion(outputs,
+                                                                                    labels.unsqueeze(1).float())
 
-        
         train_metrics['loss'].update(loss.item(), batch_size)
 
         if device.type == 'cuda' and debug:
@@ -405,14 +406,14 @@ def training(train_loader,
                                           gt_vals=np.unique(labels[0].detach().cpu().numpy())))
             else:
                 logging.debug(OrderedDict(trn_loss=f"{train_metrics['loss'].average():.2f}",
-                                      gpu_perc=f"{res['gpu']} %",
-                                      gpu_RAM=f"{mem['used'] / (1024 ** 2):.0f}/{mem['total'] / (1024 ** 2):.0f} MiB",
-                                      lr=optimizer.param_groups[0]['lr'],
-                                      img=data["image"].numpy().shape,
-                                      smpl=data["mask"].numpy().shape,
-                                      bs=batch_size,
-                                      out_vals=np.unique(outputs[0].argmax(dim=0).detach().cpu().numpy()),
-                                      gt_vals=np.unique(labels[0].detach().cpu().numpy())))
+                                          gpu_perc=f"{res['gpu']} %",
+                                          gpu_RAM=f"{mem['used'] / (1024 ** 2):.0f}/{mem['total'] / (1024 ** 2):.0f} MiB",
+                                          lr=optimizer.param_groups[0]['lr'],
+                                          img=data["image"].numpy().shape,
+                                          smpl=data["mask"].numpy().shape,
+                                          bs=batch_size,
+                                          out_vals=np.unique(outputs[0].argmax(dim=0).detach().cpu().numpy()),
+                                          gt_vals=np.unique(labels[0].detach().cpu().numpy())))
 
         loss.backward()
         optimizer.step()
@@ -522,7 +523,7 @@ def evaluation(eval_loader,
                 res, mem = gpu_stats(device=device.index)
                 logging.debug(OrderedDict(
                     device=device, gpu_perc=f"{res['gpu']} %",
-                    gpu_RAM=f"{mem['used']/(1024**2):.0f}/{mem['total']/(1024**2):.0f} MiB"
+                    gpu_RAM=f"{mem['used'] / (1024 ** 2):.0f}/{mem['total'] / (1024 ** 2):.0f} MiB"
                 ))
 
     if eval_metrics['loss'].average():
@@ -574,14 +575,14 @@ def train(cfg: DictConfig) -> None:
     modalities_str = [str(band) for band in modalities]
     num_bands = len(modalities)
     if cfg.dataset.name == "pre_post_datasets":
-        num_bands = num_bands + 2 # We had 2 additional bands for pre-post change detection (beam and pass)
+        num_bands = num_bands + 2  # We had 2 additional bands for pre-post change detection (beam and pass)
     batch_size = get_key_def('batch_size', cfg['training'], expected_type=int)
     eval_batch_size = get_key_def('eval_batch_size', cfg['training'], expected_type=int, default=batch_size)
     num_epochs = get_key_def('max_epochs', cfg['training'], expected_type=int)
 
     # OPTIONAL PARAMETERS
     debug = get_key_def('debug', cfg)
-    task = get_key_def('task',  cfg['general'], default='segmentation')
+    task = get_key_def('task', cfg['general'], default='segmentation')
     dontcare_val = get_key_def("ignore_index", cfg['dataset'], default=-1)
     scale = get_key_def('scale_data', cfg['augmentation'], default=[0, 1])
     batch_metrics = get_key_def('batch_metrics', cfg['training'], default=None)
@@ -597,7 +598,8 @@ def train(cfg: DictConfig) -> None:
     elif not cfg.loss.is_binary and num_classes == 1:
         raise ValueError(f"Parameter mismatch: a multiclass loss was chosen for a 1-class (binary) task")
     del cfg.loss.is_binary  # prevent exception at instantiation
-    optimizer = get_key_def('optimizer_name', cfg['optimizer'], default='adam', expected_type=str)  # TODO change something to call the function
+    optimizer = get_key_def('optimizer_name', cfg['optimizer'], default='adam',
+                            expected_type=str)  # TODO change something to call the function
     pretrained = get_key_def('pretrained', cfg['model'], default=True, expected_type=(bool, str))
     train_state_dict_path = get_key_def('state_dict_path', cfg['training'], default=None, expected_type=str)
     state_dict_strict = get_key_def('state_dict_strict_load', cfg['training'], default=True, expected_type=bool)
@@ -632,7 +634,7 @@ def train(cfg: DictConfig) -> None:
 
     data_path = get_key_def('raw_data_dir', cfg['dataset'], to_path=True, validate_path_exists=True)
     tiling_root_dir = get_key_def('tiling_data_dir', cfg['tiling'], default=data_path, to_path=True,
-                                 validate_path_exists=True)
+                                  validate_path_exists=True)
     logging.info("\nThe tiling directory used '{}'".format(tiling_root_dir))
 
     tiling_dir = tiling_root_dir / experiment_name
@@ -648,8 +650,13 @@ def train(cfg: DictConfig) -> None:
     heatmaps = get_key_def('heatmaps', cfg['visualization'], False)
     heatmaps_inf = get_key_def('heatmaps', cfg['inference'], False)
     grid = get_key_def('grid', cfg['visualization'], False)
-    mean = get_key_def('mean', cfg['augmentation']['normalization'])
-    std = get_key_def('std', cfg['augmentation']['normalization'])
+    if cfg.dataset.name == 'pre_post_datasets':
+        mean = [0] * num_bands
+        std = [1] * num_bands
+
+    else:
+        mean = get_key_def('mean', cfg['augmentation']['normalization'])
+        std = get_key_def('std', cfg['augmentation']['normalization'])
     vis_params = {'colormap_file': colormap_file, 'heatmaps': heatmaps, 'heatmaps_inf': heatmaps_inf, 'grid': grid,
                   'mean': mean, 'std': std, 'vis_batch_range': vis_batch_range, 'vis_at_train': vis_at_train,
                   'vis_at_eval': vis_at_eval, 'ignore_index': dontcare_val, 'inference_input_path': None}
@@ -697,7 +704,7 @@ def train(cfg: DictConfig) -> None:
         checkpoint_dict=checkpoint,
         checkpoint_dict_strict_load=state_dict_strict
     )
-    
+
     if cfg.model._target_ == "models.hrnet.hrnet_ocr.HRNet":
         aux_output = True
     criterion = define_loss(loss_params=cfg.loss, class_weights=class_weights)
@@ -853,7 +860,7 @@ def train(cfg: DictConfig) -> None:
                 vis_from_dataloader(vis_params=vis_params,
                                     eval_loader=val_dataloader if vis_at_ckpt_dataset == 'val' else tst_dataloader,
                                     model=model,
-                                    ep_num=epoch+1,
+                                    ep_num=epoch + 1,
                                     output_path=output_path,
                                     dataset=vis_at_ckpt_dataset,
                                     scale=scale,
@@ -863,7 +870,7 @@ def train(cfg: DictConfig) -> None:
 
         cur_elapsed = time.time() - since
         # logging.info(f'\nCurrent elapsed time {cur_elapsed // 60:.0f}m {cur_elapsed % 60:.0f}s')
-    
+
     # Script model
     if scriptmodel:
         logging.info(f'\nScripting model...')
@@ -875,7 +882,7 @@ def train(cfg: DictConfig) -> None:
                                       std=std,
                                       scaled_min=scale[0],
                                       scaled_max=scale[1])
-        
+
         scripted_model = torch.jit.script(model_to_script)
         if best_checkpoint_filename is not None:
             scripted_model_filename = best_checkpoint_filename.replace('.pth.tar', '_scripted.pt')
@@ -885,7 +892,7 @@ def train(cfg: DictConfig) -> None:
             scripted_model.save(output_path.joinpath(scripted_model_filename))
 
     # load checkpoint model and evaluate it on test dataset.
-    if int(cfg['general']['max_epochs']) > 0:   # if num_epochs is set to 0, model is loaded to evaluate on test set
+    if int(cfg['general']['max_epochs']) > 0:  # if num_epochs is set to 0, model is loaded to evaluate on test set
         checkpoint = read_checkpoint(filename)
         checkpoint = adapt_checkpoint_to_dp_model(checkpoint, model)
         model.load_state_dict(state_dict=checkpoint['model_state_dict'])
