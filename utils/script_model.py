@@ -40,7 +40,10 @@ class ScriptModel(torch.nn.Module):
         input = (self.max_val - self.min_val) * (input - self.min) / (self.max -self.min) + self.min_val
         input = (input.reshape(B, C, -1) - self.mean) / self.std
         input = input.reshape(shape)
-        output = self.model_scripted(input.to(self.device))
+        if isinstance(self.model_scripted, ChangeFormerV6):
+            output = self.model_scripted(input.to(self.device), input.to(self.device))
+        else:
+            output = self.model_scripted(input.to(self.device))
         if self.from_logits:
             if self.num_classes == 1:
                 return F.sigmoid(output)
