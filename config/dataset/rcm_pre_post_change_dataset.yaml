@@ -5,7 +5,7 @@ dataset:
   raw_data_csv: ${general.raw_data_dir}/pre_post_datasets.csv
   raw_data_dir: ${general.raw_data_dir}/raw
   download_data: False
-  train_test_val_split: [0.7, 0.15, 0.15]  # train, test, val
+  train_test_val_split: [0.6, 0.2, 0.2]  # train, test, val
   split_seed: 42 # for reproducibility (and 42 is the answer to everything)
 
   # imagery
