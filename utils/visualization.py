@@ -83,8 +83,8 @@ def vis_from_batch(vis_params: Dict,
     """
     # Create an empty list of labels to enable zip operation below if no label:
     labels = [None]*(outputs[0]) if labels is None else labels
-    if isinstance(inputs, list):
-        inputs = torch.stack(inputs)
+    if isinstance(inputs, (list, tuple)):
+        inputs = inputs[1]
     for batch_sample_index, data in enumerate(zip(inputs, labels, outputs)):
         epoch_sample_index = batch_sample_index + len(inputs) * batch_index
         image, label, output = data
