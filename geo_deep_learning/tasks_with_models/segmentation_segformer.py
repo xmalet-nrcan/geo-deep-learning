@@ -269,7 +269,7 @@ class SegmentationSegformer(LightningModule):
         batch_size = x.shape[0]
         y = y.squeeze(1).long()
         outputs = self(x)
-        loss = self.loss(outputs.out, y)
+        loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
         self.log(
             "val_loss",
             loss,
@@ -299,7 +299,7 @@ class SegmentationSegformer(LightningModule):
         batch_size = x.shape[0]
         y = y.squeeze(1).long()
         outputs = self(x)
-        loss = self.loss(outputs.out, y)
+        loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
 
         if self.num_classes == 1:
             y_hat = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
@@ -331,7 +331,6 @@ class SegmentationSegformer(LightningModule):
             sync_dist=True,
             rank_zero_only=True,
         )
-        self.iou_classwise_metric.reset()
 
     def _log_visualizations(  # noqa: PLR0913
         self,
