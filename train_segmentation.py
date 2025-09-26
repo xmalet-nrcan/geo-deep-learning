@@ -17,9 +17,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from models.model_choice import read_checkpoint, define_model, adapt_checkpoint_to_dp_model
-from tiling_segmentation import Tiler
+
+from dataset.rcm_create_dataloader import create_pre_post_dataloader
 from utils import augmentation as aug
-from dataset import create_dataset
 from utils.script_model import ScriptModel
 from utils.logger import InformationLogger, tsv_line, get_logger, set_tracker
 from utils.loss import verify_weights, define_loss
@@ -80,6 +80,9 @@ def create_dataloader(patches_folder: Path,
         the majority class(es) during training.
     :return: trn_dataloader, val_dataloader, tst_dataloader
     """
+    from tiling_segmentation import Tiler
+    from dataset import create_dataset
+
     if not patches_folder.is_dir():
         raise FileNotFoundError(f'Could not locate: {patches_folder}')
     experiment_name = patches_folder.stem
@@ -195,6 +198,8 @@ def get_num_patches(
         the majority class(es) during training.
     :return: (dict) number of patches for trn, val and tst.
     """
+    from tiling_segmentation import Tiler
+
     num_patches = {'trn': 0, 'val': 0, 'tst': 0}
     weights = []
     patches_weight = None
@@ -269,10 +274,15 @@ def vis_from_dataloader(vis_params,
         for batch_index, data in enumerate(_tqdm):
             if vis_batch_range is not None and batch_index in range(min_vis_batch, max_vis_batch, increment):
                 with torch.no_grad():
-                    inputs = data["image"].to(device)
-                    labels = data["mask"].to(device)
+                    if 'pre_img' in data.keys() and 'post_img' in data.keys():
+                        inputs = (data['image_pre'].to(device), data['image'].to(device))
+                        labels = data['label'].to(device)
+                        outputs = model(inputs[0], inputs[1])
+                    else:
+                        inputs = data["image"].to(device)
+                        labels = data["mask"].to(device)
 
-                    outputs = model(inputs)
+                        outputs = model(inputs)
                     if isinstance(outputs, OrderedDict):
                         outputs = outputs['out']
 
@@ -323,16 +333,23 @@ def training(train_loader,
 
     for batch_index, data in enumerate(tqdm(train_loader, desc=f'Iterating train batches with {device.type}')):
         progress_log.open('a', buffering=1).write(tsv_line(ep_idx, 'trn', batch_index, len(train_loader), time.time()))
-
-        inputs = data["image"].to(device)
-        labels = data["mask"].to(device)
+        if  'pre_img' in data.keys() and 'post_img' in data.keys():
+            inputs = (data['pre_img'].to(device), data['post_img'].to(device))
+            labels = data['label'].to(device)
+        else:
+            inputs = data["image"].to(device)
+            labels = data["mask"].to(device)
 
         # forward
         optimizer.zero_grad()
         if aux_output:
                 outputs, outputs_aux = model(inputs)
         else:
-            outputs = model(inputs)
+            if 'pre_img' in data.keys() and 'post_img' in data.keys():
+                logging.debug(inputs)
+                outputs = model(inputs[0], inputs[1])
+            else:
+                outputs = model(inputs)
         # added for torchvision models that output an OrderedDict with outputs in 'out' key.
         # More info: https://pytorch.org/hub/pytorch_vision_deeplabv3_resnet101/
         if isinstance(outputs, OrderedDict):
@@ -354,18 +371,40 @@ def training(train_loader,
                                dataset='trn',
                                ep_num=ep_idx + 1,
                                scale=scale)
+
+
         if aux_output:
             loss_main = criterion(outputs, labels) if num_classes > 1 else criterion(outputs, labels.unsqueeze(1).float())
             loss_aux = criterion(outputs_aux, labels) if num_classes > 1 else criterion(outputs, labels.unsqueeze(1).float())
             loss = 0.4 * loss_aux + loss_main
         else:
-            loss = criterion(outputs, labels) if num_classes > 1 else criterion(outputs, labels.unsqueeze(1).float())  
+            if isinstance(outputs, list):
+                loss = 0
+                for out in outputs:
+                    print("out:", out.shape, "labels:", labels.shape)
+                    loss += criterion(out, labels.unsqueeze(1).float())
+                loss /= len(outputs)
+            else:
+                loss = criterion(outputs, labels) if num_classes > 1 else criterion(outputs, labels.unsqueeze(1).float())
+
         
         train_metrics['loss'].update(loss.item(), batch_size)
 
         if device.type == 'cuda' and debug:
             res, mem = gpu_stats(device=device.index)
-            logging.debug(OrderedDict(trn_loss=f"{train_metrics['loss'].average():.2f}",
+            if 'pre_img' in data.keys() and 'post_img' in data.keys():
+                logging.debug(OrderedDict(trn_loss=f"{train_metrics['loss'].average():.2f}",
+                                          gpu_perc=f"{res['gpu']} %",
+                                          gpu_RAM=f"{mem['used'] / (1024 ** 2):.0f}/{mem['total'] / (1024 ** 2):.0f} MiB",
+                                          lr=optimizer.param_groups[0]['lr'],
+                                          pre_img=data["pre_img"].numpy().shape,
+                                          post_img=data["post_img"].numpy().shape,
+                                          smpl=data["label"].numpy().shape,
+                                          bs=batch_size,
+                                          out_vals=np.unique(outputs[0].argmax(dim=0).detach().cpu().numpy()),
+                                          gt_vals=np.unique(labels[0].detach().cpu().numpy())))
+            else:
+                logging.debug(OrderedDict(trn_loss=f"{train_metrics['loss'].average():.2f}",
                                       gpu_perc=f"{res['gpu']} %",
                                       gpu_RAM=f"{mem['used'] / (1024 ** 2):.0f}/{mem['total'] / (1024 ** 2):.0f} MiB",
                                       lr=optimizer.param_groups[0]['lr'],
@@ -423,9 +462,14 @@ def evaluation(eval_loader,
         progress_log.open('a', buffering=1).write(tsv_line(ep_idx, dataset, batch_index, len(eval_loader), time.time()))
 
         with torch.no_grad():
-            inputs = data["image"].to(device)
-            labels = data["mask"].to(device)
-            outputs = model(inputs)
+            if 'pre_img' in data.keys() and 'post_img' in data.keys():
+                inputs = (data['pre_img'].to(device), data['post_img'].to(device))
+                labels = data['label'].to(device)
+                outputs = model(inputs[0], inputs[1])
+            else:
+                inputs = data["image"].to(device)
+                labels = data["mask"].to(device)
+                outputs = model(inputs)
 
             if isinstance(outputs, OrderedDict):
                 outputs = outputs['out']
@@ -529,6 +573,8 @@ def train(cfg: DictConfig) -> None:
     modalities = get_key_def('bands', cfg['dataset'], default=("red", "blue", "green"), expected_type=Sequence)
     modalities_str = [str(band) for band in modalities]
     num_bands = len(modalities)
+    if cfg.dataset.name == "pre_post_datasets":
+        num_bands = num_bands + 2 # We had 2 additional bands for pre-post change detection (beam and pass)
     batch_size = get_key_def('batch_size', cfg['training'], expected_type=int)
     eval_batch_size = get_key_def('eval_batch_size', cfg['training'], expected_type=int, default=batch_size)
     num_epochs = get_key_def('max_epochs', cfg['training'], expected_type=int)
@@ -641,6 +687,7 @@ def train(cfg: DictConfig) -> None:
     # INSTANTIATE MODEL AND LOAD CHECKPOINT FROM PATH
     checkpoint = read_checkpoint(train_state_dict_path)
     aux_output = False
+
     model = define_model(
         net_params=cfg.model,
         in_channels=num_bands,
@@ -662,21 +709,41 @@ def train(cfg: DictConfig) -> None:
                  f'classes.')
 
     logging.info(f'Creating dataloaders from data in {tiling_dir}...\n')
-    trn_dataloader, val_dataloader, tst_dataloader = create_dataloader(patches_folder=tiling_dir,
-                                                                       batch_size=batch_size,
-                                                                       eval_batch_size=eval_batch_size,
-                                                                       gpu_devices_dict=gpu_devices_dict,
-                                                                       sample_size=patches_size,
-                                                                       dontcare_val=dontcare_val,
-                                                                       crop_size=crop_size,
-                                                                       num_bands=num_bands,
-                                                                       min_annot_perc=min_annot_perc,
-                                                                       attr_vals=attr_vals,
-                                                                       scale=scale,
-                                                                       cfg=cfg,
-                                                                       dontcare2backgr=dontcare2backgr,
-                                                                       compute_sampler_weights=compute_sampler_weights,
-                                                                       debug=debug)
+    if cfg.dataset.name == "pre_post_datasets":
+        beam_filter = get_key_def('beam_filter', cfg['dataset'], default=None)
+        satellite_pass_filter = get_key_def('satellite_pass_filter', cfg['dataset'], default=None)
+
+        data_path = get_key_def('raw_data_dir', cfg['dataset'], to_path=True, validate_path_exists=True)
+        csv_data_path = get_key_def('raw_data_csv', cfg['dataset'], to_path=True, validate_path_exists=True)
+        print(cfg['dataset'])
+        trn_dataloader, val_dataloader, tst_dataloader = create_pre_post_dataloader(
+            csv_dataset_path=csv_data_path,
+            data_directory=data_path,
+            batch_size=batch_size,
+            gpu_devices_dict=gpu_devices_dict,
+            bands=modalities_str,
+            cfg=cfg,
+            beam_filter=beam_filter,
+            satellite_pass_filter=satellite_pass_filter,
+            train_test_val_split=cfg['dataset'].get('train_test_val_split', None),
+            split_seed=cfg['dataset'].get('split_seed', 42)
+        )
+    else:
+        trn_dataloader, val_dataloader, tst_dataloader = create_dataloader(patches_folder=tiling_dir,
+                                                                           batch_size=batch_size,
+                                                                           eval_batch_size=eval_batch_size,
+                                                                           gpu_devices_dict=gpu_devices_dict,
+                                                                           sample_size=patches_size,
+                                                                           dontcare_val=dontcare_val,
+                                                                           crop_size=crop_size,
+                                                                           num_bands=num_bands,
+                                                                           min_annot_perc=min_annot_perc,
+                                                                           attr_vals=attr_vals,
+                                                                           scale=scale,
+                                                                           cfg=cfg,
+                                                                           dontcare2backgr=dontcare2backgr,
+                                                                           compute_sampler_weights=compute_sampler_weights,
+                                                                           debug=debug)
 
     # Save tracking
     set_tracker(mode='train', type='mlflow', task='segmentation', experiment_name=experiment_name, run_name=run_name,
