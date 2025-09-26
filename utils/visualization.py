@@ -13,7 +13,6 @@ from matplotlib.colors import ListedColormap
 import csv
 
 from utils.utils import unscale, unnormalize, minmax_scale
-from utils.geoutils import create_new_raster_from_base
 
 import matplotlib
 
@@ -84,7 +83,8 @@ def vis_from_batch(vis_params: Dict,
     """
     # Create an empty list of labels to enable zip operation below if no label:
     labels = [None]*(outputs[0]) if labels is None else labels
-
+    if isinstance(inputs, list):
+        inputs = torch.stack(inputs)
     for batch_sample_index, data in enumerate(zip(inputs, labels, outputs)):
         epoch_sample_index = batch_sample_index + len(inputs) * batch_index
         image, label, output = data
@@ -112,6 +112,7 @@ def vis(vis_params: Dict,
         inference_input_path: Union[str, Path] = None,
         scale: List = None,
         debug: bool = False) -> None:
+
     """
     Saves input, output and label (if given) as .png in a grid or as individual pngs
     :param vis_params: (dict) visualization parameters
@@ -128,6 +129,8 @@ def vis(vis_params: Dict,
     :param debug: True or False, for debugging
     :return: saves color images from input arrays as grid or as full scale .png
     """
+    from utils.geoutils import create_new_raster_from_base
+
     # Copy to cpu() memory and permute the dimensions: channel(s) last
     image = image.cpu().permute(1, 2, 0).numpy()
     n_classes = output.shape[0]
