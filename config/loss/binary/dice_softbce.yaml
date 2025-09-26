@@ -1,0 +1,9 @@
+# @package _global_
+loss:
+    _target_: losses.dice_bce_loss.DiceBCELoss
+    mode: binary
+    ignore_index: ${dataset.ignore_index}
+    is_binary: True
+    alpha: 0.5
+    smooth: 1e-6
+    eps: 1e-7
