@@ -8,7 +8,10 @@ import pandas as pd
 import rasterio
 import torch
 from affine import Affine
-from osgeo import ogr
+try:
+    from osgeo import ogr
+except ImportError:
+    pass
 # These two import statements prevent exception when using eval(metadata) in SegmentationDataset()'s __init__()
 from rasterio.crs import CRS
 from rasterio.io import DatasetReader
