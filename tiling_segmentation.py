@@ -16,7 +16,10 @@ from omegaconf import DictConfig, open_dict
 import rasterio
 from shapely.geometry import box
 from tqdm import tqdm
-from osgeo import gdal, ogr
+try:
+    from osgeo import gdal, ogr
+except ImportError:
+    pass
 from torch.utils.data import DataLoader
 from torchgeo.samplers import GridGeoSampler
 from torchgeo.datasets import stack_samples
