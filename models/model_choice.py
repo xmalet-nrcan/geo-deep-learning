@@ -45,7 +45,7 @@ def read_checkpoint(filename, out_dir: str = 'checkpoints', update=False) -> Dic
         if is_url(filename):
             checkpoint = load_state_dict_from_url(url=filename, map_location='cpu', model_dir=to_absolute_path(out_dir))
         else:
-            checkpoint = torch.load(f=filename, map_location='cpu')
+            checkpoint = torch.load(f=filename, map_location='cpu', weights_only=False)
         # For loading external models with different structure in state dict.
         if 'model_state_dict' not in checkpoint.keys() and 'model' not in checkpoint.keys():
             val_set = set()
