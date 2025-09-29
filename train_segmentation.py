@@ -274,18 +274,15 @@ def vis_from_dataloader(vis_params,
         for batch_index, data in enumerate(_tqdm):
             if vis_batch_range is not None and batch_index in range(min_vis_batch, max_vis_batch, increment):
                 with torch.no_grad():
-                    if 'pre_img' in data.keys() and 'post_img' in data.keys():
-                        inputs = (data['image_pre'].to(device), data['image'].to(device))
-                        labels = data['label'].to(device)
-                        outputs = model(inputs[0], inputs[1])
+                    if 'image_pre' in data.keys() and 'image' in data.keys():
+                        outputs = model(data['image_pre'].to(device), data['image'].to(device))
+                        logging.debug("VIZUALIZATION PRE-POST DATA")
                     else:
-                        inputs = data["image"].to(device)
-                        labels = data["mask"].to(device)
-
-                        outputs = model(inputs)
+                        outputs = model(data["image"].to(device))
                     if isinstance(outputs, OrderedDict):
                         outputs = outputs['out']
-
+                    inputs = data["image"].to(device)
+                    labels = data["mask"].to(device)
                     vis_from_batch(vis_params, inputs, outputs,
                                    batch_index=batch_index,
                                    vis_path=vis_path,
@@ -333,19 +330,18 @@ def training(train_loader,
 
     for batch_index, data in enumerate(tqdm(train_loader, desc=f'Iterating train batches with {device.type}')):
         progress_log.open('a', buffering=1).write(tsv_line(ep_idx, 'trn', batch_index, len(train_loader), time.time()))
-        if 'pre_img' in data.keys() and 'post_img' in data.keys():
-            inputs = (data['pre_img'].to(device), data['post_img'].to(device))
-            labels = data['label'].to(device)
+        if  'image_pre' in data.keys() and 'image' in data.keys():
+            inputs = (data['image_pre'].to(device), data['image'].to(device))
         else:
             inputs = data["image"].to(device)
-            labels = data["mask"].to(device)
+        labels = data["mask"].to(device)
 
         # forward
         optimizer.zero_grad()
         if aux_output:
             outputs, outputs_aux = model(inputs)
         else:
-            if 'pre_img' in data.keys() and 'post_img' in data.keys():
+            if 'image_pre' in data.keys() and 'image' in data.keys():
                 logging.debug(inputs)
                 outputs = model(inputs[0], inputs[1])
             else:
@@ -393,14 +389,14 @@ def training(train_loader,
 
         if device.type == 'cuda' and debug:
             res, mem = gpu_stats(device=device.index)
-            if 'pre_img' in data.keys() and 'post_img' in data.keys():
+            if 'image_pre' in data.keys() and 'image' in data.keys():
                 logging.debug(OrderedDict(trn_loss=f"{train_metrics['loss'].average():.2f}",
                                           gpu_perc=f"{res['gpu']} %",
                                           gpu_RAM=f"{mem['used'] / (1024 ** 2):.0f}/{mem['total'] / (1024 ** 2):.0f} MiB",
                                           lr=optimizer.param_groups[0]['lr'],
-                                          pre_img=data["pre_img"].numpy().shape,
-                                          post_img=data["post_img"].numpy().shape,
-                                          smpl=data["label"].numpy().shape,
+                                          pre_img=data["image_pre"].numpy().shape,
+                                          img=data["image"].numpy().shape,
+                                          smpl=data["mask"].numpy().shape,
                                           bs=batch_size,
                                           out_vals=np.unique(outputs[0].argmax(dim=0).detach().cpu().numpy()),
                                           gt_vals=np.unique(labels[0].detach().cpu().numpy())))
@@ -463,14 +459,13 @@ def evaluation(eval_loader,
         progress_log.open('a', buffering=1).write(tsv_line(ep_idx, dataset, batch_index, len(eval_loader), time.time()))
 
         with torch.no_grad():
-            if 'pre_img' in data.keys() and 'post_img' in data.keys():
-                inputs = (data['pre_img'].to(device), data['post_img'].to(device))
-                labels = data['label'].to(device)
+            if 'image_pre' in data.keys() and 'image' in data.keys():
+                inputs = (data['image_pre'].to(device), data['image'].to(device))
                 outputs = model(inputs[0], inputs[1])
             else:
                 inputs = data["image"].to(device)
-                labels = data["mask"].to(device)
                 outputs = model(inputs)
+            labels = data["mask"].to(device)
 
             if isinstance(outputs, OrderedDict):
                 outputs = outputs['out']
