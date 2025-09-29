@@ -146,7 +146,7 @@ class PrePostChangeDataset(Dataset):
                         min_height=self.patch_size[1],
                         min_width=self.patch_size[0],
                         position="random",
-                        fill_mask=0,
+                        fill_mask=NO_DATA,
                         fill=NO_DATA,
                         p=1,
                     ),
@@ -154,7 +154,7 @@ class PrePostChangeDataset(Dataset):
                         width=self.patch_size[1],
                         height=self.patch_size[0],
                         pad_if_needed=True,
-                        fill_mask=0,
+                        fill_mask=NO_DATA,
                         fill=NO_DATA,
                         p=0.5,
                     ),
@@ -166,7 +166,7 @@ class PrePostChangeDataset(Dataset):
                             A.Rotate(
                                 interpolation=cv2.INTER_NEAREST,
                                 mask_interpolation=cv2.INTER_NEAREST,
-                                fill_mask=0,
+                                fill_mask=NO_DATA,
                                 fill=NO_DATA,
                                 p=1,
                             ),
@@ -184,7 +184,7 @@ class PrePostChangeDataset(Dataset):
                                 interpolation=cv2.INTER_NEAREST,
                                 mask_interpolation=cv2.INTER_NEAREST,
                                 fill=NO_DATA,
-                                fill_mask=0,
+                                fill_mask=NO_DATA,
                                 p=1,
                             ),
                             A.GridDistortion(
@@ -194,7 +194,7 @@ class PrePostChangeDataset(Dataset):
                                 interpolation=cv2.INTER_NEAREST,
                                 mask_interpolation=cv2.INTER_NEAREST,
                                 fill=NO_DATA,
-                                fill_mask=0,
+                                fill_mask=NO_DATA,
                                 p=1,
                             ),
                             A.Perspective(
@@ -203,7 +203,7 @@ class PrePostChangeDataset(Dataset):
                                 interpolation=cv2.INTER_NEAREST,
                                 mask_interpolation=cv2.INTER_NEAREST,
                                 fill=NO_DATA,
-                                fill_mask=0,
+                                fill_mask=NO_DATA,
                                 p=1,
                             ),
                         ],
@@ -217,14 +217,14 @@ class PrePostChangeDataset(Dataset):
                                 hole_height_range=(0.1, 0.5),
                                 hole_width_range=(0.1, 0.5),
                                 fill=NO_DATA,
-                                fill_mask=0,
+                                fill_mask=NO_DATA,
                                 p=1,
                             ),
                             A.GridDropout(
-                                ratio=0.4,
+                                ratio=0.2,
                                 random_offset=True,
                                 fill=NO_DATA,
-                                fill_mask=0,
+                                fill_mask=NO_DATA,
                                 p=1,
                             ),
                         ],
@@ -540,9 +540,6 @@ class PrePostChangeDataset(Dataset):
         return {
             "image": post_img,
             "image_pre": pre_img,
-            "post_img": post_img,
-            "pre_img": pre_img,
-            "label": label,
             "mask": label,
             "meta": sample,
         }
@@ -675,7 +672,7 @@ class PrePostChangeDataset(Dataset):
         for run in range(n_runs):
             row_axes = axes[run] if n_runs > 1 else axes
             data = self.__getitem__(idx)
-            pre_img, post_img, label = data["pre_img"], data["post_img"], data["label"]
+            pre_img, post_img, label = data["image_pre"], data["image"], data["mask"]
             pre_to_show = prepare_img(pre_img)
             post_to_show = prepare_img(post_img)
             label_to_show = prepare_img(label) if label is not None else None
