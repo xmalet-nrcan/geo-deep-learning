@@ -3,5 +3,5 @@ model:
   _target_: models.changeformer.original_change_former.ChangeFormerV6
   decoder_softmax: False    # (bool) Use to decoder softmax or not
   embed_dim: 256            # (int) Dimension of token/patch embeddings
-  in_channels: 3               # (int) Number of input channels
+  in_channels: 11               # (int) Number of input channels
   out_channels: 1              # (int) Number of output channels
