@@ -13,11 +13,12 @@ import torch
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
-from tools.utils import denormalization, load_weights_from_checkpoint
-from tools.visualization import visualize_prediction
 from torch import Tensor
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
+
+from geo_deep_learning.tools.utils import denormalization, load_weights_from_checkpoint
+from geo_deep_learning.tools.visualization import visualize_prediction
 
 # Ignore warning about default grid_sample and affine_grid behavior triggered by kornia
 warnings.filterwarnings(
@@ -143,13 +144,16 @@ class SegmentationUnetPlus(LightningModule):
     def configure_optimizers(self) -> list[list[dict[str, Any]]]:
         """Configure optimizers."""
         optimizer = self.optimizer(self.parameters())
+
+        # Check if scheduler is OneCycleLR by checking the class directly
         if (
-            self.hparams["scheduler"]["class_path"]
-            == "torch.optim.lr_scheduler.OneCycleLR"
+            hasattr(self.scheduler, "__name__")
+            and self.scheduler.__name__ == "OneCycleLR"
+        ) or (
+            isinstance(self.scheduler, type) and self.scheduler.__name__ == "OneCycleLR"
         ):
-            max_lr = (
-                self.hparams.get("scheduler", {}).get("init_args", {}).get("max_lr")
-            )
+            # Handle OneCycleLR special case
+            max_lr = getattr(self.scheduler, "max_lr", 0.001)  # default fallback
             stepping_batches = self.trainer.estimated_stepping_batches
             if stepping_batches > -1:
                 scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -176,17 +180,14 @@ class SegmentationUnetPlus(LightningModule):
                     epochs=max_epochs,
                 )
             else:
-                stepping_batches = (
-                    self.hparams.get("scheduler", {})
-                    .get("init_args", {})
-                    .get("total_steps")
-                )
+                # Fallback for OneCycleLR
                 scheduler = torch.optim.lr_scheduler.OneCycleLR(
                     optimizer,
                     max_lr=max_lr,
-                    total_steps=stepping_batches,
+                    total_steps=1000,  # default fallback
                 )
         else:
+            # For all other schedulers, use them directly
             scheduler = self.scheduler(optimizer)
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
