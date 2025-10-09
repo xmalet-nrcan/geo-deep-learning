@@ -63,11 +63,11 @@ class CSVDataset(NonGeoDataset):
     """
 
     def __init__(
-        self,
-        csv_root_folder: str,
-        patches_root_folder: str,
-        split: str = "trn",
-        norm_stats: dict[str, list[float]] | None = None,
+            self,
+            csv_root_folder: str,
+            patches_root_folder: str,
+            split: str = "trn",
+            norm_stats: dict[str, list[float]] | None = None,
     ) -> None:
         """
         Initialize the dataset.
@@ -115,25 +115,24 @@ class CSVDataset(NonGeoDataset):
         """
         return len(self.files)
 
-    def _load_image(self, index: int) -> Tensor:
+    def _load_image(self, index: int) -> tuple[Tensor, str]:
         """Load image."""
-        image_path = self.files[index]["image"]
-        image_name = Path(image_path).name
-        with rio.open(image_path) as image:
-            image_array = image.read().astype(np.int32)
-            image_tensor = torch.from_numpy(image_array).float()
+        return self._load_image_by_name(index, "image")
 
-        return image_tensor, image_name
-
-    def _load_mask(self, index: int) -> Tensor:
+    def _load_mask(self, index: int) -> tuple[Tensor, str]:
         """Load mask."""
-        mask_path = self.files[index]["mask"]
-        mask_name = Path(mask_path).name
+        return self._load_image_by_name(index, "mask")
+
+    def _load_image_by_name(self, index: int, mask_name: str, as_type=np.int32) -> tuple[Tensor, str]:
+        """Load mask."""
+        mask_path = self.files[index][mask_name]
+        mask_file_name = Path(mask_path).name
+
         with rio.open(mask_path) as mask:
-            mask_array = mask.read().astype(np.int32)
+            mask_array = mask.read().astype(as_type)
             mask_tensor = torch.from_numpy(mask_array).float()
 
-        return mask_tensor, mask_name
+        return mask_tensor, mask_file_name
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
         """
