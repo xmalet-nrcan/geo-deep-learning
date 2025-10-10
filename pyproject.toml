@@ -18,7 +18,7 @@ dependencies = [
     "mlflow>=2.0.0",
     "colorlog>=6.7.0",
     "PyYAML>=6.0",
-    "jsonargparse[signatures]>=4.27.7",
+    "jsonargparse[all]>=4.27.7",
     ]
 
 [project.optional-dependencies]
