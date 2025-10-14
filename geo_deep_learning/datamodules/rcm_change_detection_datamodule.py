@@ -43,8 +43,8 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self.csv_file_name =csv_file_name
         self.patches_root_folder = patches_root_folder
         self.norm_stats = {
-            "mean": mean or [0.0, 0.0, 0.0],
-            "std": std or [1.0, 1.0, 1.0],
+            "mean": mean ,
+            "std": std ,
         }
         self.bands = bands
         self.band_names = band_names
