@@ -3,11 +3,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Any
 
-import numpy as np
 import pandas as pd
 import torch
-from rasterio import rio
-from sympy.physics.optics import BeamParameter
 from torch import Tensor
 
 from geo_deep_learning.datasets.change_detection_dataset import ChangeDetectionDataset
@@ -59,6 +56,7 @@ class BandName(Enum):
     SP2 = 13
     SP3 = 14
 
+
 class Beams(Enum):
     A = 0
     B = 1
@@ -104,8 +102,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                  bands: Optional[List[int]] = None,
                  band_names: Optional[List[str]] = None,
                  satellite_pass: Optional[str | SatellitePass] = None,
-                 beams: Optional[List[str ]] = None,
-                 data_directory: Optional[str] = None
+                 beams: Optional[List[str]] = None
                  ) -> None:
         self.bands = bands
         if band_names is not None:
@@ -138,7 +135,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             self.satellite_pass = None
         self.beams = [] if beams is None else [i.upper() for i in beams]
 
-        super().__init__(csv_root_folder, patches_root_folder, split_or_csv_file_name, norm_stats)
+        super().__init__(csv_root_folder=csv_root_folder, patches_root_folder=patches_root_folder, split_or_csv_file_name= split_or_csv_file_name, norm_stats=norm_stats)
 
     def _load_files(self) -> list[dict[str, str]]:
         csv_path = self._get_csv_path()
@@ -153,7 +150,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             df_csv = df_csv[df_csv['sat_pass'] == self.satellite_pass]
             if df_csv.empty:
                 raise ValueError(f"No entries found for satellite pass {self.satellite_pass}")
-        if self.beams :
+
+        if len(self.beams) > 0:
             beams_str = [Beams[str(b).upper()] for b in self.beams]
             df_csv = df_csv[df_csv['beam'].isin(beams_str)]
             if df_csv.empty:
@@ -161,8 +159,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
         return [
             {
-                "image_pre": (img_pre.replace("$ROOT_PATH",self.patches_root_folder).strip()),
-                "image": (img.replace("$ROOT_PATH",self.patches_root_folder).strip()),
+                "image_pre": (img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip()),
+                "image": (img.replace("$ROOT_PATH", self.patches_root_folder).strip()),
                 "mask": Path(
                     self.patches_root_folder) / cell_id / "static_data" / f"{cell_id}_nbac_{int(group_date_post[:4]) + 1}_prefire_100m.tif",
                 "water_mask": Path(
@@ -195,7 +193,6 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
     def __len__(self) -> int:
         return super().__len__()
-
 
     def _get_bands_to_load(self) -> slice | None:
         # Always include BITMASK_CROPPED (band 1)
@@ -240,7 +237,6 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         water_mask_bool = (water_mask == 0)
         common_mask_tensor = common_mask_tensor & water_mask_bool
 
-
         mask, mask_name = self._load_mask(index)
         mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask)
 
@@ -257,15 +253,14 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
         # image_post, image_pre, mean, std = self._normalize_and_standardize(image_post, image_pre)
 
-
-
         sample = {"image": image_post,
                   "image_pre": image_pre,
                   "mask": mask,
                   "image_pre_name": image_pre_name,
                   "image_name": image_post_name,
                   "mask_name": mask_name,
-                  "bands" : [BandName.BITMASK_CROPPED.name, *self.band_names,SATTELITE_PASS_BAND_NAME,BEAM_BAND_NAME ] if self.band_names is not None else None,
+                  "bands": [BandName.BITMASK_CROPPED.name, *self.band_names, SATTELITE_PASS_BAND_NAME,
+                            BEAM_BAND_NAME] if self.band_names is not None else None,
                   "cell_id": data["cell_id"],
                   "db_nbac_fire_id": data["db_nbac_fire_id"],
                   # "mean": mean,
@@ -273,16 +268,15 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                   }
         return sample
 
-    def _normalize_and_standardize(self, image_post: Tensor, image_pre: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def _normalize_and_standardize(self, image_post: Tensor, image_pre: Tensor) -> tuple[
+        Tensor, Tensor, Tensor, Tensor]:
         image_pre, image_post = normalization(image_pre), normalization(image_post)
         mean = torch.tensor(self.norm_stats["mean"], dtype=torch.float32).view(-1, 1, 1)
         std = torch.tensor(self.norm_stats["std"], dtype=torch.float32).view(-1, 1, 1)
         #
         image_pre = standardization(image_pre, mean, std)
         image_post = standardization(image_post, mean, std)
-        return image_post, image_pre , mean, std
-
-
+        return image_post, image_pre, mean, std
 
     def _load_water_mask(self, index: int) -> tuple[Tensor, str]:
         """Load water mask."""
@@ -295,7 +289,7 @@ if __name__ == '__main__':
         patches_root_folder=r"C:\Users\xmalet\PycharmProjects\geo-deep-learning\data\raw",
         split_or_csv_file_name=r"pre_post_datasets.csv",
         norm_stats={"mean": [0.0] * 14, "std": [1.0] * 14},
-        band_names=["RR", "RL", "M",'PSN'],
+        band_names=["RR", "RL", "M", 'PSN'],
         satellite_pass="Descending",
         beams=['A']
     )
@@ -306,14 +300,12 @@ if __name__ == '__main__':
     print(f"Image shape: {sample['image'].shape}")
     print(f"Image pre shape: {sample['image_pre'].shape}")
     print(f"Mask shape: {sample['mask'].shape}")
-    print(f"BANDS: {sample['bands']}" )
+    print(f"BANDS: {sample['bands']}")
     print(f"Cell ID: {sample['cell_id']}")
     print(f"DB NBAC Fire ID: {sample['db_nbac_fire_id']}")
     print(sample['bands'].index(SATTELITE_PASS_BAND_NAME), sample['bands'].index(BEAM_BAND_NAME))
-    print(sample['image'][sample['bands'].index(SATTELITE_PASS_BAND_NAME),:5,:5])
-    print(sample['image'][sample['bands'].index(BEAM_BAND_NAME),:5,:5])
-
+    print(sample['image'][sample['bands'].index(SATTELITE_PASS_BAND_NAME), :5, :5])
+    print(sample['image'][sample['bands'].index(BEAM_BAND_NAME), :5, :5])
 
     # print(f"Mean: {sample['mean']}")
     # print(f"Std: {sample['std']}")
-
