@@ -117,6 +117,7 @@ class ChangeDetectionDataset(CSVDataset):
         image_pre, image_post, common_mask_tensor, image_pre_name, image_post_name = self._load_image(index)
         image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre)
         image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post)
+
         mask, mask_name = self._load_mask(index)
         mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask)
 
@@ -154,44 +155,37 @@ class ChangeDetectionDataset(CSVDataset):
         image_pre = data_at_index["image_pre"]
         image_post = data_at_index["image"]
         image_pre_name = Path(image_pre).name
-        image_post_name = Path(image_pre).name
+        image_post_name = Path(image_post).name
 
         image_pre_tensor, pre_data_mask = self.convert_tif_to_tensor(image_pre)
         image_post_tensor, post_data_mask = self.convert_tif_to_tensor(image_post)
-        # Common mask = areas where both images are valid (not nodata)
-        # Extract BITMASK_CROPPED (always first channel)
-        pre_mask = image_pre_tensor[0] if image_pre_tensor is not None else None
-        post_mask = image_post_tensor[0] if image_post_tensor is not None else None
 
         # Common mask = areas where both masks == 1
-        if pre_mask is not None and post_mask is not None:
-            common_mask_tensor = (pre_mask == 1) & (post_mask == 1)
+        if pre_data_mask is not None and post_data_mask is not None:
+            common_mask_tensor = (pre_data_mask == 1) & (post_data_mask == 1)
         else:
             common_mask_tensor = None
 
 
-        return image_pre_tensor, image_post_tensor, common_mask_tensor, image_pre_name, image_post_name
+        return image_pre_tensor, image_post_tensor, torch.from_numpy(common_mask_tensor), image_pre_name, image_post_name
 
     @staticmethod
-    def _apply_common_mask_to_tensor(common_mask_tensor: Tensor, in_image_tensor: Tensor) -> Tensor:
-        print(common_mask_tensor)
-        in_image_tensor = in_image_tensor.masked_fill_(~common_mask_tensor, np.nan)
+    def _apply_common_mask_to_tensor(common_mask_tensor: Tensor, in_image_tensor: Tensor, fill_value=np.nan) -> Tensor:
+        in_image_tensor = in_image_tensor.masked_fill_(~common_mask_tensor, fill_value)
         return in_image_tensor
 
     @staticmethod
-    def _read_image_and_get_no_data(path: str):
-        with rio.open(path) as src:
-            arr = src.read().astype(np.int32)  # shape (C,H,W)
-            nodata = src.nodata
-            if nodata is not None:
-                mask = (arr != nodata)
-            else:
-                mask = ~np.isnan(arr)
+    def _read_image_and_get_no_data(path: str, in_dtype:np.dtype):
+        """Read image and return array and no data mask (0 = no data; 1 = data).
+        """
+        with rio.open(path, ) as src:
+            arr = src.read().astype(in_dtype)  # shape (C,H,W)
+            mask = ~np.isnan(arr[0, :, :])
 
         return arr, mask
 
-    def convert_tif_to_tensor(self, in_image: str) -> tuple[Tensor, bool | ndarray[tuple[Any, ...], dtype[Any]] | Any]:
+    def convert_tif_to_tensor(self, in_image: str, in_dtype=np.int32) -> tuple[Tensor, bool | ndarray[tuple[Any, ...], dtype[Any]] | Any]:
 
-        img_array, no_data_mask = self._read_image_and_get_no_data(in_image)
+        img_array, no_data_mask = self._read_image_and_get_no_data(in_image, in_dtype=in_dtype)
         img_as_tensor = torch.from_numpy(img_array).float()
         return img_as_tensor, no_data_mask
