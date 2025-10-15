@@ -255,10 +255,11 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         common_mask_tensor = common_mask_tensor & no_water_mask
         print("COMMUN MASK AFTER WATER", common_mask_tensor.shape, common_mask_tensor.sum(), common_mask_tensor.all())
         mask, mask_name = self._load_mask(index)
-        mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, NO_DATA)
 
+        # Apply common mask to all and set NO_DATA where mask is False
         image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre, NO_DATA)
         image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, NO_DATA)
+        mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, NO_DATA)
 
         bands_index = self._get_bands_to_load()
 
@@ -283,10 +284,11 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                   "image_pre_name": image_pre_name,
                   "image_name": image_post_name,
                   "mask_name": mask_name,
-                  "bands": [*bands_index, SATTELITE_PASS_BAND_NAME, BEAM_BAND_NAME],
+                  "bands": [*band_names, SATTELITE_PASS_BAND_NAME, BEAM_BAND_NAME],
                   "cell_id": data["cell_id"],
                   "db_nbac_fire_id": data["db_nbac_fire_id"],
                   "profile": image_profile,
+                  "common_data_mask": common_mask_tensor,
                   # "mean": mean,
                   # "std": std
                   }
