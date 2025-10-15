@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import rasterio as rio
 import torch
+from numpy import ndarray, dtype
 from torch import Tensor
 
 from geo_deep_learning.datasets.change_detection_dataset import ChangeDetectionDataset
@@ -232,9 +233,13 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
     def _read_image_and_get_no_data(path: str, in_dtype: np.dtype = np.int16):
         with rio.open(path, nodata=NO_DATA, dtype='int16') as src:
             arr = src.read().astype(in_dtype)  # shape (C,H,W)
-            mask = arr[0, :, :] != NO_DATA
+            mask = arr[0, :, :] == 1    # Read the bitmask cropped band to get data mask
 
         return arr, mask
+
+    def convert_tif_to_tensor(self, in_image: str, in_dtype=np.int16) -> tuple[
+        Tensor, bool | ndarray[tuple[Any, ...], dtype[Any]] | Any]:
+        return super().convert_tif_to_tensor(in_image, in_dtype)
 
     def __getitem__(self, index: int) -> dict:
         """
@@ -261,22 +266,30 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, NO_DATA)
         mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, NO_DATA)
 
-        bands_index = self._get_bands_to_load()
 
+
+        bands_index = self._get_bands_to_load()
         if bands_index is not None:
             image_pre = image_pre[bands_index, :, :]
             image_post = image_post[bands_index, :, :]
 
+        # Add common mask as first band
+        image_pre = torch.cat([common_mask_tensor, image_pre], dim=0)
+        image_post = torch.cat([common_mask_tensor, image_post], dim=0)
+
         image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
 
         # image_post, image_pre, mean, std = self._normalize_and_standardize(image_post, image_pre)
-        image_profile = None
-        with rio.open(data['image']) as src:
-            image_profile = src.profile
-        image_profile['count'] = image_post.shape[0]
+
 
         band_names = [BandName(i + 1).name for i in bands_index] if bands_index is not None else [i.name for i in
                                                                                                   BandName]
+        band_names = ['COMMON_MASK'] + band_names + [SATTELITE_PASS_BAND_NAME, BEAM_BAND_NAME]
+
+        image_profile = None
+        with rio.open(data['image']) as src:
+            image_profile = src.profile
+        image_profile['count'] = len(band_names)
 
         sample = {"image": image_post,
                   "image_pre": image_pre,
@@ -284,7 +297,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                   "image_pre_name": image_pre_name,
                   "image_name": image_post_name,
                   "mask_name": mask_name,
-                  "bands": [*band_names, SATTELITE_PASS_BAND_NAME, BEAM_BAND_NAME],
+                  "bands": band_names,
                   "cell_id": data["cell_id"],
                   "db_nbac_fire_id": data["db_nbac_fire_id"],
                   "profile": image_profile,
@@ -334,6 +347,11 @@ if __name__ == '__main__':
 
     print(sample['image_pre'].min(), sample['image_pre'].max())
     print(sample['image'].min(), sample['image'].max())
+
+    print(sample['image_name'])
+    with rio.open(r"C:\Users\xmalet\PycharmProjects\geo-deep-learning\data\image_post.tiff", 'w',
+                  **sample['profile']) as src:
+        src.write(sample['image'])
 
     # print(f"Mean: {sample['mean']}")
     # print(f"Std: {sample['std']}")
