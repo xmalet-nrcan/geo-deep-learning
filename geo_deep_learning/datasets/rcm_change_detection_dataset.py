@@ -3,7 +3,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Any
 
+import numpy as np
 import pandas as pd
+import rasterio as rio
 import torch
 from torch import Tensor
 
@@ -72,7 +74,7 @@ def band_names_to_indices(band_names: Optional[List[Any]]) -> Optional[List[int]
     """
     Convert a list of band names (str or BandName) into indices (int) according to BandName.
 
-    Accepts ["RR", "RL", "M"] or [BandName.RR, BandName.RL, BandName.M].
+
     """
     if band_names is None:
         return None
@@ -104,7 +106,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                  satellite_pass: Optional[str | SatellitePass] = None,
                  beams: Optional[List[str]] = None
                  ) -> None:
-        self.bands = bands
+        # Set bands index and band names
         if band_names is not None:
             self.bands = band_names_to_indices(band_names)
             self.band_names = [
@@ -120,8 +122,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                 except Exception:
                     self.band_names.append(str(idx))
         else:
-            self.bands = None
-            self.band_names = None
+            self.bands = [i.value for i in BandName]
+            self.band_names = [i.name for i in BandName]
 
         if satellite_pass:
             match satellite_pass:
@@ -135,7 +137,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             self.satellite_pass = None
         self.beams = [] if beams is None else [i.upper() for i in beams]
 
-        super().__init__(csv_root_folder=csv_root_folder, patches_root_folder=patches_root_folder, split_or_csv_file_name= split_or_csv_file_name, norm_stats=norm_stats)
+        super().__init__(csv_root_folder=csv_root_folder, patches_root_folder=patches_root_folder,
+                         split_or_csv_file_name=split_or_csv_file_name, norm_stats=norm_stats)
 
     def _load_files(self) -> list[dict[str, str]]:
         csv_path = self._get_csv_path()
@@ -194,24 +197,29 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
     def __len__(self) -> int:
         return super().__len__()
 
-    def _get_bands_to_load(self) -> slice | None:
+    def _get_bands_to_load(self) -> list | None:
         # Always include BITMASK_CROPPED (band 1)
         bands_to_read = self.bands if self.bands is not None else None
-        if bands_to_read is not None and 1 not in bands_to_read:
+        if bands_to_read is None:
+            return None
+        elif bands_to_read is not None and 1 not in bands_to_read:
             bands_to_read_with_mask = [1] + bands_to_read
         else:
             bands_to_read_with_mask = bands_to_read
-        return bands_to_read_with_mask
+        bands_to_read_with_mask.sort()
+        bands_to_read_with_mask = set(bands_to_read_with_mask)  # to remove duplicates
+        # Convert to 0-based indices for rasterio
+        return [i - 1 for i in bands_to_read_with_mask]
 
     @staticmethod
-    def add_pass_and_beam_in_out_bands(pre_img, post_img, sample):
+    def add_pass_and_beam_in_out_bands(pre_img, post_img, current_sample):
         H, W = pre_img.shape[1], pre_img.shape[2]
 
         # encode sat_pass : Ascending=0, Descending=1
-        sat_pass_val = sample['sat_pass'].value
+        sat_pass_val = current_sample['sat_pass'].value
         sat_pass_band = torch.full((1, H, W), sat_pass_val, dtype=pre_img.dtype)
 
-        beam_map = sample["beam"].value
+        beam_map = current_sample["beam"].value
         beam_val = beam_map
         beam_band = torch.full((1, H, W), beam_val, dtype=pre_img.dtype)
 
@@ -219,6 +227,14 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         pre_img = torch.cat([pre_img, sat_pass_band, beam_band], dim=0)
         post_img = torch.cat([post_img, sat_pass_band, beam_band], dim=0)
         return pre_img, post_img
+
+    @staticmethod
+    def _read_image_and_get_no_data(path: str, in_dtype: np.dtype = np.int16):
+        with rio.open(path, nodata=NO_DATA, dtype='int16') as src:
+            arr = src.read().astype(in_dtype)  # shape (C,H,W)
+            mask = arr[0, :, :] != NO_DATA
+
+        return arr, mask
 
     def __getitem__(self, index: int) -> dict:
         """
@@ -234,14 +250,15 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         data = self.files[index]
         image_pre, image_post, common_mask_tensor, image_pre_name, image_post_name = self._load_image(index)
         water_mask, water_mask_name = self._load_water_mask(index)
-        water_mask_bool = (water_mask == 0)
-        common_mask_tensor = common_mask_tensor & water_mask_bool
+        no_water_mask = (water_mask == 0)  # True where water
 
+        common_mask_tensor = common_mask_tensor & no_water_mask
+        print("COMMUN MASK AFTER WATER", common_mask_tensor.shape, common_mask_tensor.sum(), common_mask_tensor.all())
         mask, mask_name = self._load_mask(index)
-        mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask)
+        mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, NO_DATA)
 
-        image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre)
-        image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post)
+        image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre, NO_DATA)
+        image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, NO_DATA)
 
         bands_index = self._get_bands_to_load()
 
@@ -249,9 +266,16 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             image_pre = image_pre[bands_index, :, :]
             image_post = image_post[bands_index, :, :]
 
-        image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, self.files[index])
+        image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
 
         # image_post, image_pre, mean, std = self._normalize_and_standardize(image_post, image_pre)
+        image_profile = None
+        with rio.open(data['image']) as src:
+            image_profile = src.profile
+        image_profile['count'] = image_post.shape[0]
+
+        band_names = [BandName(i + 1).name for i in bands_index] if bands_index is not None else [i.name for i in
+                                                                                                  BandName]
 
         sample = {"image": image_post,
                   "image_pre": image_pre,
@@ -259,10 +283,10 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                   "image_pre_name": image_pre_name,
                   "image_name": image_post_name,
                   "mask_name": mask_name,
-                  "bands": [BandName.BITMASK_CROPPED.name, *self.band_names, SATTELITE_PASS_BAND_NAME,
-                            BEAM_BAND_NAME] if self.band_names is not None else None,
+                  "bands": [*bands_index, SATTELITE_PASS_BAND_NAME, BEAM_BAND_NAME],
                   "cell_id": data["cell_id"],
                   "db_nbac_fire_id": data["db_nbac_fire_id"],
+                  "profile": image_profile,
                   # "mean": mean,
                   # "std": std
                   }
@@ -294,8 +318,7 @@ if __name__ == '__main__':
         beams=['A']
     )
     print(f"Dataset length: {len(dataset)}")
-    print(dataset[0])
-    sample = dataset[10]
+    sample = dataset[0]
     print(f"Sample keys: {list(sample.keys())}")
     print(f"Image shape: {sample['image'].shape}")
     print(f"Image pre shape: {sample['image_pre'].shape}")
@@ -306,6 +329,9 @@ if __name__ == '__main__':
     print(sample['bands'].index(SATTELITE_PASS_BAND_NAME), sample['bands'].index(BEAM_BAND_NAME))
     print(sample['image'][sample['bands'].index(SATTELITE_PASS_BAND_NAME), :5, :5])
     print(sample['image'][sample['bands'].index(BEAM_BAND_NAME), :5, :5])
+
+    print(sample['image_pre'].min(), sample['image_pre'].max())
+    print(sample['image'].min(), sample['image'].max())
 
     # print(f"Mean: {sample['mean']}")
     # print(f"Std: {sample['std']}")
