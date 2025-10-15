@@ -12,7 +12,7 @@ trainer:
       save_dir: /home/valhassa/Projects/geo-deep-learning/logs
       log_model: all
       experiment_name: "gdl_experiment"
-      run_name: "unetplus_resnext101_32x8d"
+      run_name: "change_former_rcm"
   callbacks:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
@@ -32,19 +32,27 @@ trainer:
   max_epochs: 10
 
 model:
-  class_path: tasks_with_models.segmentation_unetplus.SegmentationUnetPlus
+  class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
   init_args:
-    encoder: "resnext101_32x8d"
-    image_size: [512, 512]
-    weights: imagenet
-    in_channels: 3
+    change_detection_model: "changeformer"
+    image_size: [256,256]
+    # set to; it will be set to the number of band_names in the datamodule +
+    # 1 for COMMON MASK
+    # 1 for BITMASK
+    # 1 for SAT_PASS encoding
+    # 1 for BEAM encoding
+    in_channels: null
     max_samples: 6
-    num_classes: 1
+    num_classes: 1  # binary change detection
     loss:
-      class_path: segmentation_models_pytorch.losses.DiceLoss
+      class_path: loss.dice_bce_loss.DiceBCELoss
       init_args:
-        ignore_index: null
+        ignore_index: 32767
         mode: "binary"
+        is_binary: True
+        alpha: 0.5
+        smooth: 1e-6
+        eps: 1e-7
     optimizer:
       class_path: torch.optim.Adam
       init_args:
@@ -61,7 +69,7 @@ model:
       interval: "epoch"
       frequency: 1
       monitor: "val_loss"
-    class_labels: ["background", "buildings"]
+    class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
     weights_from_checkpoint_path: null
 
@@ -71,10 +79,10 @@ data:
   init_args:
     batch_size: 4
     num_workers: 8
-    data_type_max: 255
+    data_type_max: 32767
     patch_size:
-    - 512
-    - 512
+    - 256
+    - 256
 
     csv_root_folder: C:\Users\xmalet\PycharmProjects\geo-deep-learning\data
     patches_root_folder: C:\Users\xmalet\PycharmProjects\geo-deep-learning\data\raw

@@ -13,7 +13,7 @@ from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from geo_deep_learning.models.change_detection.change_detection_model import ChangeDetectionModel
-from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA # noqa: F401
+from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA, BandName  # noqa: F401
 from geo_deep_learning.tools.utils import denormalization, load_weights_from_checkpoint
 from geo_deep_learning.tools.visualization import visualize_prediction
 from torch import Tensor
@@ -35,10 +35,9 @@ class ChangeDetectionChangeFormer(LightningModule):
 
     def __init__(  # noqa: PLR0913
         self,
-        encoder: str,
+        change_detection_model: str,
         *,
         image_size: tuple[int, int],
-        in_channels: int,
         num_classes: int,
         max_samples: int,
         loss: Callable,
@@ -56,9 +55,17 @@ class ChangeDetectionChangeFormer(LightningModule):
         """Initialize the model."""
         super().__init__()
         self.save_hyperparameters()
-        self.encoder = encoder
-        self.in_channels = in_channels
-        self.num_classes = num_classes
+        self.change_detection_model = change_detection_model
+        bands = self.hparams['data']["band_names"]
+        if bands is None:
+            self.in_channels = len(BandName) + 3
+        else:
+            bands = [BandName[i] for i in bands]
+            if BandName.BITMASK_CROPPED in bands:
+                self.in_channels = len(bands) + 3   # (COMMON MASK, bands, SAT_PASS, BEAM)
+            else:
+                self.in_channels = len(bands) + 4   # (COMMON MASK,BITMASK_CROPPED, bands, SAT_PASS, BEAM, )
+        self.num_classes = num_classes              # Should be 2
         self.image_size = image_size
         self.max_samples = max_samples
 
@@ -69,8 +76,6 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         self.weights = weights
         self.weights_from_checkpoint_path = weights_from_checkpoint_path
-        self.use_dynamic_encoder = use_dynamic_encoder
-        self.freeze_layers = freeze_layers
 
         self.class_colors = class_colors
         self.threshold = 0.5
@@ -96,7 +101,10 @@ class ChangeDetectionChangeFormer(LightningModule):
     def _apply_aug(self) -> AugmentationSequential:
         """Augmentation pipeline."""
 
-        pad_to_patch_size = krn.augmentation.PadTo(size=self.image_size,pad_mode='constant',pad_value=0.0,keepdim=False)
+        pad_to_patch_size = krn.augmentation.PadTo(size=self.image_size,
+                                                   pad_mode='constant',
+                                                   pad_value=NO_DATA,
+                                                   keepdim=False)
 
         random_resized_crop_zoom_in = krn.augmentation.RandomResizedCrop(
             size=self.image_size,
@@ -130,14 +138,12 @@ class ChangeDetectionChangeFormer(LightningModule):
 
     def configure_model(self) -> None:
         """Configure model."""
-        self.model = SegFormerSegmentationModel(
-            encoder=self.encoder,
+        self.model = ChangeDetectionModel(
+            change_detection_model=self.change_detection_model,
             in_channels=self.in_channels,
-            weights=self.weights,
-            freeze_layers=self.freeze_layers,
-            num_classes=self.num_classes,
-            use_dynamic_encoder=self.use_dynamic_encoder,
+            out_channels=self.num_classes,
         )
+
         if self.weights_from_checkpoint_path:
             map_location = self.device
             load_parts = self.hparams.get("load_parts")
@@ -203,10 +209,11 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
 
-    def forward(self, image: Tensor) -> Tensor:
+    def forward(self, image_pre: Tensor, image_post:Tensor) -> Tensor:
         """Forward pass."""
-        return self.model(image)
+        return self.model(image_pre, image_post)
 
+    # TODO : Modifier pour avoir image pre/post transformées
     def on_before_batch_transfer(
         self,
         batch: dict[str, Any],
@@ -219,6 +226,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch.update(transformed)
         return batch
 
+    # TODO : Modifier pour avoir image pre/post
     def training_step(
         self,
         batch: dict[str, Any],
@@ -245,7 +253,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         )
 
         return loss
-
+    # TODO : Modifier pour avoir image pre/post
     def validation_step(
         self,
         batch: dict[str, Any],
