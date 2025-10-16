@@ -258,7 +258,6 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         no_water_mask = (water_mask == 0)  # True where water
 
         common_mask_tensor = common_mask_tensor & no_water_mask
-        print("COMMUN MASK AFTER WATER", common_mask_tensor.shape, common_mask_tensor.sum(), common_mask_tensor.all())
         mask, mask_name = self._load_mask(index)
 
         # Apply common mask to all and set NO_DATA where mask is False
@@ -290,11 +289,15 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         with rio.open(data['image']) as src:
             image_profile = src.profile
         image_profile['count'] = len(band_names)
+        image_profile['crs'] = str(image_profile['crs'])
+        image_profile['transform'] = str(image_profile['transform'])
 
         sample = {"image": image_post,
+                  "image_post": image_post,
                   "image_pre": image_pre,
                   "mask": mask,
                   "image_pre_name": image_pre_name,
+                  "image_name_post": image_post_name,
                   "image_name": image_post_name,
                   "mask_name": mask_name,
                   "bands": band_names,
