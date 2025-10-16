@@ -1,15 +1,15 @@
 seed_everything: true
 
 trainer:
-  accelerator: "gpu"
-  devices: -1
-  strategy: ddp
+  accelerator: "cpu"
+  devices: 1
+  strategy: auto #ddp_spawn # ddp --> On Windows, use the ddp_spawn strategy instead of ddp in your config.
   precision: "16-mixed"
   sync_batchnorm: true
   logger:
     class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
     init_args:
-      save_dir: /home/valhassa/Projects/geo-deep-learning/logs
+      save_dir: C:\\temp\\change\mlruns
       log_model: all
       experiment_name: "gdl_experiment"
       run_name: "change_former_rcm"
@@ -41,7 +41,7 @@ model:
     # 1 for BITMASK
     # 1 for SAT_PASS encoding
     # 1 for BEAM encoding
-    in_channels: null
+    in_channels: 13 # Should be the length of data.band_names + 3
     max_samples: 6
     num_classes: 1  # binary change detection
     loss:
@@ -49,7 +49,6 @@ model:
       init_args:
         ignore_index: 32767
         mode: "binary"
-        is_binary: True
         alpha: 0.5
         smooth: 1e-6
         eps: 1e-7
@@ -105,7 +104,8 @@ data:
     #    SP2
     #    SP3
 
-    beams: 'A'  # AVAILABLE: ['A','B','C','D']
+    beams:
+    - 'A'  # AVAILABLE: ['A','B','C','D']
     satellite_pass: # 'Descending'  # AVAILABLE: ['Ascending','Descending']
 
 
