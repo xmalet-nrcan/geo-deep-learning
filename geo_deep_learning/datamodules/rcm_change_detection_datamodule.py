@@ -28,6 +28,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             satellite_pass: Optional[str | SatellitePass] = None,
             beams: Optional[List[str]] = None,
             split_ratios = (0.70, 0.15, 0.15),
+            data_type_max : Optional[int] = None,
 
     ) -> None:
         """Initialize CSVDataModule."""
@@ -52,6 +53,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self.beams = beams
         self.split_ratios = split_ratios
         self.dataset = None
+        self.data_type_max = data_type_max
 
 
     def setup(self, stage: str | None = None) -> None:  # noqa: ARG002
@@ -118,6 +120,8 @@ if __name__ == "__main__":
         patches_root_folder=in_patches_root_folder,
         csv_file_name=r"pre_post_datasets.csv",)
     dataset.setup()
+
+    dataset.train_dataloader()
 
 
     # print(f"mean:{dataset.mean}, std:{dataset.std}")
