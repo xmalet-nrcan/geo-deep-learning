@@ -1,4 +1,4 @@
-"""DOFA segmentation model."""
+"""Change Detection Model segmentation model."""
 import torch
 from torch import Tensor
 
@@ -9,7 +9,8 @@ from geo_deep_learning.models.segmentation.base import BaseSegmentationModel
 
 class ChangeDetectionModel(BaseSegmentationModel):
     """Change Detection segmentation model."""
-
+    # TODO : For now, only use ChangeFormer. Add more models later.
+    #  ChangeFormer: https://github.com/wgcban/ChangeFormer.git
     def __init__(self, change_detection_model: str = "changeformer",
                  in_channels: int = 3,
                  out_channels: int = 2,

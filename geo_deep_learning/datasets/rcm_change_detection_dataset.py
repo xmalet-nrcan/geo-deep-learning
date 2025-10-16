@@ -11,7 +11,7 @@ from numpy import ndarray, dtype
 from torch import Tensor
 
 from geo_deep_learning.datasets.change_detection_dataset import ChangeDetectionDataset
-from geo_deep_learning.tools.utils import normalization, standardization
+from geo_deep_learning.utils.tensors import normalization, standardization
 
 logger = logging.getLogger("RCM-PrePost ChangeDetectionDataset")
 ch = logging.StreamHandler()

@@ -14,7 +14,8 @@ from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from geo_deep_learning.models.change_detection.change_detection_model import ChangeDetectionModel
 from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA, BandName  # noqa: F401
-from geo_deep_learning.tools.utils import denormalization, load_weights_from_checkpoint
+from geo_deep_learning.utils.models import  load_weights_from_checkpoint
+from geo_deep_learning.utils.tensors import  denormalization
 from geo_deep_learning.tools.visualization import visualize_prediction
 from torch import Tensor
 from torchmetrics.segmentation import MeanIoU
