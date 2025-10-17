@@ -9,7 +9,7 @@ from rasterio.transform import from_origin
 
 from geo_deep_learning.utils.rasters import (
     align_to_reference,
-    compute_dataset_stats_from_list,
+    compute_dataset_stats_from_list, compute_dataset_all_stats_from_list,
 )
 
 
@@ -114,6 +114,7 @@ def test_compute_dataset_stats_from_list(tmp_path: Path) -> None:
     write_raster(path2, data2)
 
     means, stds = compute_dataset_stats_from_list([path1, path2])
+    print(means, stds)
 
     expected_mean = 10.0
     expected_std = 5.0
@@ -126,3 +127,44 @@ def test_compute_dataset_stats_empty_list() -> None:
     """Test that empty list raises ValueError."""
     with pytest.raises(ValueError, match="No input tiles provided for statistics"):
         compute_dataset_stats_from_list([])
+
+
+def test_compute_dataset_all_stats_from_list(tmp_path: Path) -> None:
+    """Test mean, std, min, and max computation across multiple raster tiles."""
+    # Create two simple rasters with different constant values
+    data1 = np.ones((1, 4, 4), dtype=np.float32) * 5
+    data2 = np.ones((1, 4, 4), dtype=np.float32) * 15
+
+    def write_raster(path: Path, arr: np.ndarray) -> None:
+        transform = from_origin(0, 4, 1, 1)
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            height=arr.shape[1],
+            width=arr.shape[2],
+            count=1,
+            dtype=arr.dtype,
+            transform=transform,
+            nodata=-9999,
+        ) as dst:
+            dst.write(arr)
+
+    path1 = tmp_path / "tile1.tif"
+    path2 = tmp_path / "tile2.tif"
+    write_raster(path1, data1)
+    write_raster(path2, data2)
+
+    means, stds, min_vals, max_vals = compute_dataset_all_stats_from_list([path1, path2],as_type=data1.dtype)
+
+
+    expected_min = 5
+    expected_max = 15
+
+    expected_mean = 10.0
+    expected_std = 5.0
+
+    assert pytest.approx(means[0], rel=1e-6) == expected_mean
+    assert pytest.approx(stds[0], rel=1e-6) == expected_std
+    assert min_vals[0] == expected_min
+    assert max_vals[0] == expected_max
