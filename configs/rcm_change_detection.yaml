@@ -108,6 +108,15 @@ data:
     - 'A'  # AVAILABLE: ['A','B','C','D']
     satellite_pass: # 'Descending'  # AVAILABLE: ['Ascending','Descending']
 
-
+stats_calculations:
+  csv_file_path: C:\Users\xmalet\PycharmProjects\geo-deep-learning\data\pre_post_datasets.csv
+  csv_save_path: null
+  filters:    # Keys should match columns in the CSV file (csv_file_path)
+    beam: ['A']
+    # sat_pass: null
+  path_key_to_change: "$ROOT_PATH"
+  tiff_paths_keys:
+    - pre_path
+    - post_path
 
 ckpt_path: null
