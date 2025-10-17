@@ -42,7 +42,7 @@ def main(cfg:DictConfig):
 
 
     tiffs = list(set(tiffs))
-    tiffs = [str(pathlib.Path(i.replace(path_key_to_change, str(tiff_folder_path)))) for i in tiffs]
+    tiffs = [str(pathlib.Path(i.replace(path_key_to_change, str(tiff_folder_path)).strip())) for i in tiffs]
     print(f"Number of TIFF files to process: {len(tiffs)}")
     print(tiffs)
 
