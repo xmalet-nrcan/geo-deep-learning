@@ -1,8 +1,8 @@
 """Segmentation DINOv3 with Mask2Former model."""
 
 import logging
-import math
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -11,14 +11,14 @@ import torch
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
-from models.segmentation.dinov3 import DINOv3SegmentationModel
-from tools.losses import SetCriterion
-from tools.target_converters import semantic_to_instance_masks
-from tools.utils import denormalization, load_weights_from_checkpoint
-from tools.visualization import visualize_prediction
 from torch import Tensor
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
+
+from geo_deep_learning.models.segmentation.dinov3 import DINOv3SegmentationModel
+from geo_deep_learning.tools.target_converters import semantic_to_instance_masks
+from geo_deep_learning.tools.utils import denormalization, load_weights_from_checkpoint
+from geo_deep_learning.tools.visualization import visualize_prediction
 
 warnings.filterwarnings(
     "ignore",
@@ -37,7 +37,7 @@ class SegmentationDINOv3(LightningModule):
         *,
         image_size: tuple[int, int],
         max_samples: int,
-        criterion: SetCriterion,
+        criterion: Callable,
         optimizer: OptimizerCallable = torch.optim.Adam,
         scheduler: LRSchedulerCallable = torch.optim.lr_scheduler.ConstantLR,
         scheduler_config: dict[str, Any] | None = None,
@@ -134,51 +134,7 @@ class SegmentationDINOv3(LightningModule):
     def configure_optimizers(self) -> list[list[dict[str, Any]]]:
         """Configure optimizers."""
         optimizer = self.optimizer(self.parameters())
-        if (
-            self.hparams["scheduler"]["class_path"]
-            == "torch.optim.lr_scheduler.OneCycleLR"
-        ):
-            max_lr = (
-                self.hparams.get("scheduler", {}).get("init_args", {}).get("max_lr")
-            )
-            stepping_batches = self.trainer.estimated_stepping_batches
-            if stepping_batches > -1:
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    total_steps=stepping_batches,
-                )
-            elif (
-                stepping_batches == -1
-                and getattr(self.trainer.datamodule, "epoch_size", None) is not None
-            ):
-                batch_size = self.trainer.datamodule.batch_size
-                epoch_size = self.trainer.datamodule.epoch_size
-                accumulate_grad_batches = self.trainer.accumulate_grad_batches
-                max_epochs = self.trainer.max_epochs
-                steps_per_epoch = math.ceil(
-                    epoch_size / (batch_size * accumulate_grad_batches),
-                )
-                buffer_steps = int(steps_per_epoch * accumulate_grad_batches)
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    steps_per_epoch=steps_per_epoch + buffer_steps,
-                    epochs=max_epochs,
-                )
-            else:
-                stepping_batches = (
-                    self.hparams.get("scheduler", {})
-                    .get("init_args", {})
-                    .get("total_steps")
-                )
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    total_steps=stepping_batches,
-                )
-        else:
-            scheduler = self.scheduler(optimizer)
+        scheduler = self.scheduler(optimizer)
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
 
@@ -238,7 +194,7 @@ class SegmentationDINOv3(LightningModule):
                 on_step=False,
                 on_epoch=True,
                 sync_dist=True,
-                rank_zero_only=True,
+                rank_zero_only=False,
             )
         for k, v in loss_dict.items():
             if k in ["loss_ce", "loss_mask", "loss_dice"]:
@@ -251,7 +207,7 @@ class SegmentationDINOv3(LightningModule):
                     on_step=False,
                     on_epoch=True,
                     sync_dist=True,
-                    rank_zero_only=True,
+                    rank_zero_only=False,
                 )
         self.log(
             "train_loss",
@@ -262,13 +218,15 @@ class SegmentationDINOv3(LightningModule):
             on_step=False,
             on_epoch=True,
             sync_dist=True,
-            rank_zero_only=True,
+            rank_zero_only=False,
         )
 
         return loss
 
     def on_train_epoch_end(self) -> None:
         """On train epoch end."""
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
         logger.info(
             "Training epoch complete. Processed %d samples",
             self.train_samples_count,
@@ -303,7 +261,7 @@ class SegmentationDINOv3(LightningModule):
             on_step=False,
             on_epoch=True,
             sync_dist=True,
-            rank_zero_only=True,
+            rank_zero_only=False,
         )
         pred_logits = outputs["pred_logits"]  # [B, Q, C+1]
         pred_masks = outputs["pred_masks"]  # [B, Q, H, W]
@@ -311,6 +269,8 @@ class SegmentationDINOv3(LightningModule):
 
     def on_validation_epoch_end(self) -> None:
         """On validation epoch end."""
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
         logger.info(
             "Validation epoch complete. Processed %d samples",
             self.val_samples_count,
@@ -364,7 +324,7 @@ class SegmentationDINOv3(LightningModule):
             logger=True,
             on_step=False,
             sync_dist=True,
-            rank_zero_only=True,
+            rank_zero_only=False,
         )
 
     def on_test_epoch_end(self) -> None:
@@ -393,8 +353,6 @@ class SegmentationDINOv3(LightningModule):
             Semantic segmentation predictions [B, H, W]
 
         """
-        # Get class probabilities (exclude no-object class)
-        pred_probs = pred_logits.softmax(dim=-1)[..., :-1]  # [B, Q, C]
         # Upsample masks to target size if needed
         if pred_masks.shape[-2:] != target_size:
             pred_masks = torch.nn.functional.interpolate(
@@ -403,29 +361,18 @@ class SegmentationDINOv3(LightningModule):
                 mode="bilinear",
                 align_corners=False,
             )
-        # For each pixel, find the class with maximum score across all queries
-        # Combine class probability with mask score
-        pred_masks_sigmoid = pred_masks.sigmoid()  # [B, Q, H, W]
-        # Compute per-class segmentation: [B, C, H, W]
-        batch_size, num_queries, num_classes = pred_probs.shape
-        h, w = target_size
-        # Initialize class scores
-        class_scores = torch.zeros(
-            batch_size,
-            num_classes,
-            h,
-            w,
-            device=pred_logits.device,
-        )
-        # For each query, add its contribution to the corresponding class
-        for q in range(num_queries):
-            query_probs = pred_probs[:, q, :]  # [B, C]
-            query_mask = pred_masks_sigmoid[:, q, :, :]  # [B, H, W]
-            # Add query's contribution: multiply class prob with mask score
-            for c in range(num_classes):
-                class_scores[:, c, :, :] += query_probs[:, c : c + 1] * query_mask
+
+        # Get class probabilities (exclude no-object class)
+        pred_probs = pred_logits.softmax(dim=-1)[..., :-1]  # [B, Q, C]
+        pred_masks = pred_masks.sigmoid()  # [B, Q, H, W]
+
+        # Combine class probabilities with mask predictions
+        # For each class c: sum over queries q of (class_prob[q,c] * mask[q])
+        # Output: [B, C, H, W]
+        semseg = torch.einsum("bqc,bqhw->bchw", pred_probs, pred_masks)
+
         # Get final prediction by taking argmax over classes
-        return class_scores.argmax(dim=1)  # [B, H, W]
+        return semseg.argmax(dim=1)  # [B, H, W]
 
     def _log_visualizations(  # noqa: PLR0913
         self,
