@@ -240,6 +240,13 @@ class ShardedDataset:
             return self._prepare_clay_output(image, label, metadata, sample["__key__"])
         if self.model_type == "dofa":
             return self._prepare_dofa_output(image, label, metadata, sample["__key__"])
+        if self.model_type == "dinov3":
+            return self._prepare_generic_dinov3(
+                image,
+                label,
+                metadata,
+                sample["__key__"],
+            )
         # unified
         return self._prepare_generic_output(image, label, metadata, sample["__key__"])
 
@@ -304,6 +311,42 @@ class ShardedDataset:
             "metadata": metadata,
             "mean": self.norm_stats["mean"],
             "std": self.norm_stats["std"],
+        }
+
+    def _prepare_generic_dinov3(
+        self,
+        image: torch.Tensor,
+        label: torch.Tensor,
+        metadata: dict[str, Any],  # noqa: ARG002
+        key: str,
+    ) -> dict[str, Any]:
+        """Prepare output for DINOv3 (RGB only - 3 channels)."""
+        rgb_channels = 3
+        rgba_channels = 4
+
+        # DINOv3 expects RGB (3 channels), drop 4th channel if present
+        if image.shape[0] == rgba_channels:
+            image = image[:rgb_channels]  # Keep only first 3 channels (R, G, B)
+
+        # Adjust normalization stats to match 3 channels
+        mean = (
+            self.norm_stats["mean"][:rgb_channels]
+            if self.norm_stats["mean"].shape[0] >= rgb_channels
+            else self.norm_stats["mean"]
+        )
+        std = (
+            self.norm_stats["std"][:rgb_channels]
+            if self.norm_stats["std"].shape[0] >= rgb_channels
+            else self.norm_stats["std"]
+        )
+
+        return {
+            "image": image,
+            "mask": label,
+            "platform": self.sensor_name,
+            "image_name": key,
+            "mean": mean,
+            "std": std,
         }
 
     def _encode_temporal(self, datetime_str: str) -> torch.Tensor:
