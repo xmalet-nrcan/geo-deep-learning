@@ -102,7 +102,8 @@ class SetCriterion(nn.Module):
         # Compute losses for main outputs (exclude auxiliary outputs)
         outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
         # Retrieve the matching between the outputs of the last layer and the targets
-        indices = self.matcher(outputs_without_aux, targets)
+        with torch.no_grad():
+            indices = self.matcher(outputs_without_aux, targets)
         # Compute the average number of target masks for normalization
         num_masks = sum(len(t["labels"]) for t in targets)
         num_masks = torch.as_tensor(
@@ -111,12 +112,11 @@ class SetCriterion(nn.Module):
             device=next(iter(outputs.values())).device,
         )
         if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.all_reduce(num_masks)
-        num_masks = (
-            torch.clamp(num_masks / torch.distributed.get_world_size(), min=1).item()
-            if torch.distributed.is_initialized()
-            else torch.clamp(num_masks, min=1).item()
-        )
+            torch.distributed.all_reduce(num_masks, op=torch.distributed.ReduceOp.SUM)
+            world_size = torch.distributed.get_world_size()
+            num_masks = torch.clamp(num_masks / max(world_size, 1), min=1.0)
+        else:
+            num_masks = torch.clamp(num_masks, min=1.0)
         # Compute all requested losses
         losses = {}
         for loss in self.losses:
@@ -177,42 +177,41 @@ class SetCriterion(nn.Module):
         indices: list[tuple[Tensor, Tensor]],
         num_masks: float,  # noqa: ARG002
     ) -> dict[str, Tensor]:
-        """
-        Classification loss (cross entropy).
-
-        Computes cross entropy loss on the classification logits.
-
-        Args:
-            outputs: Dict with "pred_logits" key
-            targets: List of target dicts with "labels" key
-            indices: Matched indices from matcher
-            num_masks: Not used for classification loss
-
-        Returns:
-            Dict with "loss_ce" key
-
-        """
+        """Cross-entropy over class logits."""
         if "pred_logits" not in outputs:
             msg = "pred_logits not in outputs"
             raise KeyError(msg)
         src_logits = outputs["pred_logits"]  # [B, Q, C+1]
-        # Get indices of matched predictions and targets
+        device = src_logits.device
+
+        # If there are no target labels at all, return a zero scalar
+        if sum(len(t["labels"]) for t in targets) == 0:
+            return {"loss_ce": torch.zeros((), device=device)}
+
+        # Matched indices (can be empty)
         idx = get_src_permutation_idx(indices)
+        if isinstance(idx, tuple):
+            if idx[0].numel() == 0 or idx[1].numel() == 0:
+                return {"loss_ce": torch.zeros((), device=device)}
+        elif idx.numel() == 0:
+            return {"loss_ce": torch.zeros((), device=device)}
         # Gather target classes for matched predictions
         target_classes_o = torch.cat(
             [t["labels"][J] for t, (_, J) in zip(targets, indices, strict=False)],
-        )
-        # Create full target tensor (most queries are "no object" = num_classes)
+        )  # [num_matched]
+
+        # Full target (most queries are "no-object" = num_classes)
         target_classes = torch.full(
             src_logits.shape[:2],
             self.num_classes,
             dtype=torch.int64,
-            device=src_logits.device,
+            device=device,
         )
         target_classes[idx] = target_classes_o
-        # Compute cross entropy loss
+
+        # CE expects [B, C+1, Q]
         loss_ce = fn.cross_entropy(
-            src_logits.transpose(1, 2),  # [B, C+1, Q]
+            src_logits.transpose(1, 2),
             target_classes,
             self.empty_weight,
         )
@@ -223,38 +222,44 @@ class SetCriterion(nn.Module):
         outputs: dict[str, Tensor],
         targets: list[dict[str, Tensor]],
         indices: list[tuple[Tensor, Tensor]],
-        num_masks: float,
+        num_masks: Tensor | float,  # 0-dim tensor preferred
     ) -> dict[str, Tensor]:
-        """
-        Mask losses (focal/BCE + dice).
-
-        Computes mask losses using point sampling for memory efficiency.
-
-        Args:
-            outputs: Dict with "pred_masks" key
-            targets: List of target dicts with "masks" key
-            indices: Matched indices from matcher
-            num_masks: Number of masks for normalization
-
-        Returns:
-            Dict with "loss_mask" and "loss_dice" keys
-
-        """
+        """Mask losses (focal/BCE + dice)."""
         if "pred_masks" not in outputs:
             msg = "pred_masks not in outputs"
             raise KeyError(msg)
 
+        src_masks_all = outputs["pred_masks"]  # [B, Q, H, W]
+        device = src_masks_all.device
+
+        # If there are no GT masks at all, return zeros
+        if sum(t["masks"].shape[0] for t in targets) == 0:
+            zeros = torch.zeros((), device=device)
+            return {"loss_mask": zeros, "loss_dice": zeros}
+
+        # Matched indices
         src_idx = get_src_permutation_idx(indices)
-        # tgt_idx = get_tgt_permutation_idx(indices)
-        # Get matched predictions and targets
-        src_masks = outputs["pred_masks"]  # [B, Q, H, W]
-        src_masks = src_masks[src_idx]  # [num_matched, H, W]
-        # Concatenate all target masks
+        if isinstance(src_idx, tuple):
+            if src_idx[0].numel() == 0 or src_idx[1].numel() == 0:
+                zeros = torch.zeros((), device=device)
+                return {"loss_mask": zeros, "loss_dice": zeros}
+        elif src_idx.numel() == 0:
+            zeros = torch.zeros((), device=device)
+            return {"loss_mask": zeros, "loss_dice": zeros}
+
+        # Select matched predictions
+        src_masks = src_masks_all[src_idx]  # [num_matched, H, W]
+        if src_masks.numel() == 0:
+            zeros = torch.zeros((), device=device)
+            return {"loss_mask": zeros, "loss_dice": zeros}
+
+        # Concatenate matched target masks
         target_masks = torch.cat(
             [t["masks"][i] for t, (_, i) in zip(targets, indices, strict=False)],
-        )  # [num_matched, H, W]
-        target_masks = target_masks.to(src_masks)
-        # Upsample predictions to target size if needed
+            dim=0,
+        ).to(src_masks)  # [num_matched, Ht, Wt]
+
+        # Align spatial sizes if needed
         if src_masks.shape[-2:] != target_masks.shape[-2:]:
             src_masks = fn.interpolate(
                 src_masks.unsqueeze(1),
@@ -262,45 +267,52 @@ class SetCriterion(nn.Module):
                 mode="bilinear",
                 align_corners=False,
             ).squeeze(1)
-        # Flatten spatial dimensions
-        src_masks = src_masks.flatten(1)  # [num_matched, H*W]
-        target_masks = target_masks.flatten(1)  # [num_matched, H*W]
-        # Point sampling for memory efficiency
+
+        # Flatten spatial dims
+        src_masks = src_masks.flatten(1)  # [num_matched, HW]
+        target_masks = target_masks.flatten(1)  # [num_matched, HW]
+
+        # Point sampling coords (no grad)
         with torch.no_grad():
-            # Sample points
             point_coords = self._get_point_coords_from_masks(
                 target_masks,
-                num_masks,
+                num_masks,  # works with 0-dim tensor or float
             )  # [num_matched, num_points, 2]
-        # Sample from masks at point coordinates
+
+        # Sample values at points
         src_masks_sampled = self._point_sample(
-            src_masks.unsqueeze(1),  # [num_matched, 1, H*W]
+            src_masks.unsqueeze(1),  # [num_matched, 1, HW]
             point_coords,
             align_corners=False,
         ).squeeze(1)  # [num_matched, num_points]
 
         target_masks_sampled = self._point_sample(
-            target_masks.unsqueeze(1),  # [num_matched, 1, H*W]
+            target_masks.unsqueeze(1),
             point_coords,
             align_corners=False,
         ).squeeze(1)  # [num_matched, num_points]
 
-        # Compute focal loss
+        # Compute focal
         with torch.autocast(device_type="cuda", enabled=False):
             src_masks_sampled = src_masks_sampled.float()
             target_masks_sampled = target_masks_sampled.float()
-
+            if not torch.is_tensor(num_masks):
+                num_masks_tensor = torch.as_tensor(
+                    [num_masks],
+                    device=device,
+                    dtype=torch.float,
+                )
+            else:
+                num_masks_tensor = num_masks
             loss_mask = (
                 sigmoid_focal_loss(src_masks_sampled, target_masks_sampled).sum()
-                / num_masks
+                / num_masks_tensor
             )
 
-        # Compute dice loss (on full masks, not sampled)
-        loss_dice = dice_loss_with_num_masks(src_masks, target_masks, num_masks)
-        return {
-            "loss_mask": loss_mask,
-            "loss_dice": loss_dice,
-        }
+        # Dice on full masks (uses the same num_masks tensor)
+        loss_dice = dice_loss_with_num_masks(src_masks, target_masks, num_masks_tensor)
+
+        return {"loss_mask": loss_mask, "loss_dice": loss_dice}
 
     def _get_point_coords_from_masks(
         self,
@@ -330,14 +342,16 @@ class SetCriterion(nn.Module):
         with torch.no_grad():
             # Calculate uncertainty (for binary masks, use absolute distance from 0.5)
             uncertainty = torch.abs(masks - 0.5)  # [N, H*W]
-            # Convert to probability (higher uncertainty = higher sampling probability)
+            # Convert to uncertainty score (higher value = more uncertainty)
             uncertainty = 1 - uncertainty  # Now higher values = more uncertainty
-            # Sample points based on uncertainty
-            importance_indices = torch.multinomial(
-                uncertainty + 1e-6,  # Add small value to avoid zeros
-                num_points_importance,
-                replacement=True,
-            )  # [N, num_points_importance]
+            # Use topk to select most uncertain points (more robust than multinomial)
+            # This matches Detectron2's PointRend implementation
+            importance_indices = torch.topk(
+                uncertainty,
+                k=num_points_importance,
+                dim=1,
+                largest=True,  # Select points with highest uncertainty
+            )[1]  # [N, num_points_importance] - [1] extracts indices
         # Random sampling: uniformly sample remaining points
         random_indices = torch.randint(
             0,
