@@ -42,12 +42,14 @@ class Mask2FormerHead(nn.Module):
         self.ignore_value = ignore_value
         self.common_stride = 4
         self.loss_weight = loss_weight
+        nheads = max(8, hidden_dim // 32)
+        dim_feedforward = hidden_dim * 8
 
         self.pixel_decoder = MSDeformAttnPixelDecoder(
             input_shape=orig_input_shape,
             transformer_dropout=0.0,
-            transformer_nheads=16,
-            transformer_dim_feedforward=4096,
+            transformer_nheads=nheads,
+            transformer_dim_feedforward=dim_feedforward,
             transformer_enc_layers=6,
             conv_dim=hidden_dim,
             mask_dim=hidden_dim,
@@ -61,8 +63,8 @@ class Mask2FormerHead(nn.Module):
             num_classes=num_classes,
             hidden_dim=hidden_dim,
             num_queries=100,
-            nheads=16,
-            dim_feedforward=4096,
+            nheads=nheads,
+            dim_feedforward=dim_feedforward,
             dec_layers=9,
             pre_norm=False,
             mask_dim=hidden_dim,
