@@ -193,7 +193,7 @@ def compute_dataset_all_stats_from_list(
     band_maxs = None
 
     for path in tqdm(tile_paths, desc="Computing global dataset stats"):
-        with rasterio.open(path) as src:
+        with rasterio.open(str(path),'r') as src:
             img = src.read().astype(as_type)  # shape (C, H, W)
             nodata_vals = src.nodatavals  # tuple of nodata values per band
 
