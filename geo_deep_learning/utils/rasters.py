@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import rasterio
@@ -143,3 +144,85 @@ def compute_dataset_stats_from_list(
     stds = np.sqrt((sum_sq_pixels / total_valid_pixels) - (means**2))
 
     return means.tolist(), stds.tolist()
+
+
+def compute_dataset_all_stats_from_list(
+    tile_paths: Sequence[str], as_type: np.dtype = np.float32
+) -> tuple[list[Any], list[Any], list[Any], list[Any]] | None:
+    """
+    Compute global per-band mean and standard deviation from a list of raster tiles.
+
+    For each input raster tile, the function reads all bands, excludes pixels matching
+    the band-specific nodata value (as defined in the raster metadata), and aggregates
+    valid pixels to compute global statistics across all tiles.
+
+    Args:
+        tile_paths (list[str]):
+            List of file paths to raster tiles. Each raster may contain multiple bands,
+            and each band may define its own nodata value in metadata.
+        as_type (np.dtype):
+            The data type to which the raster bands should be cast for computation.
+
+    Returns:
+        tuple[list[float], list[float], list[float], list[float]]:
+            A tuple containing 4 lists:
+            - The first list contains the mean value for each band.
+            - The second list contains the standard deviation for each band.
+            - The third list contains the minimum value for each band.
+            - The fourth list contains the maximum value for each band.
+
+
+    Raises:
+        AssertionError:
+            If 'tile_paths' is empty.
+
+    Example:
+        >>> means, stds = compute_dataset_stats_from_list(["tile1.tif", "tile2.tif"])
+        >>> print(means, stds)
+
+    """
+    if not tile_paths:
+        msg = "No input tiles provided for statistics."
+        raise ValueError(msg)
+
+    sum_pixels = None
+    sum_sq_pixels = None
+    total_valid_pixels = None
+
+    band_mins = None
+    band_maxs = None
+
+    for path in tqdm(tile_paths, desc="Computing global dataset stats"):
+        with rasterio.open(path) as src:
+            img = src.read().astype(as_type)  # shape (C, H, W)
+            nodata_vals = src.nodatavals  # tuple of nodata values per band
+
+        valid_pixels = []
+        for i in range(img.shape[0]):
+            band = img[i]
+            nodata_val = nodata_vals[i] if nodata_vals[i] is not None else np.nan
+            mask = band != nodata_val
+            valid_pixels.append(band[mask])
+
+        if sum_pixels is None:
+            sum_pixels = np.zeros(img.shape[0])
+            sum_sq_pixels = np.zeros(img.shape[0])
+            total_valid_pixels = np.zeros(img.shape[0], dtype=int)
+            band_mins = np.full(img.shape[0], np.inf)
+            band_maxs = np.full(img.shape[0], -np.inf)
+
+        for i in range(img.shape[0]):
+            if len(valid_pixels[i]) == 0:
+                continue  # rien à accumuler
+            sum_pixels[i] += np.sum(valid_pixels[i])
+            sum_sq_pixels[i] += np.sum(valid_pixels[i] ** 2)
+            total_valid_pixels[i] += len(valid_pixels[i])
+            band_mins[i] = min(band_mins[i], np.min(valid_pixels[i]))
+            band_maxs[i] = max(band_maxs[i], np.max(valid_pixels[i]))
+
+        # Moyenne et écart-type sécurisés
+        means = np.divide(sum_pixels, total_valid_pixels, out=np.zeros_like(sum_pixels), where=total_valid_pixels > 0)
+        stds = np.sqrt(np.divide(sum_sq_pixels, total_valid_pixels, out=np.zeros_like(sum_sq_pixels),
+                                 where=total_valid_pixels > 0) - means ** 2)
+
+        return means.tolist(), stds.tolist(), band_mins.tolist(), band_maxs.tolist()
