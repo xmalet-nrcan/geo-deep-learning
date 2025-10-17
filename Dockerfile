@@ -20,9 +20,12 @@ RUN /opt/venv/bin/pip install poetry
 RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # Copy the current directory contents into the container at /app
-COPY geo_deep_learning /app/geo_deep_learning
-COPY configs /app/configs
+
 ENV PYTHONPATH=/app UID=9005 USERNAME=geo_deep_learning PATH="/opt/venv/bin:$PATH"
 RUN useradd --uid ${UID} --create-home ${USERNAME} && chown -R ${USERNAME}:${USERNAME} /app /home/${USERNAME}
 USER ${USERNAME}
+
+COPY --chown=${USERNAME}:${USERNAME} geo_deep_learning /app/geo_deep_learning
+COPY --chown=${USERNAME}:${USERNAME} configs /app/configs
+
 ENTRYPOINT ["/opt/venv/bin/python", "/app/geo_deep_learning/utils/calculate_min_max_from_csv.py"]
