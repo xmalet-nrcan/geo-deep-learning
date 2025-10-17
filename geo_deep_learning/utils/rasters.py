@@ -177,8 +177,8 @@ def compute_dataset_all_stats_from_list(
             If 'tile_paths' is empty.
 
     Example:
-        >>> means, stds = compute_dataset_stats_from_list(["tile1.tif", "tile2.tif"])
-        >>> print(means, stds)
+        >>> means, stds, mins, maxs = compute_dataset_all_stats_from_list(["tile1.tif", "tile2.tif"])
+        >>> print(means, stds, mins, maxs)
 
     """
     if not tile_paths:
@@ -212,17 +212,14 @@ def compute_dataset_all_stats_from_list(
             band_maxs = np.full(img.shape[0], -np.inf)
 
         for i in range(img.shape[0]):
-            if len(valid_pixels[i]) == 0:
-                continue  # rien à accumuler
             sum_pixels[i] += np.sum(valid_pixels[i])
             sum_sq_pixels[i] += np.sum(valid_pixels[i] ** 2)
             total_valid_pixels[i] += len(valid_pixels[i])
+
             band_mins[i] = min(band_mins[i], np.min(valid_pixels[i]))
             band_maxs[i] = max(band_maxs[i], np.max(valid_pixels[i]))
 
-        # Moyenne et écart-type sécurisés
-        means = np.divide(sum_pixels, total_valid_pixels, out=np.zeros_like(sum_pixels), where=total_valid_pixels > 0)
-        stds = np.sqrt(np.divide(sum_sq_pixels, total_valid_pixels, out=np.zeros_like(sum_sq_pixels),
-                                 where=total_valid_pixels > 0) - means ** 2)
-
-        return means.tolist(), stds.tolist(), band_mins.tolist(), band_maxs.tolist()
+    # Moyenne et écart-type sécurisés
+    means = sum_pixels / total_valid_pixels
+    stds = np.sqrt((sum_sq_pixels / total_valid_pixels) - (means ** 2))
+    return means.tolist(), stds.tolist(), band_mins.tolist(), band_maxs.tolist()
