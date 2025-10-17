@@ -19,7 +19,7 @@ class DINOv3SegmentationModel(nn.Module):
         )
         embed_dim = self.encoder.backbone.embed_dim
         patch_size = self.encoder.backbone.patch_size
-        hidden_dim = 2048
+        hidden_dim = 256
         self.decoder = Mask2FormerHead(
             input_shape={
                 "1": [embed_dim, patch_size * 4, patch_size * 4, 4],
