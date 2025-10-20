@@ -83,8 +83,8 @@ data:
     - 256
     - 256
 
-    csv_root_folder: C:\Users\xmalet\PycharmProjects\geo-deep-learning\data
-    patches_root_folder: C:\Users\xmalet\PycharmProjects\geo-deep-learning\data\raw
+    csv_root_folder: /mnt/projet_RCM_scanfire/grided_folder/
+    patches_root_folder: /mnt/projet_RCM_scanfire/grided_folder/
     csv_file_name: pre_post_datasets.csv
     split_ratios: [0.7, 0.2, 0.1]
     band_names: [ 'M','LOCALINCANGLE','RL','RR','S0', 'SP1','SP2','SP3','RFDI' ]
@@ -109,7 +109,7 @@ data:
     satellite_pass: # 'Descending'  # AVAILABLE: ['Ascending','Descending']
 
 stats_calculations:
-  csv_file_path: C:\Users\xmalet\PycharmProjects\geo-deep-learning\data\pre_post_datasets.csv
+  csv_file_path: /mnt/projet_RCM_scanfire/grided_folder/pre_post_datasets_all.csv 
   csv_save_path: null
   filters:    # Keys should match columns in the CSV file (csv_file_path)
     beam: ['A']
