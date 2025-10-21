@@ -1,7 +1,7 @@
 *__pycache__**
 *.idea**
 *.vscode**
-
+*.crt
 # Specific folders name
 waterloo_subset_512/
 mlruns/
