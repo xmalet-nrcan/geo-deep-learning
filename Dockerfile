@@ -1,31 +1,21 @@
-FROM ghcr.io/osgeo/gdal:ubuntu-full-latest
+# Dockerfile
+FROM pytorch/pytorch:2.9.0-cuda12.8-cudnn9-runtime
 
-RUN apt update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libffi-dev libexpat1  \
-    curl \
-    ca-certificates \
-    python3-pip python3-venv \
-    && apt clean && rm -rf /var/lib/apt/lists/* \
-    && python -m venv /opt/venv
+WORKDIR /app
 
 COPY NRCAN-RootCA.crt /usr/local/share/ca-certificates/NRCAN-RootCA.crt
 RUN update-ca-certificates
 
-# Set the working directory
-WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY ./requirements.txt .
-RUN /opt/venv/bin/pip install poetry
-RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+ENV UID=9005 \
+    USERNAME=geo_deep_learning \
+    PYTHONPATH=/app
 
-# Copy the current directory contents into the container at /app
+RUN useradd --uid ${UID} --create-home ${USERNAME} && \
+    chown -R ${USERNAME}:${USERNAME} /app /home/${USERNAME}
 
-ENV PYTHONPATH=/app UID=9005 USERNAME=geo_deep_learning PATH="/opt/venv/bin:$PATH"
-RUN useradd --uid ${UID} --create-home ${USERNAME} && chown -R ${USERNAME}:${USERNAME} /app /home/${USERNAME}
+COPY . /app
+
 USER ${USERNAME}
-
-COPY --chown=${USERNAME}:${USERNAME} geo_deep_learning /app/geo_deep_learning
-COPY --chown=${USERNAME}:${USERNAME} configs /app/configs
-
-ENTRYPOINT ["/opt/venv/bin/python", "/app/geo_deep_learning/utils/calculate_min_max_from_csv.py"]
