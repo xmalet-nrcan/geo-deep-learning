@@ -48,8 +48,8 @@ class GeoDeepLearningCLI(LightningCLI):
                 return
             best_model_path = self.trainer.checkpoint_callback.best_model_path
 
-            logger.info(f"BEST MODEL PATH :{best_model_path}")
-            logger.info(f"EXP NAME : {self.trainer.logger._experiment_name}")
+#            logger.info(f"BEST MODEL PATH :{best_model_path}")
+#            logger.info(f"EXP NAME : {self.trainer.logger._experiment_name}")
 
             test_logger = TestMLFlowLogger(
                 experiment_name=safe_name(self.trainer.logger._experiment_name),
