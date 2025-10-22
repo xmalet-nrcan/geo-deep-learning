@@ -13,7 +13,7 @@ services:
       - "/mnt/data_disk/projet_RCM_scanfire:/mnt/data_disk/projet_RCM_scanfire:rw"
       - "/home/xmalet/projects/geo-deep-learning/data:/app/data:rw"
       - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection.yaml:/app/configs/rcm_change_detection.yaml"
-#    entrypoint: ["python",  "geo_deep_learning/train.py","fit", "--config", "configs/rcm_change_detection.yaml"]
+    entrypoint: ["python",  "geo_deep_learning/train.py","fit", "--config", "configs/rcm_change_detection.yaml"]
     deploy:
       resources:
 #        limits:
