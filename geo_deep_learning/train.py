@@ -11,11 +11,21 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from configs import logging_config  # noqa: F401
 from geo_deep_learning.tools.mlflow_logger import LoggerSaveConfigCallback
 
+def safe_name(name: str) -> str:
+    """Replace invalid MLflow characters in artifact or run names."""
+    return (
+        name.replace("=", "-")
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(":", "-")
+    )
+
 class SafeModelCheckpoint(ModelCheckpoint):
     """Custom ModelCheckpoint to prevent MLflow path conflicts."""
     def __init__(self, *args, **kwargs):
         if "filename" not in kwargs:
-            kwargs["filename"] = "checkpoint_{epoch:02d}_{val_loss:.3f}.ckpt"  # pas de mot-clé 'epoch='
+            kwargs["filename"] = "checkpoint-epoch-{epoch:02d}-val_loss-{val_loss:.3f}"  # pas de mot-clé 'epoch='
         super().__init__(*args, **kwargs)
 
 logger = logging.getLogger(__name__)
@@ -30,6 +40,7 @@ class TestMLFlowLogger(MLFlowLogger):
 
     def log_hyperparams(self, params: dict[str, Any]) -> None:
         """Override to prevent hyperparameter logging during test."""
+        pass
 
 
 class GeoDeepLearningCLI(LightningCLI):
@@ -46,9 +57,9 @@ class GeoDeepLearningCLI(LightningCLI):
             logger.info(f"BEST MODEL PATH :{best_model_path}")
             logger.info(f"EXP NAME : {self.trainer.logger._experiment_name}")
             test_logger = TestMLFlowLogger(
-                experiment_name=self.trainer.logger._experiment_name,  # noqa: SLF001
-                run_name=str(self.trainer.logger._run_name).replace("=","-"),  # noqa: SLF001
-                run_id=str(self.trainer.logger.run_id).replace("=","-"),
+                experiment_name=safe_name(self.trainer.logger._experiment_name),
+                run_name=safe_name(str(self.trainer.logger._run_name)),
+                run_id=safe_name(str(self.trainer.logger.run_id)),
                 save_dir=self.trainer.logger.save_dir,
             )
 
@@ -67,7 +78,7 @@ class GeoDeepLearningCLI(LightningCLI):
                 model=best_model,
                 dataloaders=test_dataloader,
             )
-            self.trainer.logger.log_hyperparams({"best_model_path": best_model_path.replace("=","-")})
+            self.trainer.logger.log_hyperparams({"best_model_path": safe_name(best_model_path)})
             logger.info("Test metrics logged successfully to all loggers.")
         self.trainer.strategy.barrier()
 
