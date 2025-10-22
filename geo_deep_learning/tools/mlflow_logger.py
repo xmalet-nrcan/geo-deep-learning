@@ -4,9 +4,19 @@ from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import SaveConfigCallback
 from lightning.pytorch.loggers import MLFlowLogger
 
+def safe_name(name: str) -> str:
+    """Sanitize names for MLflow (artifact paths, run IDs, etc.)."""
+    return (
+        str(name)
+        .replace("=", "-")
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(":", "-")
+    )
 
 class LoggerSaveConfigCallback(SaveConfigCallback):
-    """Save config callback for MLFlow logger."""
+    """Save configuration file as an MLflow artifact safely."""
 
     def save_config(
         self,
@@ -14,13 +24,21 @@ class LoggerSaveConfigCallback(SaveConfigCallback):
         pl_module: LightningModule,  # noqa: ARG002
         stage: str,  # noqa: ARG002
     ) -> None:
-        """Save config."""
+        """Save config to MLflow as an artifact."""
         if isinstance(trainer.logger, MLFlowLogger):
-            config_filepath = self.config.config[0]
-            print(config_filepath)
-            trainer.logger.experiment.log_artifact(
-                local_path=config_filepath,
-                artifact_path="config",
-                run_id=str(trainer.logger.run_id).replace("=","-"),
+            try:
+                # Récupération du chemin local du fichier de config
+                config_filepath = self.config.config[0]
+                print(f"[MLflow] Saving config: {config_filepath}")
 
-            )
+                # Log de l'artifact avec noms nettoyés
+                trainer.logger.experiment.log_artifact(
+                    local_path=config_filepath,
+                    artifact_path=safe_name("config"),
+                    run_id=safe_name(trainer.logger.run_id),
+                )
+
+                print("[MLflow] Config file successfully logged as artifact.")
+
+            except Exception as e:
+                print(f"[MLflow] Failed to log config artifact: {e}")
