@@ -14,7 +14,7 @@ from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.loggers import MLFlowLogger
 
-from torch import Tensor
+from torch import Tensor, nn
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
 
@@ -29,6 +29,33 @@ warnings.filterwarnings(
 )
 
 logger = logging.getLogger(__name__)
+
+# class DataAugmentation(nn.Module):
+#
+#     """Data Augmentation Module."""
+#
+#     def __init__(self, image_size: tuple[int, int]) -> None:
+#         """Initialize the augmentation module."""
+#         super().__init__()
+#         self.aug = AugmentationSequential(
+#             krn.augmentation.PadTo(size=image_size,
+#                                    pad_mode='constant',
+#                                    pad_value=0,
+#                                    keepdim=False),
+#             krn.augmentation.RandomHorizontalFlip(p=0.5, keepdim=True),
+#             krn.augmentation.RandomVerticalFlip(p=0.5, keepdim=True),
+#             krn.augmentation.RandomRotation90(
+#                 times=(1, 3),
+#                 p=0.5,
+#                 align_corners=True,
+#                 keepdim=True,
+#             ),
+#             data_keys=None,
+#         )
+#     @torch.no_grad()
+#     def forward(self, x: Tensor) -> Tensor:
+#         """Forward pass."""
+#         return self.aug(x)
 
 
 class ChangeDetectionChangeFormer(LightningModule):
@@ -90,6 +117,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             labels=self.labels,
         )
         self._total_samples_visualized = 0
+
+        # self.transform = DataAugmentation(image_size=self.image_size)
 
 
     def _apply_aug(self) -> AugmentationSequential:
@@ -201,10 +230,22 @@ class ChangeDetectionChangeFormer(LightningModule):
         """On before batch transfer."""
         if self.trainer.training:
             aug = self._apply_aug()
+
             transformed = aug({"image_pre": batch["image_pre"],
                               "image_post": batch["image_post"],
                                 "image": batch["image_post"],
                               "mask": batch["mask"]})
+            batch.update(transformed)
+        return batch
+
+    def on_after_batch_transfer(self, batch, dataloader_idx):
+        aug = self._apply_aug()
+
+        if self.trainer.training:
+            transformed = aug({"image_pre": batch["image_pre"],
+                               "image_post": batch["image_post"],
+                               "image": batch["image_post"],
+                               "mask": batch["mask"]})
             batch.update(transformed)
         return batch
 
