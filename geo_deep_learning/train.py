@@ -6,9 +6,17 @@ from typing import Any
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.cli import ArgsType, LightningCLI
 from lightning.pytorch.loggers import MLFlowLogger
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 from configs import logging_config  # noqa: F401
 from geo_deep_learning.tools.mlflow_logger import LoggerSaveConfigCallback
+
+class SafeModelCheckpoint(ModelCheckpoint):
+    """Custom ModelCheckpoint to prevent MLflow path conflicts."""
+    def __init__(self, *args, **kwargs):
+        if "filename" not in kwargs:
+            kwargs["filename"] = "checkpoint_{epoch:02d}_{val_loss:.3f}"  # pas de mot-clé 'epoch='
+        super().__init__(*args, **kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +80,16 @@ def main(args: ArgsType = None) -> None:
         auto_configure_optimizers=False,
         args=args,
     )
+
+    safe_ckpt = SafeModelCheckpoint(
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+        dirpath="./checkpoints",
+        filename="checkpoint_{epoch:02d}_{val_loss:.3f}",
+    )
+    cli.trainer.callbacks.append(safe_ckpt)
+
     if cli.trainer.is_global_zero:
         logger.info("Done!")
 
