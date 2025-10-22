@@ -4,6 +4,8 @@ from typing import Any, Optional, List
 
 import numpy as np
 import torch
+from kornia.augmentation import AugmentationSequential
+import kornia as krn
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader
 import torch.utils.data as data
@@ -125,10 +127,18 @@ if __name__ == "__main__":
     dataset = RcmChangeDetectionDataModule(
         csv_root_folder=in_csv_root_folder,
         patches_root_folder=in_patches_root_folder,
-        csv_file_name=r"pre_post_datasets.csv",)
+        csv_file_name=r"pre_post_datasets.csv",
+        patch_size=(256,256),
+    band_names=['M','RL','RR','S0'])
     dataset.setup()
 
-    dataset.train_dataloader()
+    tdl = dataset.train_dataloader()
+
+    print(tdl.dataset[0]['image'].shape)
+    print(tdl.dataset[0]['bands'])
+    print(tdl.dataset[0]['image_pre'].shape)
+    print(tdl.dataset[0]['image_post'].shape)
+
 
 
     # print(f"mean:{dataset.mean}, std:{dataset.std}")
