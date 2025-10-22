@@ -19,6 +19,7 @@ trainer:
       log_model: all
       experiment_name: "gdl_experiment"
       run_name: "change_former_rcm"
+      #filename: "checkpoint_{epoch:02d}_{val_loss:.3f}.ckpt"
   callbacks:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
@@ -28,10 +29,11 @@ trainer:
         patience: 20
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
+        dirpath: "./model_checkpoints"
         monitor: "val_loss"
         mode: "min"
         save_top_k: 1
-        filename: "checkpoint_{epoch:02d}_{val_loss:.3f}"
+        filename: "checkpoint_{epoch:02d}_{val_loss:.3f}.ckpt"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 3

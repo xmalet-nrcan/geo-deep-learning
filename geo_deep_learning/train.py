@@ -15,7 +15,7 @@ class SafeModelCheckpoint(ModelCheckpoint):
     """Custom ModelCheckpoint to prevent MLflow path conflicts."""
     def __init__(self, *args, **kwargs):
         if "filename" not in kwargs:
-            kwargs["filename"] = "checkpoint_{epoch:02d}_{val_loss:.3f}"  # pas de mot-clé 'epoch='
+            kwargs["filename"] = "checkpoint_{epoch:02d}_{val_loss:.3f}.ckpt"  # pas de mot-clé 'epoch='
         super().__init__(*args, **kwargs)
 
 logger = logging.getLogger(__name__)
@@ -43,10 +43,12 @@ class GeoDeepLearningCLI(LightningCLI):
                 logger.warning("No test dataloader found.")
                 return
             best_model_path = self.trainer.checkpoint_callback.best_model_path
+            logger.info(f"BEST MODEL PATH :{best_model_path}")
+            logger.info(f"EXP NAME : {self.trainer.logger._experiment_name}")
             test_logger = TestMLFlowLogger(
                 experiment_name=self.trainer.logger._experiment_name,  # noqa: SLF001
-                run_name=self.trainer.logger._run_name,  # noqa: SLF001
-                run_id=self.trainer.logger.run_id,
+                run_name=str(self.trainer.logger._run_name).replace("=","-"),  # noqa: SLF001
+                run_id=str(self.trainer.logger.run_id).replace("=","-"),
                 save_dir=self.trainer.logger.save_dir,
             )
 
@@ -65,7 +67,7 @@ class GeoDeepLearningCLI(LightningCLI):
                 model=best_model,
                 dataloaders=test_dataloader,
             )
-            self.trainer.logger.log_hyperparams({"best_model_path": best_model_path})
+            self.trainer.logger.log_hyperparams({"best_model_path": best_model_path.replace("=","-")})
             logger.info("Test metrics logged successfully to all loggers.")
         self.trainer.strategy.barrier()
 
@@ -86,7 +88,7 @@ def main(args: ArgsType = None) -> None:
         mode="min",
         save_top_k=1,
         dirpath="./checkpoints",
-        filename="checkpoint_{epoch:02d}_{val_loss:.3f}",
+        filename="checkpoint_{epoch:02d}_{val_loss:.3f}".replace('=','-'),
     )
     cli.trainer.callbacks.append(safe_ckpt)
 

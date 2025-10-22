@@ -17,8 +17,10 @@ class LoggerSaveConfigCallback(SaveConfigCallback):
         """Save config."""
         if isinstance(trainer.logger, MLFlowLogger):
             config_filepath = self.config.config[0]
+            print(config_filepath)
             trainer.logger.experiment.log_artifact(
                 local_path=config_filepath,
                 artifact_path="config",
-                run_id=trainer.logger.run_id,
+                run_id=str(trainer.logger.run_id).replace("=","-"),
+
             )
