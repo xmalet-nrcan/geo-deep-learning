@@ -33,7 +33,7 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         save_top_k: 1
-        filename: "checkpoint_{epoch:02d}_{val_loss:.3f}.ckpt"
+        filename: "model-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 3
@@ -84,8 +84,8 @@ model:
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
   init_args:
-    batch_size: 8
-    num_workers: 8
+    batch_size: 16
+    num_workers: 12
     data_type_max: 32767
     patch_size:
     - 256
