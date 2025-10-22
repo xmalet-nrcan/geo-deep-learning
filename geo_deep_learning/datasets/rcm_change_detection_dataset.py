@@ -278,6 +278,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, NO_DATA)
         mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, NO_DATA)
 
+        image_post, image_pre, mean, std, mins, maxs = self._normalize_and_standardize(image_post, image_pre)
+
         bands_index = self._get_bands_to_load()
         if bands_index is not None:
             image_pre = image_pre[bands_index, :, :]
@@ -289,7 +291,6 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
         image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
 
-        image_post, image_pre, mean, std, mins, maxs = self._normalize_and_standardize(image_post, image_pre)
 
         band_names = [BandName(i + 1).name for i in bands_index] if bands_index is not None else [i.name for i in
                                                                                                   BandName]
