@@ -221,22 +221,22 @@ class ChangeDetectionChangeFormer(LightningModule):
         """Forward pass."""
         return self.model(image_pre, image_post)
 
-    # TODO : Modifier pour avoir image pre/post transformées
-    def on_before_batch_transfer(
-            self,
-            batch: dict[str, Any],
-            dataloader_idx: int,  # noqa: ARG002
-    ) -> dict[str, Any]:
-        """On before batch transfer."""
-        if self.trainer.training:
-            aug = self._apply_aug()
-
-            transformed = aug({"image_pre": batch["image_pre"],
-                              "image_post": batch["image_post"],
-                                "image": batch["image_post"],
-                              "mask": batch["mask"]})
-            batch.update(transformed)
-        return batch
+    # # TODO : Modifier pour avoir image pre/post transformées
+    # def on_before_batch_transfer(
+    #         self,
+    #         batch: dict[str, Any],
+    #         dataloader_idx: int,  # noqa: ARG002
+    # ) -> dict[str, Any]:
+    #     """On before batch transfer."""
+    #     if self.trainer.training:
+    #         aug = self._apply_aug()
+    #
+    #         transformed = aug({"image_pre": batch["image_pre"],
+    #                           "image_post": batch["image_post"],
+    #                             "image": batch["image_post"],
+    #                           "mask": batch["mask"]})
+    #         batch.update(transformed)
+    #     return batch
 
     def on_after_batch_transfer(self, batch, dataloader_idx):
         aug = self._apply_aug()
