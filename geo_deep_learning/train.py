@@ -21,12 +21,6 @@ def safe_name(name: str) -> str:
         .replace(":", "-")
     )
 
-class SafeModelCheckpoint(ModelCheckpoint):
-    """Custom ModelCheckpoint to prevent MLflow path conflicts."""
-    def __init__(self, *args, **kwargs):
-        if "filename" not in kwargs:
-            kwargs["filename"] = "checkpoint-epoch-{epoch:02d}-val_loss-{val_loss:.3f}"  # pas de mot-clé 'epoch='
-        super().__init__(*args, **kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +34,6 @@ class TestMLFlowLogger(MLFlowLogger):
 
     def log_hyperparams(self, params: dict[str, Any]) -> None:
         """Override to prevent hyperparameter logging during test."""
-        pass
 
 
 class GeoDeepLearningCLI(LightningCLI):
@@ -54,8 +47,10 @@ class GeoDeepLearningCLI(LightningCLI):
                 logger.warning("No test dataloader found.")
                 return
             best_model_path = self.trainer.checkpoint_callback.best_model_path
+
             logger.info(f"BEST MODEL PATH :{best_model_path}")
             logger.info(f"EXP NAME : {self.trainer.logger._experiment_name}")
+
             test_logger = TestMLFlowLogger(
                 experiment_name=safe_name(self.trainer.logger._experiment_name),
                 run_name=safe_name(str(self.trainer.logger._run_name)),
@@ -94,14 +89,6 @@ def main(args: ArgsType = None) -> None:
         args=args,
     )
 
-    safe_ckpt = SafeModelCheckpoint(
-        monitor="val_loss",
-        mode="min",
-        save_top_k=1,
-        dirpath="./checkpoints",
-        filename="checkpoint_{epoch:02d}_{val_loss:.3f}".replace('=','-'),
-    )
-    cli.trainer.callbacks.append(safe_ckpt)
 
     if cli.trainer.is_global_zero:
         logger.info("Done!")
