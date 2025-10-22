@@ -22,7 +22,6 @@ from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA, Ban
 from geo_deep_learning.models.change_detection.change_detection_model import ChangeDetectionModel
 from geo_deep_learning.tools.visualization import visualize_prediction
 from geo_deep_learning.utils.models import load_weights_from_checkpoint
-from geo_deep_learning.utils.tensors import denormalization
 
 warnings.filterwarnings(
     "ignore",
@@ -313,6 +312,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         batch_size = x_post.shape[0]
         y = y.squeeze(1).long()
         y_hat = self(x_pre, x_post)
+        y_hat = torch.nan_to_num(y_hat, nan=0.0, posinf=1.0, neginf=0.0)
         if y_hat.shape[1] == 1 and y.ndim == 3:
             y = y.unsqueeze(1)  # Shape: [B, 1, H, W]
         loss = self.loss(y_hat, y)
@@ -361,7 +361,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 # TODO : RESTORE WHEN CHECKED
                 mean = mean_batch[i]
                 std = std_batch[i]
-#                image = denormalization(image, mean=mean, std=std,data_type_max=max_batch)
+                # image = denormalization(image, mean=mean, std=std,data_type_max=max_batch)
                 fig = visualize_prediction(
                     image=image,
                     mask=mask_batch[i],

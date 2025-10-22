@@ -11,7 +11,7 @@ from numpy import ndarray, dtype
 from torch import Tensor
 
 from geo_deep_learning.datasets.change_detection_dataset import ChangeDetectionDataset
-from geo_deep_learning.utils.tensors import normalization, standardization
+from geo_deep_learning.utils.tensors import normalization, standardization, manage_bands
 
 logger = logging.getLogger("RCM-PrePost ChangeDetectionDataset")
 ch = logging.StreamHandler()
@@ -283,9 +283,12 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
 
         bands_index = self._get_bands_to_load()
-        if bands_index is not None:
-            image_pre = image_pre[bands_index, :, :]
-            image_post = image_post[bands_index, :, :]
+        # if bands_index is not None:
+        #     image_pre = image_pre[bands_index, :, :]
+        #     image_post = image_post[bands_index, :, :]
+
+        image_pre = manage_bands(image_pre, bands_index)
+        image_post = manage_bands(image_post, bands_index)
 
         # Add common mask as first band
         image_pre = torch.cat([common_mask_tensor, image_pre], dim=0)
