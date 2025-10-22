@@ -4,7 +4,18 @@ services:
       dockerfile: Dockerfile
 #    env_file:
 #      - .env
-    user: '9005:ubuntu'
+#    tty: true
+#    stdin_open: true
+    user: '9005'
     container_name: geo-deep-learning
     volumes:
-      - "/mnt/projet_RCM_scanfire:/mnt/projet_RCM_scanfire:rw"
+      - "/mnt/data_disk/projet_RCM_scanfire:/mnt/data_disk/projet_RCM_scanfire:rw"
+      - "/home/xmalet/projects/geo-deep-learning/data:/app/data:rw"
+      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection.yaml:/app/configs/rcm_change_detection.yaml"
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]

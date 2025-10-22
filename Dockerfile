@@ -16,6 +16,9 @@ ENV UID=9005 \
 RUN useradd --uid ${UID} --create-home ${USERNAME} && \
     chown -R ${USERNAME}:${USERNAME} /app /home/${USERNAME}
 
-COPY . /app
+
+COPY geo_deep_learning /app/geo_deep_learning
+COPY configs /app/configs
+#COPY data /app/data
 
 USER ${USERNAME}
