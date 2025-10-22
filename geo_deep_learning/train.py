@@ -82,7 +82,7 @@ def main(args: ArgsType = None) -> None:
     """Run the main training pipeline."""
     seed_everything(42, workers=True)
     cli = GeoDeepLearningCLI(
-        save_config_callback=LoggerSaveConfigCallback,
+#        save_config_callback=LoggerSaveConfigCallback,
         save_config_kwargs={"overwrite": True},
         parser_kwargs={"parser_mode": "omegaconf"},
         auto_configure_optimizers=False,
