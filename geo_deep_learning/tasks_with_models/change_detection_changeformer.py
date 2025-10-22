@@ -208,12 +208,12 @@ class ChangeDetectionChangeFormer(LightningModule):
             dataloader_idx: int,  # noqa: ARG002
     ) -> dict[str, Any]:
         """On before batch transfer."""
-        if self.trainer.training:
-            aug = self._apply_aug()
-            transformed = aug({"image_pre": batch["image_pre"],
-                               "image_post": batch["image_post"],
-                               "mask": batch["mask"]})
-            batch.update(transformed)
+       # if self.trainer.training:
+       #     aug = self._apply_aug()
+       #     transformed = aug({"image_pre": batch["image_pre"],
+       #                        "image_post": batch["image_post"],
+       #                        "mask": batch["mask"]})
+       #     batch.update(transformed)
         return batch
 
     # TODO : Modifier pour avoir image pre/post
