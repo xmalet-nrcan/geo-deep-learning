@@ -56,17 +56,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.change_detection_model = change_detection_model
-        print(self.hparams)
         self.in_channels = in_channels
-        # bands = [ 'M','LOCALINCANGLE','RL','RR','S0', 'SP1','SP2','SP3','RFDI' ] #self.hparams['data']["band_names"]
-        # if bands is None:
-        #     self.in_channels = len(BandName) + 3
-        # else:
-        #     bands = [BandName[i] for i in bands]
-        #     if BandName.BITMASK_CROPPED in bands:
-        #         self.in_channels = len(bands) + 3  # (COMMON MASK, bands, SAT_PASS, BEAM)
-        #     else:
-        #         self.in_channels = len(bands) + 4  # (COMMON MASK,BITMASK_CROPPED, bands, SAT_PASS, BEAM, )
+
         self.num_classes = num_classes  # Should be 2
         self.image_size = image_size
         self.max_samples = max_samples
