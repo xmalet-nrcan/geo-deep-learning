@@ -63,7 +63,7 @@ model:
     optimizer:
       class_path: torch.optim.Adam
       init_args:
-        lr: 1e-4
+        lr: 3e-4
     scheduler:
       class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
       init_args:
