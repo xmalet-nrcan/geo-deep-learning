@@ -12,14 +12,14 @@ trainer:
   gradient_clip_val: 1.0
   precision: "16-mixed"
   sync_batchnorm: true
-  logger:
-    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
-    init_args:
-      save_dir: ./mlruns
-      log_model: all
-      experiment_name: "gdl_experiment"
-      run_name: "change_former_rcm"
-      #filename: "checkpoint_{epoch:02d}_{val_loss:.3f}.ckpt"
+#  logger:
+#    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
+#    init_args:
+#      save_dir: ./mlruns
+#      log_model: all
+#      experiment_name: "gdl_experiment"
+#      run_name: "change_former_rcm"
+#      filename: "checkpoint_{epoch:02d}_{val_loss:.3f}.ckpt"
   callbacks:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
@@ -63,7 +63,7 @@ model:
     optimizer:
       class_path: torch.optim.Adam
       init_args:
-        lr: 3e-4
+        lr: 1e-4
     scheduler:
       class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
       init_args:
@@ -91,10 +91,11 @@ data:
     - 256
     - 256
 
-    csv_root_folder: /app/data
+    csv_root_folder: /mnt/data_disk/projet_RCM_scanfire
     patches_root_folder: /mnt/data_disk/projet_RCM_scanfire
-    csv_file_name: pre_post_datasets.csv
-    split_ratios: [0.7, 0.2, 0.1]
+    csv_file_name: pre_post_datasets_all.csv
+    #csv_file_name: pre_post_datasets.csv
+    split_ratios: [0.7, 0.15, 0.15]
     band_names: [ 'M','LOCALINCANGLE','RL','RR','S0', 'SP1','SP2','SP3','RFDI' ]
     # RCM bands AVAILABLE
     #    BITMASK_CROPPED
@@ -113,5 +114,5 @@ data:
     #    SP3
 
     beams:
-    - 'B'  # AVAILABLE: ['A','B','C','D']
+    - 'A'  # AVAILABLE: ['A','B','C','D']
     satellite_pass: # 'Descending'  # AVAILABLE: ['Ascending','Descending']
