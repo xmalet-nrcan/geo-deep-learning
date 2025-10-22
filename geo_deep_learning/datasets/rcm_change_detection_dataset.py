@@ -70,7 +70,15 @@ class Beams(Enum):
 BEAM_BAND_NAME = "BEAM"
 SATTELITE_PASS_BAND_NAME = "SATTELITE_PASS"
 
-
+bands_stats = {'mean': [1.0088686544882763, 22.678325648034726, 4820.030168929148, -578.1138439754548, 174.35119966169816,
+                      4645.179761547494, 5178.970253993203, 4074.12440505587, 1427.3155618129722, 517.5479435073069,
+                      1945.2480656061873, 514.8092047489475, 425.98675130681056, 8939.542957169055],
+               'std': [0.17514777918322952, 4.602293040200134, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
+                     np.nan],
+               'min': [1.0, 0.0, 446.0, -9810.0, 0.0, 81.0, 14.0, 93.0, 2.0, 2.0, 5.0, -9340.0, -9584.0, -8947.0],
+               'max': [9.0, 112.0, 9985.0, 9969.0, 6358.0, 9971.0, 9553.0, 9979.0, 32766.0, 32766.0, 32766.0, 9484.0,
+                     9901.0, 9999.0]
+               }
 
 def band_names_to_indices(band_names: Optional[List[Any]]) -> Optional[List[int]]:
     """
@@ -138,7 +146,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         else:
             self.satellite_pass = None
         self.beams = [] if beams is None else [i.upper() for i in beams]
-
+        if norm_stats is None:
+            norm_stats = bands_stats
         super().__init__(csv_root_folder=csv_root_folder, patches_root_folder=patches_root_folder,
                          split_or_csv_file_name=split_or_csv_file_name, norm_stats=norm_stats)
 
@@ -273,17 +282,15 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
 
         bands_index = self._get_bands_to_load()
-        # if bands_index is not None:
-        #     image_pre = image_pre[bands_index, :, :]
-        #     image_post = image_post[bands_index, :, :]
+        if bands_index is not None:
+            image_pre = manage_bands(image_pre, bands_index)
+            image_post = manage_bands(image_post, bands_index)
 
-        image_pre = manage_bands(image_pre, bands_index)
-        image_post = manage_bands(image_post, bands_index)
+
 
         # Add common mask as first band
         image_pre = torch.cat([common_mask_tensor, image_pre], dim=0)
         image_post = torch.cat([common_mask_tensor, image_post], dim=0)
-
         image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
 
 
@@ -296,7 +303,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             image_profile = src.profile
         image_profile['count'] = len(band_names)
         image_profile['crs'] = str(image_profile['crs'])
-        image_profile['transform'] = str(image_profile['transform'])
+        image_profile['transform'] = list(image_profile['transform'])
 
         sample = {"image": image_post,
                   "image_post": image_post,
@@ -335,8 +342,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
 
         # Gestion finale des NaN ou valeurs extrêmes
-        image_pre = torch.nan_to_num(image_pre, nan=1, posinf=1.0, neginf=1)
-        image_post = torch.nan_to_num(image_post, nan=1, posinf=1.0, neginf=1)
+        image_pre = torch.nan_to_num(image_pre, nan=1, posinf=0, neginf=0)
+        image_post = torch.nan_to_num(image_post, nan=1, posinf=0, neginf=0)
 
         return image_post, image_pre, mean, std, min_vals, max_vals
 
@@ -350,7 +357,6 @@ if __name__ == '__main__':
         csv_root_folder=r"C:\Users\xmalet\PycharmProjects\geo-deep-learning\data",
         patches_root_folder=r"C:\Users\xmalet\PycharmProjects\geo-deep-learning\data\raw",
         split_or_csv_file_name=r"pre_post_datasets.csv",
-        norm_stats={"mean": [0.0] * 14, "std": [1.0] * 14},
         band_names=["RR", "RL", "M", 'PSN'],
         satellite_pass="Descending",
         beams=['A']
@@ -368,13 +374,13 @@ if __name__ == '__main__':
     print(sample['image'][sample['bands'].index(SATTELITE_PASS_BAND_NAME), :5, :5])
     print(sample['image'][sample['bands'].index(BEAM_BAND_NAME), :5, :5])
 
-    print(sample['image_pre'].min(), sample['image_pre'].max())
-    print(sample['image'].min(), sample['image'].max())
-
+    print(sample['profile'])
     print(sample['image_name'])
+    data : Tensor = sample['image']
+
     with rio.open(r"C:\Users\xmalet\PycharmProjects\geo-deep-learning\data\image_post.tiff", 'w',
                   **sample['profile']) as src:
-        src.write(sample['image'])
+        src.write(data.numpy())
 
     # print(f"Mean: {sample['mean']}")
     # print(f"Std: {sample['std']}")
