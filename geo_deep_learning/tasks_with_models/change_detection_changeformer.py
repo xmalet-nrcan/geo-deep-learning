@@ -106,7 +106,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         pad_to_patch_size = krn.augmentation.PadTo(size=self.image_size,
                                                    pad_mode='constant',
-                                                   pad_value=NO_DATA,
+                                                   pad_value=0,
                                                    keepdim=False)
 
 
@@ -209,12 +209,12 @@ class ChangeDetectionChangeFormer(LightningModule):
             dataloader_idx: int,  # noqa: ARG002
     ) -> dict[str, Any]:
         """On before batch transfer."""
-       # if self.trainer.training:
-       #     aug = self._apply_aug()
-       #     transformed = aug({"image_pre": batch["image_pre"],
-       #                        "image_post": batch["image_post"],
-       #                        "mask": batch["mask"]})
-       #     batch.update(transformed)
+        if self.trainer.training:
+            aug = self._apply_aug()
+            transformed = aug({"image_pre": batch["image_pre"],
+                              "image_post": batch["image_post"],
+                              "mask": batch["mask"]})
+            batch.update(transformed)
         return batch
 
     # TODO : Modifier pour avoir image pre/post
@@ -350,8 +350,9 @@ class ChangeDetectionChangeFormer(LightningModule):
             image_batch = batch["image"]
             mask_batch = batch["mask"].squeeze(1).long()
             batch_image_name = batch["image_name"]
-#            mean_batch = batch["mean"]
-#            std_batch = batch["std"]
+            mean_batch = batch["mean"]
+            std_batch = batch["std"]
+            max_batch = batch["max"]
             num_samples = min(max_samples, len(image_batch))
             for i in range(num_samples):
                 image = image_batch[i]
@@ -359,7 +360,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 # TODO : RESTORE WHEN CHECKED
                 mean = mean_batch[i]
                 std = std_batch[i]
-                image = denormalization(image, mean=mean, std=std)
+                image = denormalization(image, mean=mean, std=std,data_type_max=max_batch)
                 fig = visualize_prediction(
                     image=image,
                     mask=mask_batch[i],
