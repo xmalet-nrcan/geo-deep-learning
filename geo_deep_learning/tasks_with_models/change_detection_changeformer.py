@@ -113,7 +113,6 @@ class ChangeDetectionChangeFormer(LightningModule):
                 keepdim=True,
             ),
             data_keys=None,
-            random_apply=1,
         )
 
     def configure_model(self) -> None:
@@ -204,6 +203,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             aug = self._apply_aug()
             transformed = aug({"image_pre": batch["image_pre"],
                               "image_post": batch["image_post"],
+                                "image": batch["image_post"],
                               "mask": batch["mask"]})
             batch.update(transformed)
         return batch
@@ -303,7 +303,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         batch_size = x_post.shape[0]
         y = y.squeeze(1).long()
         y_hat = self(x_pre, x_post)
-        y_hat = torch.nan_to_num(y_hat, nan=0.0, posinf=1.0, neginf=0.0)
+        y_hat = torch.nan_to_num(y_hat, nan=1, posinf=0, neginf=0.0)
         if y_hat.shape[1] == 1 and y.ndim == 3:
             y = y.unsqueeze(1)  # Shape: [B, 1, H, W]
         loss = self.loss(y_hat, y)
