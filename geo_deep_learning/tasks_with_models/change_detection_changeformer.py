@@ -13,8 +13,7 @@ from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.loggers import MLFlowLogger
-
-from torch import Tensor, nn
+from torch import Tensor
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
 
@@ -29,6 +28,7 @@ warnings.filterwarnings(
 )
 
 logger = logging.getLogger(__name__)
+
 
 # class DataAugmentation(nn.Module):
 #
@@ -120,7 +120,6 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # self.transform = DataAugmentation(image_size=self.image_size)
 
-
     def _apply_aug(self) -> AugmentationSequential:
         """Augmentation pipeline."""
 
@@ -129,18 +128,11 @@ class ChangeDetectionChangeFormer(LightningModule):
                                                    pad_value=0,
                                                    keepdim=False)
 
-
-
         return AugmentationSequential(
             pad_to_patch_size,
             krn.augmentation.RandomHorizontalFlip(p=0.5, keepdim=True),
             krn.augmentation.RandomVerticalFlip(p=0.5, keepdim=True),
-            krn.augmentation.RandomRotation90(
-                times=(1, 3),
-                p=0.5,
-                align_corners=True,
-                keepdim=True,
-            ),
+            krn.augmentation.RandomAffine(degrees=360, p=0.5),
             data_keys=None,
         )
 
@@ -257,7 +249,6 @@ class ChangeDetectionChangeFormer(LightningModule):
     ) -> Tensor:
         """Run training step."""
         x_pre, x_post, y, y_hat, loss, batch_size = self._forward_and_get_loss(batch)
-
 
         self.log(
             "train_loss",
@@ -410,13 +401,12 @@ class ChangeDetectionChangeFormer(LightningModule):
                 else:
                     artifact_file = f"{base_path}/idx_{i}.png"
                 if isinstance(trainer.logger, MLFlowLogger):
-
                     trainer.logger.experiment.log_figure(
                         figure=fig,
                         artifact_file=artifact_file,
                         run_id=trainer.logger.run_id,
                     )
-              
+
         except Exception:
             logger.exception("Error in SegFormer visualization")
         else:
