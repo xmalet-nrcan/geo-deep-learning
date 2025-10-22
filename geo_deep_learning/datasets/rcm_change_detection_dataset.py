@@ -70,6 +70,16 @@ class Beams(Enum):
 BEAM_BAND_NAME = "BEAM"
 SATTELITE_PASS_BAND_NAME = "SATTELITE_PASS"
 
+bands_stats = {'mean': [1.0088686544882763, 22.678325648034726, 4820.030168929148, -578.1138439754548, 174.35119966169816,
+                      4645.179761547494, 5178.970253993203, 4074.12440505587, 1427.3155618129722, 517.5479435073069,
+                      1945.2480656061873, 514.8092047489475, 425.98675130681056, 8939.542957169055],
+               'std': [0.17514777918322952, 4.602293040200134, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
+                     np.nan],
+               'min': [1.0, 0.0, 446.0, -9810.0, 0.0, 81.0, 14.0, 93.0, 2.0, 2.0, 5.0, -9340.0, -9584.0, -8947.0],
+               'max': [9.0, 112.0, 9985.0, 9969.0, 6358.0, 9971.0, 9553.0, 9979.0, 32766.0, 32766.0, 32766.0, 9484.0,
+                     9901.0, 9999.0]
+               }
+
 
 def band_names_to_indices(band_names: Optional[List[Any]]) -> Optional[List[int]]:
     """
@@ -137,7 +147,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         else:
             self.satellite_pass = None
         self.beams = [] if beams is None else [i.upper() for i in beams]
-
+        if norm_stats is None:
+            norm_stats = bands_stats
         super().__init__(csv_root_folder=csv_root_folder, patches_root_folder=patches_root_folder,
                          split_or_csv_file_name=split_or_csv_file_name, norm_stats=norm_stats)
 
@@ -233,13 +244,15 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
     def _read_image_and_get_no_data(path: str, in_dtype: np.dtype = np.int16):
         with rio.open(path, nodata=NO_DATA, dtype='int16') as src:
             arr = src.read().astype(in_dtype)  # shape (C,H,W)
-            mask = arr[0, :, :] == 1    # Read the bitmask cropped band to get data mask
+            mask = arr[0, :, :] == 1  # Read the bitmask cropped band to get data mask
 
         return arr, mask
 
     def convert_tif_to_tensor(self, in_image: str, in_dtype=np.int16) -> tuple[
         Tensor, bool | ndarray[tuple[Any, ...], dtype[Any]] | Any]:
         return super().convert_tif_to_tensor(in_image, in_dtype)
+
+
 
     def __getitem__(self, index: int) -> dict:
         """
@@ -265,8 +278,6 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, NO_DATA)
         mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, NO_DATA)
 
-
-
         bands_index = self._get_bands_to_load()
         if bands_index is not None:
             image_pre = image_pre[bands_index, :, :]
@@ -278,8 +289,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
         image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
 
-        # image_post, image_pre, mean, std = self._normalize_and_standardize(image_post, image_pre)
-
+        image_post, image_pre, mean, std, mins, maxs = self._normalize_and_standardize(image_post, image_pre)
 
         band_names = [BandName(i + 1).name for i in bands_index] if bands_index is not None else [i.name for i in
                                                                                                   BandName]
@@ -305,20 +315,41 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                   "db_nbac_fire_id": data["db_nbac_fire_id"],
                   "profile": image_profile,
                   "common_data_mask": common_mask_tensor,
-                  # "mean": mean,
-                  # "std": std
+                  "mean": mean,
+                  "std": std,
+                  "min" :mins,
+                  "max": maxs
                   }
         return sample
 
     def _normalize_and_standardize(self, image_post: Tensor, image_pre: Tensor) -> tuple[
-        Tensor, Tensor, Tensor, Tensor]:
-        image_pre, image_post = normalization(image_pre), normalization(image_post)
+        Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        # Convert numpy NaN en torch tensors
         mean = torch.tensor(self.norm_stats["mean"], dtype=torch.float32).view(-1, 1, 1)
         std = torch.tensor(self.norm_stats["std"], dtype=torch.float32).view(-1, 1, 1)
-        #
-        image_pre = standardization(image_pre, mean, std)
-        image_post = standardization(image_post, mean, std)
-        return image_post, image_pre, mean, std
+        min_vals = torch.tensor(self.norm_stats["min"], dtype=torch.float32).view(-1, 1, 1)
+        max_vals = torch.tensor(self.norm_stats["max"], dtype=torch.float32).view(-1, 1, 1)
+
+        # Copie pour ne pas modifier les originaux
+        img_pre = image_pre.clone()
+        img_post = image_post.clone()
+
+        # Boucle bande par bande (car certaines bandes ont des NaN)
+        for i in range(img_pre.shape[0]):
+            if torch.isnan(std[i]) or std[i] == 0:
+                # ✅ Fallback min–max normalization
+                img_pre[i] = torch.clamp((img_pre[i] - min_vals[i]) / (max_vals[i] - min_vals[i]), 0, 1)
+                img_post[i] = torch.clamp((img_post[i] - min_vals[i]) / (max_vals[i] - min_vals[i]), 0, 1)
+            else:
+                # ✅ Mean–Std normalization
+                img_pre[i] = (img_pre[i] - mean[i]) / std[i]
+                img_post[i] = (img_post[i] - mean[i]) / std[i]
+
+        # Gestion finale des NaN ou valeurs extrêmes
+        img_pre = torch.nan_to_num(img_pre, nan=0.0, posinf=1.0, neginf=0.0)
+        img_post = torch.nan_to_num(img_post, nan=0.0, posinf=1.0, neginf=0.0)
+
+        return img_post, img_pre, mean, std, min_vals, max_vals
 
     def _load_water_mask(self, index: int) -> tuple[Tensor, str]:
         """Load water mask."""

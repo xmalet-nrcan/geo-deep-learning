@@ -100,6 +100,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         )
         self._total_samples_visualized = 0
 
+
     def _apply_aug(self) -> AugmentationSequential:
         """Augmentation pipeline."""
 
@@ -356,10 +357,9 @@ class ChangeDetectionChangeFormer(LightningModule):
                 image = image_batch[i]
                 image_name = batch_image_name[i]
                 # TODO : RESTORE WHEN CHECKED
-                # mean = mean_batch[i]
-                # std = std_batch[i]
-                # image = denormalization(image, mean=mean, std=std)
-
+                mean = mean_batch[i]
+                std = std_batch[i]
+                image = denormalization(image, mean=mean, std=std)
                 fig = visualize_prediction(
                     image=image,
                     mask=mask_batch[i],
