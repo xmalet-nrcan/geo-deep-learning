@@ -151,6 +151,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             norm_stats = bands_stats
         super().__init__(csv_root_folder=csv_root_folder, patches_root_folder=patches_root_folder,
                          split_or_csv_file_name=split_or_csv_file_name, norm_stats=norm_stats)
+        self.norm_stats = bands_stats
+
 
     def _load_files(self) -> list[dict[str, str]]:
         csv_path = self._get_csv_path()
@@ -269,7 +271,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         image_pre, image_post, common_mask_tensor, image_pre_name, image_post_name = self._load_image(index)
         water_mask, water_mask_name = self._load_water_mask(index)
         no_water_mask = (water_mask == 0)  # True where water
-
+        image_post, image_pre, mean, std, mins, maxs = self._normalize_and_standardize(image_post, image_pre)
         common_mask_tensor = common_mask_tensor & no_water_mask
         mask, mask_name = self._load_mask(index)
 
@@ -278,7 +280,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, NO_DATA)
         mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, NO_DATA)
 
-        image_post, image_pre, mean, std, mins, maxs = self._normalize_and_standardize(image_post, image_pre)
+
 
         bands_index = self._get_bands_to_load()
         if bands_index is not None:

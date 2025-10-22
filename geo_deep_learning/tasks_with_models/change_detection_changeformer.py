@@ -12,7 +12,8 @@ import torch
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
-from pyasn1.type.namedtype import OptionalNamedType
+from lightning.pytorch.loggers import MLFlowLogger
+
 from torch import Tensor
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
@@ -360,7 +361,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 # TODO : RESTORE WHEN CHECKED
                 mean = mean_batch[i]
                 std = std_batch[i]
-                image = denormalization(image, mean=mean, std=std,data_type_max=max_batch)
+#                image = denormalization(image, mean=mean, std=std,data_type_max=max_batch)
                 fig = visualize_prediction(
                     image=image,
                     mask=mask_batch[i],

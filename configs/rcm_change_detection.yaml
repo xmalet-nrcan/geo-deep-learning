@@ -63,7 +63,7 @@ model:
     optimizer:
       class_path: torch.optim.Adam
       init_args:
-        lr: 3e-4
+        lr: 1e-4
     scheduler:
       class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
       init_args:
@@ -93,8 +93,8 @@ data:
 
     csv_root_folder: /mnt/data_disk/projet_RCM_scanfire
     patches_root_folder: /mnt/data_disk/projet_RCM_scanfire
-    csv_file_name: pre_post_datasets_all.csv
-    #csv_file_name: pre_post_datasets.csv
+    #csv_file_name: pre_post_datasets_all.csv
+    csv_file_name: pre_post_datasets.csv
     split_ratios: [0.7, 0.15, 0.15]
     band_names: [ 'M','LOCALINCANGLE','RL','RR','S0', 'SP1','SP2','SP3','RFDI' ]
     # RCM bands AVAILABLE
