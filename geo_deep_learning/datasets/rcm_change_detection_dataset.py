@@ -336,7 +336,6 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
         # Boucle bande par bande (car certaines bandes ont des NaN)
         for i in range(image_pre.shape[0]):
-            # ✅ Fallback min–max normalization
             image_pre[i] = torch.clamp((image_pre[i] - min_vals[i]) / (max_vals[i] - min_vals[i]), 0, 1)
             image_post[i] = torch.clamp((image_post[i] - min_vals[i]) / (max_vals[i] - min_vals[i]), 0, 1)
 

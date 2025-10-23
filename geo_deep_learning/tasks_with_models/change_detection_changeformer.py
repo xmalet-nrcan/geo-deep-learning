@@ -335,9 +335,6 @@ class ChangeDetectionChangeFormer(LightningModule):
         batch_size = x_post.shape[0]
         y = y.squeeze(1).long()
         y_hat = self(x_pre, x_post)
-        y_hat = torch.nan_to_num(y_hat, nan=1, posinf=0, neginf=0.0)
-        if y_hat.shape[1] == 1 and y.ndim == 3:
-            y = y.unsqueeze(1)  # Shape: [B, 1, H, W]
         loss = self.loss(y_hat, y)
         return x_pre, x_post, y, y_hat, loss, batch_size
 

@@ -62,7 +62,6 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self.beams = beams
         self.split_ratios = split_ratios
         self.dataset = None
-        self.data_type_max = data_type_max
 
 
     def setup(self, stage: str | None = None) -> None:  # noqa: ARG002
@@ -105,7 +104,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             pin_memory=True,
             persistent_workers=True,
             prefetch_factor=2,
-            shuffle=False,
+            shuffle=True,
         )
 
     def test_dataloader(self) -> DataLoader[Any]:
