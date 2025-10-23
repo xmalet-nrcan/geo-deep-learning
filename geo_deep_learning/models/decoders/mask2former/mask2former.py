@@ -5,6 +5,7 @@ import torch
 from torch import nn
 from torch.nn import functional as fn
 
+from .config import CONFIG
 from .pixel_decoder import MSDeformAttnPixelDecoder
 from .transformer_decoder import MultiScaleMaskedTransformerDecoder
 
@@ -12,67 +13,46 @@ from .transformer_decoder import MultiScaleMaskedTransformerDecoder
 class Mask2FormerHead(nn.Module):
     """Mask2Former head."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         input_shape: dict[str, tuple[int]],
-        hidden_dim: int = 2048,
         num_classes: int = 150,
-        loss_weight: float = 1.0,
-        ignore_value: int = -1,
-        # extra parameters
-        transformer_in_feature: str = "multi_scale_pixel_decoder",
     ) -> None:
         """
         NOTE: this interface is experimental.
 
         Args:
             input_shape: shapes (channels and stride) of the input features
-            hidden_dim: hidden dimension
             num_classes: number of classes to predict
-            loss_weight: loss weight
-            ignore_value: category id to be ignored during training.
-            transformer_in_feature: input feature name to the transformer_predictor.
 
         """
         super().__init__()
-        orig_input_shape = input_shape
-        input_shape = sorted(input_shape.items(), key=lambda x: x[1][-1])
-        self.in_features = [k for k, _ in input_shape]
-
-        self.ignore_value = ignore_value
-        self.common_stride = 4
-        self.loss_weight = loss_weight
-        nheads = max(8, hidden_dim // 32)
-        dim_feedforward = hidden_dim * 8
 
         self.pixel_decoder = MSDeformAttnPixelDecoder(
-            input_shape=orig_input_shape,
-            transformer_dropout=0.0,
-            transformer_nheads=nheads,
-            transformer_dim_feedforward=dim_feedforward,
-            transformer_enc_layers=6,
-            conv_dim=hidden_dim,
-            mask_dim=hidden_dim,
-            norm="GN",
-            transformer_in_features=["1", "2", "3", "4"],
-            common_stride=4,
+            input_shape=input_shape,
+            transformer_dropout=CONFIG.transformer_dropout,
+            transformer_nheads=CONFIG.transformer_nheads,
+            transformer_dim_feedforward=CONFIG.transformer_dim_feedforward,
+            transformer_enc_layers=CONFIG.transformer_enc_layers,
+            conv_dim=CONFIG.conv_dim,
+            mask_dim=CONFIG.mask_dim,
+            norm=CONFIG.norm,
+            transformer_in_features=CONFIG.transformer_in_features,
+            common_stride=CONFIG.common_stride,
         )
         self.predictor = MultiScaleMaskedTransformerDecoder(
-            in_channels=hidden_dim,
-            mask_classification=True,
+            in_channels=CONFIG.conv_dim,
+            mask_classification=CONFIG.mask_classification,
             num_classes=num_classes,
-            hidden_dim=hidden_dim,
-            num_queries=100,
-            nheads=nheads,
-            dim_feedforward=dim_feedforward,
-            dec_layers=9,
-            pre_norm=False,
-            mask_dim=hidden_dim,
-            enforce_input_project=False,
+            hidden_dim=CONFIG.hidden_dim,
+            num_queries=CONFIG.num_queries,
+            nheads=CONFIG.num_heads,
+            dim_feedforward=CONFIG.dim_feedforward,
+            dec_layers=CONFIG.decoder_layers - 1,
+            pre_norm=CONFIG.pre_norm,
+            mask_dim=CONFIG.mask_dim,
+            enforce_input_project=CONFIG.enforce_input_project,
         )
-
-        self.transformer_in_feature = transformer_in_feature
-        self.num_classes = num_classes
 
     def forward_features(
         self,
