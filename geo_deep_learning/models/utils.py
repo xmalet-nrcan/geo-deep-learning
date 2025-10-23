@@ -8,7 +8,7 @@ import torch
 import MultiScaleDeformableAttention as msda  # noqa: N813
 import torch.nn.functional as fn
 from torch import nn
-from torch.cuda.amp import custom_bwd, custom_fwd
+from torch.amp import custom_bwd, custom_fwd
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
 from torch.nn.init import constant_, xavier_uniform_
@@ -212,13 +212,23 @@ class MSDeformAttnFunction(Function):
     ) -> torch.Tensor:
         """Forward function."""
         ctx.im2col_step = im2col_step
-        output = ms_deform_attn_core_pytorch(
+
+        # Use fast CUDA kernel (memory-efficient, processes in chunks)
+        output = msda.ms_deform_attn_forward(
             value,
             value_spatial_shapes,
-            #  value_level_start_index,
+            value_level_start_index,
             sampling_locations,
             attention_weights,
+            ctx.im2col_step,
         )
+        # Fallback to PyTorch implementation (slower, more memory)
+        # output = ms_deform_attn_core_pytorch(
+        #     value,
+        #     value_spatial_shapes,
+        #     sampling_locations,
+        #     attention_weights,
+        # )
         ctx.save_for_backward(
             value,
             value_spatial_shapes,
@@ -336,9 +346,7 @@ class MSDeformAttn(nn.Module):
                 "which is more efficient in our CUDA implementation.",
                 stacklevel=2,
             )
-
-        self.im2col_step = 64
-
+        self.im2col_step = 128
         self.d_model = d_model
         self.n_levels = n_levels
         self.n_heads = n_heads
