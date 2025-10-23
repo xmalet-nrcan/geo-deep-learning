@@ -44,7 +44,6 @@ class SegmentationDINOv3(LightningModule):
         class_labels: list[str] | None = None,
         class_colors: list[str] | None = None,
         weights_from_checkpoint_path: str | None = None,
-        aux_loss_weight: float = 0.4,
         **kwargs: object,  # noqa: ARG002
     ) -> None:
         """Initialize the model."""
@@ -59,7 +58,6 @@ class SegmentationDINOv3(LightningModule):
         self.class_colors = class_colors
         self.max_samples = max_samples
         self.threshold = 0.5
-        self.aux_loss_weight = aux_loss_weight
         self.criterion = criterion
         num_classes_metric = num_classes + 1 if num_classes == 1 else num_classes
         self.iou_metric = MeanIoU(
@@ -174,33 +172,19 @@ class SegmentationDINOv3(LightningModule):
         outputs = self(x)
         targets = semantic_to_instance_masks(y, self.num_classes)
         loss_dict = self.criterion(outputs, targets)
+
         loss = sum(
             loss_dict[k] * self.criterion.weight_dict[k]
-            for k in ["loss_ce", "loss_mask", "loss_dice"]
-            if k in loss_dict
+            for k in loss_dict
+            if k in self.criterion.weight_dict
         )
-        aux_loss_keys = [
-            k for k in loss_dict if k not in ["loss_ce", "loss_mask", "loss_dice"]
-        ]
-        if aux_loss_keys:
-            aux_loss = sum(loss_dict[k] for k in aux_loss_keys)
-            loss = loss + self.aux_loss_weight * aux_loss
-            self.log(
-                "train_aux_loss",
-                aux_loss,
-                batch_size=batch_size,
-                prog_bar=False,
-                logger=True,
-                on_step=False,
-                on_epoch=True,
-                sync_dist=True,
-                rank_zero_only=False,
-            )
-        for k, v in loss_dict.items():
-            if k in ["loss_ce", "loss_mask", "loss_dice"]:
+
+        # Log main losses
+        for k in ["loss_ce", "loss_mask", "loss_dice"]:
+            if k in loss_dict:
                 self.log(
                     f"train_{k}",
-                    v,
+                    loss_dict[k],
                     batch_size=batch_size,
                     prog_bar=False,
                     logger=True,
@@ -209,6 +193,27 @@ class SegmentationDINOv3(LightningModule):
                     sync_dist=True,
                     rank_zero_only=False,
                 )
+        aux_loss_keys = [
+            k for k in loss_dict if k not in ["loss_ce", "loss_mask", "loss_dice"]
+        ]
+        if aux_loss_keys:
+            aux_loss = sum(
+                loss_dict[k] * self.criterion.weight_dict[k]
+                for k in aux_loss_keys
+                if k in self.criterion.weight_dict
+            )
+            self.log(
+                "train_aux_loss",
+                aux_loss,
+                batch_size=batch_size,
+                prog_bar=True,
+                logger=True,
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+                rank_zero_only=False,
+            )
+
         self.log(
             "train_loss",
             loss,
@@ -222,16 +227,6 @@ class SegmentationDINOv3(LightningModule):
         )
 
         return loss
-
-    def on_train_epoch_end(self) -> None:
-        """On train epoch end."""
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
-        logger.info(
-            "Training epoch complete. Processed %d samples",
-            self.train_samples_count,
-        )
-        self.train_samples_count = 0
 
     def validation_step(
         self,
@@ -247,11 +242,13 @@ class SegmentationDINOv3(LightningModule):
         outputs = self(x)
         targets = semantic_to_instance_masks(y, self.num_classes)
         loss_dict = self.criterion(outputs, targets)
+
         loss = sum(
             loss_dict[k] * self.criterion.weight_dict[k]
-            for k in ["loss_ce", "loss_mask", "loss_dice"]
-            if k in loss_dict
+            for k in loss_dict
+            if k in self.criterion.weight_dict
         )
+
         self.log(
             "val_loss",
             loss,
@@ -266,16 +263,6 @@ class SegmentationDINOv3(LightningModule):
         pred_logits = outputs["pred_logits"]  # [B, Q, C+1]
         pred_masks = outputs["pred_masks"]  # [B, Q, H, W]
         return self._convert_to_semantic(pred_logits, pred_masks, y.shape[-2:])
-
-    def on_validation_epoch_end(self) -> None:
-        """On validation epoch end."""
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
-        logger.info(
-            "Validation epoch complete. Processed %d samples",
-            self.val_samples_count,
-        )
-        self.val_samples_count = 0
 
     def test_step(
         self,
@@ -292,11 +279,13 @@ class SegmentationDINOv3(LightningModule):
         outputs = self(x)
         targets = semantic_to_instance_masks(y, self.num_classes)
         loss_dict = self.criterion(outputs, targets)
+
         loss = sum(
             loss_dict[k] * self.criterion.weight_dict[k]
-            for k in ["loss_ce", "loss_mask", "loss_dice"]
-            if k in loss_dict
+            for k in loss_dict
+            if k in self.criterion.weight_dict
         )
+
         pred_logits = outputs["pred_logits"]  # [B, Q, C+1]
         pred_masks = outputs["pred_masks"]  # [B, Q, H, W]
         y_hat = self._convert_to_semantic(pred_logits, pred_masks, y.shape[-2:])
@@ -326,14 +315,6 @@ class SegmentationDINOv3(LightningModule):
             sync_dist=True,
             rank_zero_only=False,
         )
-
-    def on_test_epoch_end(self) -> None:
-        """On test epoch end."""
-        logger.info(
-            "Test epoch complete. Processed %d samples",
-            self.test_samples_count,
-        )
-        self.test_samples_count = 0
 
     def _convert_to_semantic(
         self,
