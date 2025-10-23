@@ -8,7 +8,7 @@ import torch
 import MultiScaleDeformableAttention as msda  # noqa: N813
 import torch.nn.functional as fn
 from torch import nn
-from torch.amp import custom_bwd, custom_fwd
+from torch.cuda.amp import custom_bwd, custom_fwd
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
 from torch.nn.init import constant_, xavier_uniform_
