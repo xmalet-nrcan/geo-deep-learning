@@ -175,6 +175,7 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
                 src[level_index],
                 memory_mask=attn_mask,
                 memory_key_padding_mask=None,
+                pos=pos[level_index],
                 query_pos=query_embed,
             )
 
