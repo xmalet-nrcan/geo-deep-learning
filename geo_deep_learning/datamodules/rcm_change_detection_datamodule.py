@@ -104,7 +104,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             pin_memory=True,
             persistent_workers=True,
             prefetch_factor=2,
-            shuffle=True,
+            shuffle=False,
         )
 
     def test_dataloader(self) -> DataLoader[Any]:

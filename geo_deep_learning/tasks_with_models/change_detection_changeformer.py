@@ -239,6 +239,16 @@ class ChangeDetectionChangeFormer(LightningModule):
                                "image": batch["image_post"],
                                "mask": batch["mask"]})
             batch.update(transformed)
+        else:
+            aug = krn.augmentation.PadTo(size=self.image_size,
+                                                   pad_mode='constant',
+                                                   pad_value=0,
+                                                   keepdim=False)
+            transformed = aug({"image_pre": batch["image_pre"],
+                               "image_post": batch["image_post"],
+                               "image": batch["image_post"],
+                               "mask": batch["mask"]})
+            batch.update(transformed)
         return batch
 
     # TODO : Modifier pour avoir image pre/post
