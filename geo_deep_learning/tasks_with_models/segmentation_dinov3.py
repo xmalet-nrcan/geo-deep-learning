@@ -48,7 +48,7 @@ class SegmentationDINOv3(LightningModule):
     ) -> None:
         """Initialize the model."""
         super().__init__()
-        self.save_hyperparameters(ignore=["criterion"])
+        self.save_hyperparameters()
         self.num_classes = num_classes
         self.image_size = image_size
         self.weights_from_checkpoint_path = weights_from_checkpoint_path
