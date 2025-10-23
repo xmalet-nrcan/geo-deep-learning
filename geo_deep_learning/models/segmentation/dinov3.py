@@ -19,7 +19,6 @@ class DINOv3SegmentationModel(nn.Module):
         )
         embed_dim = self.encoder.backbone.embed_dim
         patch_size = self.encoder.backbone.patch_size
-        hidden_dim = 256
         self.decoder = Mask2FormerHead(
             input_shape={
                 "1": [embed_dim, patch_size * 4, patch_size * 4, 4],
@@ -27,9 +26,7 @@ class DINOv3SegmentationModel(nn.Module):
                 "3": [embed_dim, patch_size, patch_size, 4],
                 "4": [embed_dim, int(patch_size / 2), int(patch_size / 2), 4],
             },
-            hidden_dim=hidden_dim,
             num_classes=num_classes,
-            ignore_value=255,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
