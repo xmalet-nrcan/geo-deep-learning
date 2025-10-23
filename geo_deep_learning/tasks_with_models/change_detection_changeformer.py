@@ -244,6 +244,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                                                    pad_mode='constant',
                                                    pad_value=0,
                                                    keepdim=False)
+            aug = AugmentationSequential(aug, data_keys=None)
             transformed = aug({"image_pre": batch["image_pre"],
                                "image_post": batch["image_post"],
                                "image": batch["image_post"],
