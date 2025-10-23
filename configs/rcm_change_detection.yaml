@@ -49,8 +49,8 @@ model:
     # 1 for BITMASK
     # 1 for SAT_PASS encoding
     # 1 for BEAM encoding
-    in_channels: 7 # Should be the length of data.band_names + 3
-    max_samples: 8
+    in_channels: 11 # Should be the length of data.band_names + 4
+    max_samples: 10
     num_classes: 1  # binary change detection
     loss:
       # class_path: loss.dice_bce_loss.DiceBCELoss
@@ -79,7 +79,7 @@ model:
       monitor: "val_loss"
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    weights_from_checkpoint_path: /app/model_checkpoints/model-epoch=11-val_loss=0.745.ckpt
+    weights_from_checkpoint_path: null #/app/model_checkpoints/model-epoch=11-val_loss=0.745.ckpt
 
 
 data:
@@ -87,7 +87,7 @@ data:
   init_args:
     batch_size: 16
     num_workers: 20
-    data_type_max: 32767
+    data_type_max: 1
     patch_size:
     - 256
     - 256
@@ -97,7 +97,7 @@ data:
     csv_file_name: pre_post_datasets_all.csv
     #csv_file_name: pre_post_datasets.csv
     split_ratios: [0.7, 0.15, 0.15]
-    band_names: [ 'M','RFDI','NDVS' ]
+    band_names: [ 'M','RL','RR','S0','SP1','SP2','LOCALINCANGLE' ]
     # RCM bands AVAILABLE
     #    BITMASK_CROPPED
     #    LOCALINCANGLE
