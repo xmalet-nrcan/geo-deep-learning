@@ -1595,7 +1595,6 @@ class DecoderTransformer_v3(nn.Module):
         # Stage 3: x1/16 scale
         _c3_1 = self.linear_c3(c3_1).permute(0, 2, 1).reshape(n, -1, c3_1.shape[2], c3_1.shape[3])
         _c3_2 = self.linear_c3(c3_2).permute(0, 2, 1).reshape(n, -1, c3_2.shape[2], c3_2.shape[3])
-        print(_c3_1.shape, _c3_2.shape, _c4.shape)
         _c3 = self.diff_c3(torch.cat((_c3_1, _c3_2), dim=1)) + F.interpolate(_c4,size=_c3_1.shape[2:], mode="bilinear",align_corners=False)
         p_c3 = self.make_pred_c3(_c3)
         outputs.append(p_c3)
