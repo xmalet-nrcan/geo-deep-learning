@@ -1,69 +1,23 @@
 """Mask2Former loss utilities."""
 
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as fn
 from torch import Tensor
 
 
-def sigmoid_focal_loss(
+def sigmoid_ce_loss(
     inputs: Tensor,
     targets: Tensor,
-    alpha: float = 0.25,
-    gamma: float = 2.0,
+    num_masks: float,
 ) -> Tensor:
-    """
-    Sigmoid focal loss for Mask2Former (per-pixel, no reduction).
-
-    This is the original Mask2Former implementation which differs slightly
-    from the smp FocalLoss in reduction behavior for matching cost computation
-
-    Args:
-        inputs: Predictions (logits) of shape [N, H, W] or [N, H*W]
-        targets: Ground truth labels of shape [N, H, W] or [N, H*W] (0 or 1)
-        alpha: Weighting factor in [0, 1] to balance positive/negative examples
-        gamma: Exponent of the modulating factor (1 - p_t)^gamma
-
-    Returns:
-        Focal loss value per pixel (no reduction)
-
-    """
-    prob = inputs.sigmoid()
-    ce_loss = fn.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-    p_t = prob * targets + (1 - prob) * (1 - targets)
-    loss = ce_loss * ((1 - p_t) ** gamma)
-
-    if alpha >= 0:
-        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
-        loss = alpha_t * loss
-
-    return loss
+    """Binary cross entropy loss."""
+    loss = fn.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    return loss.mean(1).sum() / num_masks
 
 
-def dice_loss_for_matching(
-    inputs: Tensor,
-    targets: Tensor,
-) -> Tensor:
-    """
-    Compute the DICE loss for matching cost computation.
-
-    This version is specifically for computing matching costs in the
-    Hungarian matcher, with a different signature than smp's DiceLoss.
-
-    Args:
-        inputs: Predictions (logits) of shape [N, H, W] or [N, H*W]
-        targets: Ground truth of shape [N, H, W] or [N, H*W] (0 or 1)
-
-    Returns:
-        Dice loss per prediction [N]
-
-    """
-    inputs = inputs.sigmoid()
-    inputs = inputs.flatten(1)
-    targets = targets.flatten(1)
-
-    numerator = 2 * (inputs * targets).sum(-1)
-    denominator = inputs.sum(-1) + targets.sum(-1)
-    return 1 - (numerator + 1) / (denominator + 1)
+sigmoid_ce_loss_jit = torch.jit.script(sigmoid_ce_loss)
 
 
 def dice_loss_with_num_masks(
@@ -83,27 +37,53 @@ def dice_loss_with_num_masks(
         Normalized dice loss (scalar)
 
     """
-    loss = dice_loss_for_matching(inputs, targets)
+    inputs = inputs.sigmoid()
+    inputs = inputs.flatten(1)
+    targets = targets.flatten(1)
+
+    numerator = 2 * (inputs * targets).sum(-1)
+    denominator = inputs.sum(-1) + targets.sum(-1)
+    loss = 1 - (numerator + 1) / (denominator + 1)
     return loss.sum() / num_masks
 
 
-def batch_sigmoid_ce_loss_mean(
-    inputs: Tensor,
-    targets: Tensor,
-) -> Tensor:
-    """
-    Binary cross entropy loss with sigmoid, mean reduction.
+dice_loss_jit = torch.jit.script(dice_loss_with_num_masks)
 
-    Args:
-        inputs: Predictions (logits) of shape [B, Q, H, W]
-        targets: Ground truth of shape [B, Q, H, W] (0 or 1)
 
-    Returns:
-        Mean BCE loss (scalar)
+def batch_dice_loss(inputs: Tensor, targets: Tensor) -> Tensor:
+    """Compute the DICE loss, similar to generalized IOU for masks."""
+    inputs = inputs.sigmoid()
+    inputs = inputs.flatten(1)
+    numerator = 2 * torch.einsum("nc,mc->nm", inputs, targets)
+    denominator = inputs.sum(-1)[:, None] + targets.sum(-1)[None, :]
+    return 1 - (numerator + 1) / (denominator + 1)
 
-    """
-    loss = fn.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-    return loss.mean()
+
+batch_dice_loss_jit = torch.jit.script(batch_dice_loss)
+
+
+def batch_sigmoid_ce_loss(inputs: Tensor, targets: Tensor) -> Tensor:
+    """Compute BCE loss in batched pairwise fashion."""
+    hw = inputs.shape[1]
+    pos = fn.binary_cross_entropy_with_logits(
+        inputs,
+        torch.ones_like(inputs),
+        reduction="none",
+    )
+    neg = fn.binary_cross_entropy_with_logits(
+        inputs,
+        torch.zeros_like(inputs),
+        reduction="none",
+    )
+    loss = torch.einsum("nc,mc->nm", pos, targets) + torch.einsum(
+        "nc,mc->nm",
+        neg,
+        (1 - targets),
+    )
+    return loss / hw
+
+
+batch_sigmoid_ce_loss_jit = torch.jit.script(batch_sigmoid_ce_loss)
 
 
 def get_src_permutation_idx(
@@ -160,41 +140,107 @@ def get_tgt_permutation_idx(
     return batch_idx, tgt_idx
 
 
-# if __name__ == "__main__":
-#     print("Testing Mask2Former-specific loss utilities...")
+# Adapted from detectron2/point_features.py
+def point_sample(input_tensor: Tensor, point_coords: Tensor, **kwargs: any) -> Tensor:
+    """
+    Sample points from input feature map.
 
-#     # Test sigmoid focal loss
-#     print("\n1. Testing sigmoid_focal_loss...")
-#     inputs = torch.randn(10, 100, 100)  # [N, H, W]
-#     targets = torch.randint(0, 2, (10, 100, 100)).float()
-#     loss = sigmoid_focal_loss(inputs, targets, alpha=0.25, gamma=2.0)
-#     print(f"   Shape: {loss.shape}, Mean: {loss.mean().item():.4f}")
+    Args:
+        input_tensor (Tensor): Shape (N, C, H, W)
+        point_coords (Tensor): Shape (N, P, 2) with values in [0, 1] x [0, 1]
+        kwargs: Additional arguments for grid_sample
 
-#     # Test dice loss for matching
-#     print("\n2. Testing dice_loss_for_matching...")
-#     inputs = torch.randn(10, 64, 64)
-#     targets = torch.randint(0, 2, (10, 64, 64)).float()
-#     loss = dice_loss_for_matching(inputs, targets)
-#     print(f"   Shape: {loss.shape}, Values: {loss[:3].tolist()}")
+    Returns:
+        output (Tensor): Shape (N, C, P)
 
-#     # Test dice loss with num_masks
-#     print("\n3. Testing dice_loss_with_num_masks...")
-#     loss = dice_loss_with_num_masks(inputs, targets, num_masks=10.0)
-#     print(f"   Normalized loss: {loss.item():.4f}")
+    """
+    add_dim = False
+    points_dim = 3
+    if point_coords.dim() == points_dim:
+        add_dim = True
+        point_coords = point_coords.unsqueeze(2)
+    output = fn.grid_sample(input_tensor, 2.0 * point_coords - 1.0, **kwargs)
+    if add_dim:
+        output = output.squeeze(3)
+    return output
 
-#     # Test permutation indices
-#     print("\n4. Testing get_src_permutation_idx...")
-#     indices = [
-#         (torch.tensor([2, 5, 7]), torch.tensor([0, 1, 2])),
-#         (torch.tensor([1, 3]), torch.tensor([0, 1])),
-#     ]
-#     batch_idx, src_idx = get_src_permutation_idx(indices)
-#     print(f"   Batch idx: {batch_idx.tolist()}")
-#     print(f"   Source idx: {src_idx.tolist()}")
 
-#     print("\n5. Testing get_tgt_permutation_idx...")
-#     batch_idx, tgt_idx = get_tgt_permutation_idx(indices)
-#     print(f"   Batch idx: {batch_idx.tolist()}")
-#     print(f"   Target idx: {tgt_idx.tolist()}")
+# Adapted from mask2former/point_features.py
+def calculate_uncertainty(logits: Tensor) -> Tensor:
+    """Calculate uncertainty from logits."""
+    if logits.shape[1] != 1:
+        msg = "logits must have 1 channel"
+        raise ValueError(msg)
+    return -(torch.abs(logits.clone()))
 
-#     print("\n✅ All tests passed!")
+
+# Adapted from detectron2/point_features.py
+def get_uncertain_point_coords_with_randomness(
+    coarse_logits: Tensor,
+    uncertainty_func: Callable,
+    num_points: int,
+    oversample_ratio: int,
+    importance_sample_ratio: float,
+) -> Tensor:
+    """
+    Sample points based on uncertainty with oversampling.
+
+    Args:
+        coarse_logits (Tensor): Shape (N, C, H, W) or (N, 1, H, W)
+        uncertainty_func: Function that computes uncertainty from logits
+        num_points (int): Number of points to sample
+        oversample_ratio (int): Oversample by this ratio then select top-k
+        importance_sample_ratio (float): Ratio of importance vs random sampling
+
+    Returns:
+        point_coords (Tensor): Shape (N, P, 2) in [0, 1] x [0, 1] space
+
+    """
+    if oversample_ratio < 1:
+        msg = "oversample_ratio must be >= 1"
+        raise ValueError(msg)
+    if importance_sample_ratio > 1 or importance_sample_ratio < 0:
+        msg = "importance_sample_ratio must be between 0 and 1"
+        raise ValueError(msg)
+
+    num_boxes = coarse_logits.shape[0]
+    num_sampled = int(num_points * oversample_ratio)
+
+    point_coords = torch.rand(num_boxes, num_sampled, 2, device=coarse_logits.device)
+
+    point_logits = point_sample(coarse_logits, point_coords, align_corners=False)
+
+    point_uncertainties = uncertainty_func(point_logits)
+
+    num_uncertain_points = int(importance_sample_ratio * num_points)
+    num_random_points = num_points - num_uncertain_points
+
+    idx = torch.topk(point_uncertainties[:, 0, :], k=num_uncertain_points, dim=1)[1]
+    shift = num_sampled * torch.arange(
+        num_boxes,
+        dtype=torch.long,
+        device=coarse_logits.device,
+    )
+    idx += shift[:, None]
+
+    point_coords = point_coords.view(-1, 2)[idx.view(-1), :].view(
+        num_boxes,
+        num_uncertain_points,
+        2,
+    )
+
+    if num_random_points > 0:
+        point_coords = torch.cat(
+            [
+                point_coords,
+                torch.rand(
+                    num_boxes,
+                    num_random_points,
+                    2,
+                    device=coarse_logits.device,
+                ),
+            ],
+            dim=1,
+        )
+
+    return point_coords
