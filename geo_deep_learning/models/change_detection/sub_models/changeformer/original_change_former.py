@@ -1721,13 +1721,10 @@ class ChangeFormerV6(nn.Module):
                                              decoder_softmax=decoder_softmax, feature_strides=[2, 4, 8, 16])
 
     def forward(self, x1, x2):
-        out = self.TDec_x2(self.Tenc_x2(x1), self.Tenc_x2(x2))
-        out = F.interpolate(
-            out[-1],  # on prend la derniere sortie (la plus grande)
-            size=(x1.shape[2], x1.shape[3]),  # taille H, W d'origine
-            mode="bilinear",
-            align_corners=False
-        )
-        return out
+        [fx1, fx2] = [self.Tenc_x2(x1), self.Tenc_x2(x2)]
+
+        cp = self.TDec_x2(fx1, fx2)
+
+        return cp[-1]
 
 
