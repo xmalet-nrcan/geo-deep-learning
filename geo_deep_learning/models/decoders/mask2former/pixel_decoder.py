@@ -298,11 +298,11 @@ class MSDeformAttnPixelDecoder(nn.Module):
         transformer_input_shape = {
             k: v for k, v in input_shape.items() if k in transformer_in_features
         }
+        # Sort input shapes by stride (works for both CNNs & ViTs)
         input_shape = sorted(input_shape.items(), key=lambda x: x[1][-1])
         self.in_features = [k for k, v in input_shape]
         self.feature_strides = [v[-1] for k, v in input_shape]
         self.feature_channels = [v[0] for k, v in input_shape]
-
         transformer_input_shape = sorted(
             transformer_input_shape.items(),
             key=lambda x: x[1][-1],
@@ -368,7 +368,7 @@ class MSDeformAttnPixelDecoder(nn.Module):
         output_convs = []
 
         use_bias = norm == ""
-        for _, in_channels in enumerate(self.feature_channels[:1]):
+        for idx, in_channels in enumerate(self.feature_channels[: self.num_fpn_levels]):
             lateral_norm = get_norm(norm, conv_dim)
             output_norm = get_norm(norm, conv_dim)
 
@@ -391,6 +391,8 @@ class MSDeformAttnPixelDecoder(nn.Module):
             )
             c2_xavier_fill(lateral_conv)
             c2_xavier_fill(output_conv)
+            self.add_module(f"adapter_{idx + 1}", lateral_conv)
+            self.add_module(f"layer_{idx + 1}", output_conv)
 
             lateral_convs.append(lateral_conv)
             output_convs.append(output_conv)
@@ -441,9 +443,7 @@ class MSDeformAttnPixelDecoder(nn.Module):
 
         # append `out` with extra FPN levels
         # Reverse feature maps into top-down order (from low to high resolution)
-        for idx, f in enumerate(
-            self.in_features[0],
-        ):
+        for idx, f in enumerate(self.in_features[: self.num_fpn_levels][::-1]):
             x = features[f].float()
             lateral_conv = self.lateral_convs[idx]
             output_conv = self.output_convs[idx]
