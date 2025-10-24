@@ -210,17 +210,21 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         return super().__len__()
 
     def _get_bands_to_load(self) -> list | None:
+        """
+        Get the list of bands to load, ensuring BITMASK_CROPPED (band 1) is always included.
+        The returned list is 0-based indices for rasterio based on BandName enum numbering.
+        """
         # Always include BITMASK_CROPPED (band 1)
         bands_to_read = self.bands if self.bands is not None else None
         if bands_to_read is None:
             return None
-        elif bands_to_read is not None and 1 not in bands_to_read:
+        elif bands_to_read is not None and 1 not in bands_to_read:  # Add Bitmask band if not present
             bands_to_read_with_mask = [1] + bands_to_read
         else:
             bands_to_read_with_mask = bands_to_read
         bands_to_read_with_mask.sort()
         bands_to_read_with_mask = set(bands_to_read_with_mask)  # to remove duplicates
-        # Convert to 0-based indices for rasterio
+        # Convert to 0-based indices for rasterio as 0 = BITMASK_CROPPED band
         return [i - 1 for i in bands_to_read_with_mask]
 
     @staticmethod
@@ -281,7 +285,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
 
 
-        bands_index = self._get_bands_to_load()
+        bands_index = self._get_bands_to_load() # 0-based indices for rasterio
         if bands_index is not None:
             image_pre = manage_bands(image_pre, bands_index)
             image_post = manage_bands(image_post, bands_index)
@@ -293,9 +297,10 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         image_post = torch.cat([common_mask_tensor, image_post], dim=0)
         image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
 
-
+        # Prepare band names based on selected bands from _get_bands_to_load()
         band_names = [BandName(i + 1).name for i in bands_index] if bands_index is not None else [i.name for i in
                                                                                                   BandName]
+        # Add common mask, sat_pass and beam band names
         band_names = ['COMMON_MASK'] + band_names + [SATTELITE_PASS_BAND_NAME, BEAM_BAND_NAME]
 
         image_profile = None
