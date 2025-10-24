@@ -45,12 +45,7 @@ model:
     image_size: [256,256]
     encoder: "mit_b0"
     use_dynamic_encoder: false
-    # set to; it will be set to the number of band_names in the datamodule +
-    # 1 for COMMON MASK
-    # 1 for BITMASK
-    # 1 for SAT_PASS encoding
-    # 1 for BEAM encoding
-    in_channels: 18 # Should be the length of data.band_names + 4 X 2
+    in_channels: 15 #(5+1)x2+3 # Should be : len(band_names [+1 if BITMASK not included in band_names ] )X2 + 3
     weights: imagenet
     max_samples: 6
     num_classes: 1  # binary change detection
@@ -86,7 +81,7 @@ model:
 data:
   class_path: datamodules.rcm_change_detection_one_output_datamodule.RcmChangeDetectionOneOutputDataModule
   init_args:
-    batch_size: 8
+    batch_size: 4
     num_workers: 20
     data_type_max: 1
     patch_size:
