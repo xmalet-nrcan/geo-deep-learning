@@ -12,10 +12,10 @@ services:
     volumes:
       - "/mnt/data_disk/projet_RCM_scanfire:/mnt/data_disk/projet_RCM_scanfire:rw"
 #      - "/home/xmalet/projects/geo-deep-learning/data:/app/data:rw"
-      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection.yaml:/app/configs/rcm_change_detection.yaml"
+      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection.yaml:/app/configs/model_conf.yaml"
       - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/model_checkpoints:rw"
       - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
-    entrypoint: ["python",  "geo_deep_learning/train.py","fit", "--config", "configs/rcm_change_detection.yaml"]
+    entrypoint: ["python",  "geo_deep_learning/train.py","fit", "--config", "configs/model_conf.yaml"]
     deploy:
       resources:
 #        limits:

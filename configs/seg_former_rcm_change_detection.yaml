@@ -12,13 +12,13 @@ trainer:
   gradient_clip_val: 1.0
   precision: "16-mixed"
   sync_batchnorm: true
-  logger:
-    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
-    init_args:
-      save_dir: .mlflow/logs
-      log_model: all
-      experiment_name: "change_detection_segformer"
-      run_name: "segformer_change_detection_mit_b0"
+#  logger:
+#    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
+#    init_args:
+#      save_dir: .mlflow/logs
+#      log_model: all
+#      experiment_name: "change_detection_segformer"
+#      run_name: "segformer_change_detection_mit_b0"
   callbacks:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
@@ -39,16 +39,18 @@ trainer:
   max_epochs: 250
 
 model:
-  class_path: tasks_with_models.change_detection_segformer.py.ChangeDetectionSegmentationSegformer
+  class_path: tasks_with_models.change_detection_segformer.ChangeDetectionSegmentationSegformer
   init_args:
-    change_detection_model: "changeformer"
+#    change_detection_model: "changeformer"
     image_size: [256,256]
+    encoder: "mit_b0"
+    use_dynamic_encoder: false
     # set to; it will be set to the number of band_names in the datamodule +
     # 1 for COMMON MASK
     # 1 for BITMASK
     # 1 for SAT_PASS encoding
     # 1 for BEAM encoding
-    in_channels: 22 # Should be the length of data.band_names + 4 X 2
+    in_channels: 18 # Should be the length of data.band_names + 4 X 2
     weights: imagenet
     max_samples: 6
     num_classes: 1  # binary change detection
@@ -78,13 +80,13 @@ model:
       monitor: "val_loss"
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    weights_from_checkpoint_path: null #/app/model_checkpoints/model-epoch=11-val_loss=0.745.ckpt
+    weights_from_checkpoint_path: # /app/model_checkpoints/model-epoch=18-val_loss=0.725.ckpt
 
 
 data:
-  class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
+  class_path: datamodules.rcm_change_detection_one_output_datamodule.RcmChangeDetectionOneOutputDataModule
   init_args:
-    batch_size: 16
+    batch_size: 8
     num_workers: 20
     data_type_max: 1
     patch_size:
@@ -96,8 +98,14 @@ data:
     csv_file_name: pre_post_datasets_all.csv
     #csv_file_name: pre_post_datasets.csv
     split_ratios: [0.7, 0.15, 0.15]
-    band_names: [ 'M','RL','RR','S0','SP1','SP2','LOCALINCANGLE' ]
+    # band_names: [ 'LOCALINCANGLE', '']
+    # band_names: [ 'LOCALINCANGLE', 'RL','RR' ] # RCM INPUT (non-polarimetric intensity)
+    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' ] # MCHI-DECOMP ==> 5 bands
+    # band_names: null # all bands
+    #
+    # band_names: [ 'M','RL','RR','S0','SP1','SP2','LOCALINCANGLE' ]
     # RCM bands AVAILABLE
+    # -------------------
     #    BITMASK_CROPPED
     #    LOCALINCANGLE
     #    M

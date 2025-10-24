@@ -378,7 +378,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             return 0
 
         try:
-            logger.info("Logging visualizations")
+            logger.info("\nLogging visualizations")
             image_batch = batch["image"]
             mask_batch = batch["mask"].squeeze(1).long()
             batch_image_name = batch["image_name"]

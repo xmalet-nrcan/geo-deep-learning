@@ -53,18 +53,18 @@ model:
     max_samples: 10
     num_classes: 1  # binary change detection
     loss:
-      # class_path: loss.dice_bce_loss.DiceBCELoss
+      #class_path: loss.dice_bce_loss.DiceBCELoss
       class_path: segmentation_models_pytorch.losses.DiceLoss
       init_args:
-        ignore_index: null
+        ignore_index: 32767
         mode: "binary"
-        #alpha: 0.5
-        #smooth: 1e-6
-        #eps: 1e-7
+      #  alpha: 0.5
+      #  smooth: 1e-6
+      #  eps: 1e-7
     optimizer:
       class_path: torch.optim.Adam
       init_args:
-        lr: 6e-4
+        lr: 0.01
     scheduler:
       class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
       init_args:
@@ -85,7 +85,7 @@ model:
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
   init_args:
-    batch_size: 16
+    batch_size: 32
     num_workers: 20
     data_type_max: 1
     patch_size:
@@ -115,5 +115,6 @@ data:
     #    SP3
 
     beams:
-    - 'A'  # AVAILABLE: ['A','B','C','D']
+    - 'A'
+    #- 'B'  # AVAILABLE: ['A','B','C','D']
     satellite_pass:  # 'Descending'  # AVAILABLE: ['Ascending','Descending']
