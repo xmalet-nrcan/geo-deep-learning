@@ -109,11 +109,11 @@ data:
     #    BITMASK_CROPPED
     #    LOCALINCANGLE
     #    M
-    #    NDSV
+    #    NDSV     # strongly correlated with PVN
     #    PDN
     #    PSN
     #    PVN
-    #    RFDI
+    #    RFDI     #
     #    RL
     #    RR
     #    S0
