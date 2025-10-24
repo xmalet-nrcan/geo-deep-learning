@@ -30,7 +30,7 @@ class LoggerSaveConfigCallback(SaveConfigCallback):
                 # Récupération du chemin local du fichier de config
                 config_filepath = self.config.config[0]
                 print(f"[MLflow] Saving config: {config_filepath}")
-
+                print(safe_name(trainer.logger.run_id))
                 # Log de l'artifact avec noms nettoyés
                 trainer.logger.experiment.log_artifact(
                     local_path=config_filepath,

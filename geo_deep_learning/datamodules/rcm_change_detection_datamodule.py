@@ -77,10 +77,13 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             beams=self.beams
         )
 
+        self._set_train_test_val_datasets()
+
+    def _set_train_test_val_datasets(self):
         self.train_dataset, self.val_dataset, self.test_dataset = data.random_split(
-                self.dataset, self.split_ratios,
+            self.dataset, self.split_ratios,
             generator=torch.Generator().manual_seed(42)
-            )
+        )
 
     def train_dataloader(self) -> DataLoader[Any]:
         """Dataloader for training."""
