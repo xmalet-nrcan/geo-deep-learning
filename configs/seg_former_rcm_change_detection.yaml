@@ -47,7 +47,7 @@ model:
     use_dynamic_encoder: false
     in_channels: 15 #(5+1)x2+3 # Should be : len(band_names [+1 if BITMASK not included in band_names ] )X2 + 3
     weights: imagenet
-    max_samples: 6
+    max_samples: 10
     num_classes: 1  # binary change detection
     loss:
       # class_path: loss.dice_bce_loss.DiceBCELoss
