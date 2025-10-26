@@ -81,7 +81,7 @@ model:
 data:
   class_path: datamodules.rcm_change_detection_one_output_datamodule.RcmChangeDetectionOneOutputDataModule
   init_args:
-    batch_size: 4
+    batch_size: 16
     num_workers: 20
     data_type_max: 1
     patch_size:
