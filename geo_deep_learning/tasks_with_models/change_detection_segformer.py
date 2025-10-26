@@ -33,18 +33,10 @@ logger = logging.getLogger(__name__)
 class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
     """Segmentation SegFormer model."""
 
-
-
     def _apply_aug(self) -> AugmentationSequential:
         """Augmentation pipeline."""
-        pad_to_image_size = krn.augmentation.PadTo(size=self.image_size,
-                                                   pad_mode='constant',
-                                                   pad_value=0,
-                                                   keepdim=False)
 
         return AugmentationSequential(
-            pad_to_image_size,
-            AugmentationSequential(
                 krn.augmentation.RandomHorizontalFlip(p=0.5, keepdim=True),
                 krn.augmentation.RandomVerticalFlip(p=0.5, keepdim=True),
                 krn.augmentation.RandomRotation90(
@@ -54,17 +46,23 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
                     keepdim=True,
                 ),
                 data_keys=None,
-                random_apply=1, ),
-            data_keys=None
-        )
+                random_apply=1, )
 
     def on_before_batch_transfer(
         self,
         batch: dict[str, Any],
         dataloader_idx: int,  # noqa: ARG002
     ) -> dict[str, Any]:
+        aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
+                                     pad_mode='constant',
+                                     pad_value=0,
+                                     keepdim=False), data_keys=None)
+        transformed = aug({
+            "image": batch["image"],
+            "mask": batch["mask"]})
+        batch.update(transformed)
         return batch
-    
+
     def on_after_batch_transfer(self, batch, dataloader_idx):
         aug = self._apply_aug()
 
@@ -73,16 +71,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
                                "image": batch["image"],
                                "mask": batch["mask"]})
             batch.update(transformed)
-        else:
-            aug = krn.augmentation.PadTo(size=self.image_size,
-                                                   pad_mode='constant',
-                                                   pad_value=0,
-                                                   keepdim=False)
-            aug = AugmentationSequential(aug, data_keys=None)
-            transformed = aug({
-                               "image": batch["image"],
-                               "mask": batch["mask"]})
-            batch.update(transformed)
+
         return batch
 
     def forward(self, image: Tensor) -> Tensor:
