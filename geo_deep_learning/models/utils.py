@@ -4,8 +4,8 @@ import warnings  # noqa: I001
 import math
 import torch
 
-# import torch before MultiScaleDeformableAttention
-# import MultiScaleDeformableAttention as msda  # noqa: N813
+#import MultiScaleDeformableAttention as msda  # noqa: N813
+
 import torch.nn.functional as fn
 from torch import nn
 from torch.cuda.amp import custom_bwd, custom_fwd

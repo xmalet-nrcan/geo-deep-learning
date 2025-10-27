@@ -12,18 +12,18 @@ trainer:
   gradient_clip_val: 1.0
   precision: "16-mixed"
   sync_batchnorm: true
-#  logger:
-#    class_path: lightning.pytorch.loggers.TensorBoardLogger
-#    init_args:
-#      save_dir: ./lightning_logs
-#      name: segformer_rcm_change_detection_AB
   logger:
-    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
+    class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
-      save_dir: .mlflow/logs
-      log_model: all
-      experiment_name: "change_detection_AB_2"
-      run_name: "segformer_rcm_change_detection"
+      save_dir: ./lightning_logs
+      name: segformer_rcm_change_detection_AB
+#  logger:
+#    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
+#    init_args:
+#      save_dir: .mlflow/logs
+#      log_model: all
+#      experiment_name: "change_detection_AB_2"
+#      run_name: "segformer_rcm_change_detection"
   callbacks:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
@@ -80,7 +80,8 @@ model:
       monitor: "val_loss"
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    weights_from_checkpoint_path: #/app/model_checkpoints/model-AB-epoch=184-val_loss=0.117.ckpt
+    weights_from_checkpoint_path: /app/model_checkpoints/model-AB_2-epoch=81-val_loss=0.018.ckpt
+
 
 
 data:
