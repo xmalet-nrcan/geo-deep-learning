@@ -7,9 +7,7 @@ from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.cli import ArgsType, LightningCLI
 from lightning.pytorch.loggers import MLFlowLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
-
 from configs import logging_config  # noqa: F401
-from geo_deep_learning.tools.mlflow_logger import LoggerSaveConfigCallback
 
 def safe_name(name: str) -> str:
     """Replace invalid MLflow characters in artifact or run names."""
@@ -48,15 +46,17 @@ class GeoDeepLearningCLI(LightningCLI):
                 return
             best_model_path = self.trainer.checkpoint_callback.best_model_path
 
-#            logger.info(f"BEST MODEL PATH :{best_model_path}")
-#            logger.info(f"EXP NAME : {self.trainer.logger._experiment_name}")
-
-            test_logger = TestMLFlowLogger(
-                experiment_name=safe_name(self.trainer.logger._experiment_name),
-                run_name=safe_name(str(self.trainer.logger._run_name)),
-                run_id=safe_name(str(self.trainer.logger.run_id)),
-                save_dir=self.trainer.logger.save_dir,
-            )
+            try:
+                test_logger = TestMLFlowLogger(
+                    experiment_name=safe_name(self.trainer.logger._experiment_name),
+                    run_name=safe_name(str(self.trainer.logger._run_name)),
+                    run_id=safe_name(str(self.trainer.logger.run_id)),
+                    save_dir=self.trainer.logger.save_dir,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create TestMLFlowLogger: {e}. Using original logger.")
+                test_logger = self.trainer.logger
+                test_logger.name = safe_name('test_logger_'+test_logger.name)
 
             test_trainer = Trainer(
                 devices=1,
