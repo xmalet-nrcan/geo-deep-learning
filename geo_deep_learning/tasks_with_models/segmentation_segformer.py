@@ -1,7 +1,6 @@
 """Segmentation SegFormer model."""
 
 import logging
-import math
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -9,15 +8,15 @@ from typing import Any
 
 import kornia as krn
 import torch
+from geo_deep_learning.tools.utils import denormalization, load_weights_from_checkpoint
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
+from segmentation_models_pytorch.losses import SoftCrossEntropyLoss
 from torch import Tensor
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
 
-from geo_deep_learning.utils.models import load_weights_from_checkpoint
-from geo_deep_learning.utils.tensors import denormalization
 from geo_deep_learning.models.segmentation.segformer import SegFormerSegmentationModel
 from geo_deep_learning.tools.visualization import visualize_prediction
 
@@ -33,24 +32,24 @@ class SegmentationSegformer(LightningModule):
     """Segmentation SegFormer model."""
 
     def __init__(  # noqa: PLR0913
-        self,
-        encoder: str,
-        *,
-        image_size: tuple[int, int],
-        in_channels: int,
-        num_classes: int,
-        max_samples: int,
-        loss: Callable,
-        optimizer: OptimizerCallable = torch.optim.Adam,
-        scheduler: LRSchedulerCallable = torch.optim.lr_scheduler.ConstantLR,
-        scheduler_config: dict[str, Any] | None = None,
-        use_dynamic_encoder: bool = False,
-        freeze_layers: list[str] | None = None,
-        weights: str | None = None,
-        class_labels: list[str] | None = None,
-        class_colors: list[str] | None = None,
-        weights_from_checkpoint_path: str | None = None,
-        **kwargs: object,  # noqa: ARG002
+            self,
+            encoder: str,
+            *,
+            image_size: tuple[int, int],
+            in_channels: int,
+            num_classes: int,
+            max_samples: int,
+            loss: Callable,
+            optimizer: OptimizerCallable = torch.optim.Adam,
+            scheduler: LRSchedulerCallable = torch.optim.lr_scheduler.ConstantLR,
+            scheduler_config: dict[str, Any] | None = None,
+            use_dynamic_encoder: bool = False,
+            freeze_layers: list[str] | None = None,
+            weights: str | None = None,
+            class_labels: list[str] | None = None,
+            class_colors: list[str] | None = None,
+            weights_from_checkpoint_path: str | None = None,
+            **kwargs: object,  # noqa: ARG002
     ) -> None:
         """Initialize the model."""
         super().__init__()
@@ -73,6 +72,8 @@ class SegmentationSegformer(LightningModule):
 
         self.class_colors = class_colors
         self.threshold = 0.5
+        self.ce_loss = SoftCrossEntropyLoss(smooth_factor=0.1, ignore_index=255)
+        self.aux_weight = {"s4": 0.4, "s3": 0.3, "s2": 0.2}
 
         num_classes = num_classes + 1 if num_classes == 1 else num_classes
         self.iou_metric = MeanIoU(
@@ -151,51 +152,7 @@ class SegmentationSegformer(LightningModule):
     def configure_optimizers(self) -> list[list[dict[str, Any]]]:
         """Configure optimizers."""
         optimizer = self.optimizer(self.parameters())
-        if (
-            self.hparams["scheduler"]["class_path"]
-            == "torch.optim.lr_scheduler.OneCycleLR"
-        ):
-            max_lr = (
-                self.hparams.get("scheduler", {}).get("init_args", {}).get("max_lr")
-            )
-            stepping_batches = self.trainer.estimated_stepping_batches
-            if stepping_batches > -1:
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    total_steps=stepping_batches,
-                )
-            elif (
-                stepping_batches == -1
-                and getattr(self.trainer.datamodule, "epoch_size", None) is not None
-            ):
-                batch_size = self.trainer.datamodule.batch_size
-                epoch_size = self.trainer.datamodule.epoch_size
-                accumulate_grad_batches = self.trainer.accumulate_grad_batches
-                max_epochs = self.trainer.max_epochs
-                steps_per_epoch = math.ceil(
-                    epoch_size / (batch_size * accumulate_grad_batches),
-                )
-                buffer_steps = int(steps_per_epoch * accumulate_grad_batches)
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    steps_per_epoch=steps_per_epoch + buffer_steps,
-                    epochs=max_epochs,
-                )
-            else:
-                stepping_batches = (
-                    self.hparams.get("scheduler", {})
-                    .get("init_args", {})
-                    .get("total_steps")
-                )
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    total_steps=stepping_batches,
-                )
-        else:
-            scheduler = self.scheduler(optimizer)
+        scheduler = self.scheduler(optimizer)
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
 
@@ -203,30 +160,43 @@ class SegmentationSegformer(LightningModule):
         """Forward pass."""
         return self.model(image)
 
-    def on_before_batch_transfer(
-        self,
-        batch: dict[str, Any],
-        dataloader_idx: int,  # noqa: ARG002
+    def on_after_batch_transfer(
+            self,
+            batch: dict[str, Any],
+            dataloader_idx: int,  # noqa: ARG002
     ) -> dict[str, Any]:
-        """On before batch transfer."""
-        if self.trainer.training:
-            aug = self._apply_aug()
-            transformed = aug({"image": batch["image"], "mask": batch["mask"]})
-            batch.update(transformed)
+        """On after batch transfer."""
+        if not self.trainer.training:
+            return batch
+        device = batch["image"].device
+        aug = self._apply_aug()
+        batch_aug = aug({"image": batch["image"], "mask": batch["mask"]})
+        for key in ["image", "mask"]:
+            if key in batch_aug:
+                batch[key] = batch_aug[key].to(device, non_blocking=True)
         return batch
 
     def training_step(
-        self,
-        batch: dict[str, Any],
-        batch_idx: int,  # noqa: ARG002
+            self,
+            batch: dict[str, Any],
+            batch_idx: int,  # noqa: ARG002
     ) -> Tensor:
         """Run training step."""
         x = batch["image"]
         y = batch["mask"]
         batch_size = x.shape[0]
         y = y.squeeze(1).long()
-        y_hat = self(x)
-        loss = self.loss(y_hat, y)
+        outputs = self(x)
+        main_loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
+        aux_loss = torch.zeros((), device=y.device, dtype=main_loss.dtype)
+        aux = outputs.aux or {}
+        for key, weight in self.aux_weight.items():
+            if weight and key in aux:
+                logits = aux[key]
+                aux_loss = aux_loss + weight * (
+                        self.loss(logits, y) + self.ce_loss(logits, y)
+                )
+        loss = main_loss + aux_loss
 
         self.log(
             "train_loss",
@@ -237,23 +207,23 @@ class SegmentationSegformer(LightningModule):
             on_step=False,
             on_epoch=True,
             sync_dist=True,
-            rank_zero_only=True,
+            rank_zero_only=False,
         )
 
         return loss
 
     def validation_step(
-        self,
-        batch: dict[str, Any],
-        batch_idx: int,  # noqa: ARG002
+            self,
+            batch: dict[str, Any],
+            batch_idx: int,  # noqa: ARG002
     ) -> Tensor:
         """Run validation step."""
         x = batch["image"]
         y = batch["mask"]
         batch_size = x.shape[0]
         y = y.squeeze(1).long()
-        y_hat = self(x)
-        loss = self.loss(y_hat, y)
+        outputs = self(x)
+        loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
         self.log(
             "val_loss",
             loss,
@@ -263,35 +233,34 @@ class SegmentationSegformer(LightningModule):
             on_step=False,
             on_epoch=True,
             sync_dist=True,
-            rank_zero_only=True,
+            rank_zero_only=False,
         )
         if self.num_classes == 1:
-            y_hat = (y_hat.sigmoid().squeeze(1) > self.threshold).long()
+            y_hat = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
         else:
-            y_hat = y_hat.softmax(dim=1).argmax(dim=1)
+            y_hat = outputs.out.softmax(dim=1).argmax(dim=1)
 
         return y_hat
 
     def test_step(
-        self,
-        batch: dict[str, Any],
-        batch_idx: int,  # noqa: ARG002
+            self,
+            batch: dict[str, Any],
+            batch_idx: int,  # noqa: ARG002
     ) -> None:
         """Run test step."""
         x = batch["image"]
         y = batch["mask"]
         batch_size = x.shape[0]
         y = y.squeeze(1).long()
-        y_hat = self(x)
-        loss = self.loss(y_hat, y)
+        outputs = self(x)
+        loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
 
         if self.num_classes == 1:
-            y_hat = (y_hat.sigmoid().squeeze(1) > self.threshold).long()
+            y_hat = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
         else:
-            y_hat = y_hat.softmax(dim=1).argmax(dim=1)
+            y_hat = outputs.out.softmax(dim=1).argmax(dim=1)
 
         metrics = self.iou_classwise_metric(y_hat, y)
-        self.iou_classwise_metric.reset()
         metrics["test_loss"] = loss
 
         if self._total_samples_visualized < self.max_samples:
@@ -312,18 +281,20 @@ class SegmentationSegformer(LightningModule):
             prog_bar=False,
             logger=True,
             on_step=False,
-            rank_zero_only=True,
+            on_epoch=True,
+            sync_dist=True,
+            rank_zero_only=False,
         )
 
     def _log_visualizations(  # noqa: PLR0913
-        self,
-        trainer: Trainer,
-        batch: dict[str, Any],
-        outputs: Tensor,
-        max_samples: int,
-        artifact_prefix: str = "val",
-        *,
-        epoch_suffix: bool = True,
+            self,
+            trainer: Trainer,
+            batch: dict[str, Any],
+            outputs: Tensor,
+            max_samples: int,
+            artifact_prefix: str = "val",
+            *,
+            epoch_suffix: bool = True,
     ) -> None:
         """
         SegFormer-specific log visualizations.
