@@ -1,4 +1,5 @@
 """SegFormer MLP decoder."""
+from typing import Any
 
 import torch
 import torch.nn.functional as fn
@@ -82,7 +83,7 @@ class Decoder(nn.Module):
 
         self.linear_pred = nn.Conv2d(embedding_dim, self.num_classes, kernel_size=1)
 
-    def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
+    def forward(self, x: list[torch.Tensor]) -> tuple[Any, dict[str, Any] | None]:
         """Forward pass."""
         c1, c2, c3, c4 = x
         n, _, h, w = c4.shape

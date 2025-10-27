@@ -6,6 +6,8 @@ from lightning.pytorch import seed_everything
 from lightning.pytorch.cli import ArgsType, LightningCLI
 
 from configs import logging_config  # noqa: F401
+from geo_deep_learning.tools.mlflow_logger import LoggerSaveConfigCallback
+
 
 def safe_name(name: str) -> str:
     """Replace invalid MLflow characters in artifact or run names."""
