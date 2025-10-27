@@ -32,7 +32,7 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         save_top_k: 5
-        filename: "model-{epoch:02d}-{val_loss:.3f}"
+        filename: "model-AB-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 3
@@ -75,7 +75,7 @@ model:
       monitor: "val_loss"
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    weights_from_checkpoint_path: # /app/model_checkpoints/model-epoch=18-val_loss=0.725.ckpt
+    weights_from_checkpoint_path: /app/model_checkpoints/model-epoch=129-val_loss=0.251.ckpt
 
 
 data:
@@ -117,5 +117,6 @@ data:
     #    SP3
 
     beams:
-    - 'A'  # AVAILABLE: ['A','B','C','D']
+    - 'A'
+    - 'B'  # AVAILABLE: ['A','B','C','D']
     satellite_pass:  # 'Descending'  # AVAILABLE: ['Ascending','Descending']
