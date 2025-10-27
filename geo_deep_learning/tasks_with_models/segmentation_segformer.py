@@ -8,7 +8,8 @@ from typing import Any
 
 import kornia as krn
 import torch
-from geo_deep_learning.tools.utils import denormalization, load_weights_from_checkpoint
+from geo_deep_learning.utils.tensors import denormalization
+from geo_deep_learning.utils.models import load_weights_from_checkpoint
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable

@@ -1,27 +1,18 @@
 """Segmentation SegFormer model."""
 
 import logging
-import math
 import warnings
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import kornia as krn
-import torch
 from kornia.augmentation import AugmentationSequential
-from lightning.pytorch import LightningModule, Trainer
-from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
+from lightning.pytorch import Trainer
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch import Tensor
-from torchmetrics.segmentation import MeanIoU
-from torchmetrics.wrappers import ClasswiseWrapper
 
-from geo_deep_learning.models.segmentation.segformer import SegFormerSegmentationModel
 from geo_deep_learning.tasks_with_models.segmentation_segformer import SegmentationSegformer
 from geo_deep_learning.tools.visualization import visualize_prediction
-from geo_deep_learning.utils.models import load_weights_from_checkpoint
-from geo_deep_learning.utils.tensors import denormalization
 
 warnings.filterwarnings(
     "ignore",
@@ -38,34 +29,32 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
         """Augmentation pipeline."""
 
         return AugmentationSequential(
-                krn.augmentation.RandomHorizontalFlip(p=0.5, keepdim=True),
-                krn.augmentation.RandomVerticalFlip(p=0.5, keepdim=True),
-                krn.augmentation.RandomRotation90(
-                    times=(1, 3),
-                    p=0.5,
-                    align_corners=True,
-                    keepdim=True,
-                ),
-                data_keys=None,
-                random_apply=1, )
+            krn.augmentation.RandomHorizontalFlip(p=0.5, keepdim=True),
+            krn.augmentation.RandomVerticalFlip(p=0.5, keepdim=True),
+            krn.augmentation.RandomRotation90(
+                times=(1, 3),
+                p=0.5,
+                align_corners=True,
+                keepdim=True,
+            ),
+            data_keys=None,
+            random_apply=1, )
 
     def on_before_batch_transfer(
-        self,
-        batch: dict[str, Any],
-        dataloader_idx: int,  # noqa: ARG002
+            self,
+            batch: dict[str, Any],
+            dataloader_idx: int,  # noqa: ARG002
     ) -> dict[str, Any]:
 
         aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
-                                     pad_mode='constant',
-                                     pad_value=0,
-                                     keepdim=False), data_keys=None)
+                                                            pad_mode='constant',
+                                                            pad_value=0,
+                                                            keepdim=False), data_keys=None)
         transformed = aug({
             "image": batch["image"],
             "mask": batch["mask"]})
         batch.update(transformed)
         return batch
-
-
 
     def forward(self, image: Tensor) -> Tensor:
         """Forward pass."""
