@@ -16,7 +16,7 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: ./lightning_logs
-      name: segformer_rcm_change_detection_AB
+      name: segformer_rcm_change_detection_AB_2
     #  logger:
     #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
     #    init_args:
@@ -37,11 +37,11 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         save_top_k: 5
-        filename: "model-AB-{epoch:02d}-{val_loss:.3f}"
+        filename: "model-AB_2-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 3
-  max_epochs: 50
+  max_epochs: 130
 
 model:
   class_path: tasks_with_models.change_detection_segformer.ChangeDetectionSegmentationSegformer
@@ -80,7 +80,7 @@ model:
       monitor: "val_loss"
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    weights_from_checkpoint_path: /app/model_checkpoints/model-AB-epoch=184-val_loss=0.117.ckpt
+    weights_from_checkpoint_path: #/app/model_checkpoints/model-AB-epoch=184-val_loss=0.117.ckpt
 
 
 data:
