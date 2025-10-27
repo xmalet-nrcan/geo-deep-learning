@@ -30,7 +30,7 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         verbose: True
-        patience: 20
+        patience: 10
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         dirpath: "./model_checkpoints"
@@ -41,7 +41,7 @@ trainer:
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 3
-  max_epochs: 250
+  max_epochs: 50
 
 model:
   class_path: tasks_with_models.change_detection_segformer.ChangeDetectionSegmentationSegformer
@@ -80,7 +80,7 @@ model:
       monitor: "val_loss"
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    weights_from_checkpoint_path: /app/model_checkpoints/model-epoch=129-val_loss=0.251.ckpt
+    weights_from_checkpoint_path: /app/model_checkpoints/model-AB-epoch=184-val_loss=0.117.ckpt
 
 
 data:
