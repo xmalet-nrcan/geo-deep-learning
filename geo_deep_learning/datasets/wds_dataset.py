@@ -240,6 +240,13 @@ class ShardedDataset:
             return self._prepare_clay_output(image, label, metadata, sample["__key__"])
         if self.model_type == "dofa":
             return self._prepare_dofa_output(image, label, metadata, sample["__key__"])
+        if self.model_type == "dinov3":
+            return self._prepare_generic_dinov3(
+                image,
+                label,
+                metadata,
+                sample["__key__"],
+            )
         # unified
         return self._prepare_generic_output(image, label, metadata, sample["__key__"])
 
@@ -306,6 +313,42 @@ class ShardedDataset:
             "std": self.norm_stats["std"],
         }
 
+    def _prepare_generic_dinov3(
+        self,
+        image: torch.Tensor,
+        label: torch.Tensor,
+        metadata: dict[str, Any],  # noqa: ARG002
+        key: str,
+    ) -> dict[str, Any]:
+        """Prepare output for DINOv3 (RGB only - 3 channels)."""
+        rgb_channels = 3
+        rgba_channels = 4
+
+        # DINOv3 expects RGB (3 channels), drop 4th channel if present
+        if image.shape[0] == rgba_channels:
+            image = image[:rgb_channels]  # Keep only first 3 channels (R, G, B)
+
+        # Adjust normalization stats to match 3 channels
+        mean = (
+            self.norm_stats["mean"][:rgb_channels]
+            if self.norm_stats["mean"].shape[0] >= rgb_channels
+            else self.norm_stats["mean"]
+        )
+        std = (
+            self.norm_stats["std"][:rgb_channels]
+            if self.norm_stats["std"].shape[0] >= rgb_channels
+            else self.norm_stats["std"]
+        )
+
+        return {
+            "image": image,
+            "mask": label,
+            "platform": self.sensor_name,
+            "image_name": key,
+            "mean": mean,
+            "std": std,
+        }
+
     def _encode_temporal(self, datetime_str: str) -> torch.Tensor:
         """Encode temporal information using sine/cosine cyclical encoding."""
         try:
@@ -313,7 +356,7 @@ class ShardedDataset:
             if datetime_str.endswith("Z"):
                 datetime_str = datetime_str[:-1] + "+00:00"
 
-            dt = datetime.fromisoformat(datetime_str.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(datetime_str)
 
             # Week of year (1-52 or 53)
             week = dt.isocalendar().week
@@ -362,15 +405,14 @@ class ShardedDataset:
 
     def _extract_wavelengths(self, metadata: dict[str, Any]) -> torch.Tensor:
         """Extract wavelength information for DOFA."""
+        wavelengths_keys = self.wavelength_keys or [
+            "red_wavelength",
+            "green_wavelength",
+            "blue_wavelength",
+            "nir_wavelength",
+        ]
         try:
             meta = metadata["metadata"]
-
-            wavelengths_keys = self.wavelength_keys or [
-                "red_wavelength",
-                "green_wavelength",
-                "blue_wavelength",
-                "nir_wavelength",
-            ]
 
             wavelengths = [
                 float(meta[band]) for band in wavelengths_keys if band in meta
@@ -394,11 +436,18 @@ class ShardedDataset:
         """Create optimized WebDataset pipeline for HPC."""
         shard_list = sorted(self.shard_paths)
 
+        if self.split == "trn" and torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+            rank = torch.distributed.get_rank()
+            shard_list = shard_list[rank::world_size]
+        if len(shard_list) == 0:
+            logger.warning(
+                "No shards available for %s %s",
+                self.sensor_name,
+                self.split,
+            )
+            return None
         if self.split == "trn":
-            if torch.distributed.is_initialized():
-                world_size = torch.distributed.get_world_size()
-                rank = torch.distributed.get_rank()
-                shard_list = shard_list[rank::world_size]
             dataset = wds.WebDataset(
                 urls=shard_list,
                 shardshuffle=self.shardshuffle,
@@ -412,7 +461,7 @@ class ShardedDataset:
             dataset = wds.WebDataset(
                 urls=shard_list,
                 shardshuffle=False,
-                nodesplitter=None if self.split == "tst" else wds.split_by_node,
+                nodesplitter=wds.split_by_node,
                 workersplitter=wds.split_by_worker,
                 empty_check=False,
             )

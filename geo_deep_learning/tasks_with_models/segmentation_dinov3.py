@@ -1,7 +1,6 @@
-"""Segmentation DOFA model."""
+"""Segmentation DINOv3 with Mask2Former model."""
 
 import logging
-import math
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -12,20 +11,15 @@ import torch
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
-from models.segmentation.dofa import DOFASegmentationModel
-from segmentation_models_pytorch.losses import SoftCrossEntropyLoss
-from tools.utils import denormalization, load_weights_from_checkpoint
-from tools.visualization import visualize_prediction
 from torch import Tensor
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
 
-from geo_deep_learning.utils.models import load_weights_from_checkpoint
-from geo_deep_learning.utils.tensors import denormalization
-from models.segmentation.dofa import DOFASegmentationModel
-from tools.visualization import visualize_prediction
+from geo_deep_learning.models.segmentation.dinov3 import DINOv3SegmentationModel
+from geo_deep_learning.tools.target_converters import semantic_to_instance_masks
+from geo_deep_learning.tools.utils import denormalization, load_weights_from_checkpoint
+from geo_deep_learning.tools.visualization import visualize_prediction
 
-# Ignore warning about default grid_sample and affine_grid behavior triggered by kornia
 warnings.filterwarnings(
     "ignore",
     message="Default grid_sample and affine_grid behavior has changed",
@@ -34,22 +28,19 @@ warnings.filterwarnings(
 logger = logging.getLogger(__name__)
 
 
-class SegmentationDOFA(LightningModule):
-    """Segmentation DOFA model."""
+class SegmentationDINOv3(LightningModule):
+    """Segmentation DINOv3 with Mask2Former decoder."""
 
     def __init__(  # noqa: PLR0913
         self,
-        encoder: str,
-        *,
-        pretrained: bool,
-        image_size: tuple[int, int],
         num_classes: int,
+        *,
+        image_size: tuple[int, int],
         max_samples: int,
-        loss: Callable,
+        criterion: Callable,
         optimizer: OptimizerCallable = torch.optim.Adam,
         scheduler: LRSchedulerCallable = torch.optim.lr_scheduler.ConstantLR,
         scheduler_config: dict[str, Any] | None = None,
-        freeze_layers: list[str] | None = None,
         class_labels: list[str] | None = None,
         class_colors: list[str] | None = None,
         weights_from_checkpoint_path: str | None = None,
@@ -58,29 +49,25 @@ class SegmentationDOFA(LightningModule):
         """Initialize the model."""
         super().__init__()
         self.save_hyperparameters()
-        self.encoder = encoder
-        self.pretrained = pretrained
+        self.num_classes = num_classes
         self.image_size = image_size
-        self.freeze_layers = freeze_layers
         self.weights_from_checkpoint_path = weights_from_checkpoint_path
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.scheduler_config = scheduler_config or {"interval": "epoch"}
         self.class_colors = class_colors
         self.max_samples = max_samples
-        self.num_classes = num_classes
         self.threshold = 0.5
-        self.ce_loss = SoftCrossEntropyLoss(smooth_factor=0.1, ignore_index=255)
-        self.loss = loss
-        num_classes = num_classes + 1 if num_classes == 1 else num_classes
+        self.criterion = criterion
+        num_classes_metric = num_classes + 1 if num_classes == 1 else num_classes
         self.iou_metric = MeanIoU(
-            num_classes=num_classes,
+            num_classes=num_classes_metric,
             per_class=True,
             input_format="index",
             include_background=True,
         )
         self.labels = (
-            [str(i) for i in range(num_classes)]
+            [str(i) for i in range(num_classes_metric)]
             if class_labels is None
             else class_labels
         )
@@ -127,13 +114,7 @@ class SegmentationDOFA(LightningModule):
 
     def configure_model(self) -> None:
         """Configure model."""
-        self.model = DOFASegmentationModel(
-            encoder=self.encoder,
-            image_size=self.image_size,
-            freeze_layers=self.freeze_layers,
-            num_classes=self.num_classes,
-            pretrained=self.pretrained,
-        )
+        self.model = DINOv3SegmentationModel(num_classes=self.num_classes)
         if self.weights_from_checkpoint_path:
             map_location = self.device
             load_parts = self.hparams.get("load_parts")
@@ -151,68 +132,30 @@ class SegmentationDOFA(LightningModule):
     def configure_optimizers(self) -> list[list[dict[str, Any]]]:
         """Configure optimizers."""
         optimizer = self.optimizer(self.parameters())
-        if (
-            self.hparams["scheduler"]["class_path"]
-            == "torch.optim.lr_scheduler.OneCycleLR"
-        ):
-            max_lr = (
-                self.hparams.get("scheduler", {}).get("init_args", {}).get("max_lr")
-            )
-            stepping_batches = self.trainer.estimated_stepping_batches
-            if stepping_batches > -1:
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    total_steps=stepping_batches,
-                )
-            elif (
-                stepping_batches == -1
-                and getattr(self.trainer.datamodule, "epoch_size", None) is not None
-            ):
-                batch_size = self.trainer.datamodule.batch_size
-                epoch_size = self.trainer.datamodule.epoch_size
-                accumulate_grad_batches = self.trainer.accumulate_grad_batches
-                max_epochs = self.trainer.max_epochs
-                steps_per_epoch = math.ceil(
-                    epoch_size / (batch_size * accumulate_grad_batches),
-                )
-                buffer_steps = int(steps_per_epoch * accumulate_grad_batches)
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    steps_per_epoch=steps_per_epoch + buffer_steps,
-                    epochs=max_epochs,
-                )
-            else:
-                stepping_batches = (
-                    self.hparams.get("scheduler", {})
-                    .get("init_args", {})
-                    .get("total_steps")
-                )
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    total_steps=stepping_batches,
-                )
-        else:
-            scheduler = self.scheduler(optimizer)
+        scheduler = self.scheduler(optimizer)
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
 
-    def forward(self, image: Tensor, wavelengths: Tensor) -> Tensor:
+    def forward(self, image: Tensor) -> dict[str, Tensor]:
         """Forward pass."""
-        return self.model(image, wavelengths)
+        return self.model(image)
 
-    def on_before_batch_transfer(
+    def on_after_batch_transfer(
         self,
         batch: dict[str, Any],
         dataloader_idx: int,  # noqa: ARG002
     ) -> dict[str, Any]:
-        """On before batch transfer."""
-        if self.trainer.training:
-            aug = self._apply_aug()
-            transformed = aug({"image": batch["image"], "mask": batch["mask"]})
-            batch.update(transformed)
+        """On after batch transfer."""
+        if not self.trainer.training:
+            return batch
+        device = batch["image"].device
+        aug = self._apply_aug()
+        batch_aug = aug({"image": batch["image"], "mask": batch["mask"]})
+        for key in ["image", "mask"]:
+            if key in batch_aug and batch_aug[key].device != device:
+                batch[key] = batch_aug[key].to(device, non_blocking=True)
+            elif key in batch_aug:
+                batch[key] = batch_aug[key]
         return batch
 
     def training_step(
@@ -223,14 +166,54 @@ class SegmentationDOFA(LightningModule):
         """Run training step."""
         x = batch["image"]
         y = batch["mask"]
-        wv = batch["wavelengths"]
         batch_size = x.shape[0]
         self.train_samples_count += batch_size
         y = y.squeeze(1).long()
-        outputs = self(x, wv)
-        loss_main = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
-        loss_aux = self.loss(outputs.aux, y) + self.ce_loss(outputs.aux, y)
-        loss = loss_main + 0.4 * loss_aux
+        outputs = self(x)
+        targets = semantic_to_instance_masks(y, self.num_classes)
+        loss_dict = self.criterion(outputs, targets)
+
+        loss = sum(
+            loss_dict[k] * self.criterion.weight_dict[k]
+            for k in loss_dict
+            if k in self.criterion.weight_dict
+        )
+
+        # Log main losses
+        for k in ["loss_ce", "loss_mask", "loss_dice"]:
+            if k in loss_dict:
+                self.log(
+                    f"train_{k}",
+                    loss_dict[k],
+                    batch_size=batch_size,
+                    prog_bar=False,
+                    logger=True,
+                    on_step=False,
+                    on_epoch=True,
+                    sync_dist=True,
+                    rank_zero_only=False,
+                )
+        aux_loss_keys = [
+            k for k in loss_dict if k not in ["loss_ce", "loss_mask", "loss_dice"]
+        ]
+        if aux_loss_keys:
+            aux_loss = sum(
+                loss_dict[k] * self.criterion.weight_dict[k]
+                for k in aux_loss_keys
+                if k in self.criterion.weight_dict
+            )
+            self.log(
+                "train_aux_loss",
+                aux_loss,
+                batch_size=batch_size,
+                prog_bar=True,
+                logger=True,
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+                rank_zero_only=False,
+            )
+
         self.log(
             "train_loss",
             loss,
@@ -240,18 +223,10 @@ class SegmentationDOFA(LightningModule):
             on_step=False,
             on_epoch=True,
             sync_dist=True,
-            rank_zero_only=True,
+            rank_zero_only=False,
         )
 
         return loss
-
-    def on_train_epoch_end(self) -> None:
-        """On train epoch end."""
-        logger.info(
-            "Training epoch complete. Processed %d samples",
-            self.train_samples_count,
-        )
-        self.train_samples_count = 0
 
     def validation_step(
         self,
@@ -261,12 +236,19 @@ class SegmentationDOFA(LightningModule):
         """Run validation step."""
         x = batch["image"]
         y = batch["mask"]
-        wv = batch["wavelengths"]
         batch_size = x.shape[0]
         self.val_samples_count += batch_size
         y = y.squeeze(1).long()
-        outputs = self(x, wv)
-        loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
+        outputs = self(x)
+        targets = semantic_to_instance_masks(y, self.num_classes)
+        loss_dict = self.criterion(outputs, targets)
+
+        loss = sum(
+            loss_dict[k] * self.criterion.weight_dict[k]
+            for k in loss_dict
+            if k in self.criterion.weight_dict
+        )
+
         self.log(
             "val_loss",
             loss,
@@ -276,22 +258,11 @@ class SegmentationDOFA(LightningModule):
             on_step=False,
             on_epoch=True,
             sync_dist=True,
-            rank_zero_only=True,
+            rank_zero_only=False,
         )
-        if self.num_classes == 1:
-            y_hat = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
-        else:
-            y_hat = outputs.out.softmax(dim=1).argmax(dim=1)
-
-        return y_hat
-
-    def on_validation_epoch_end(self) -> None:
-        """On validation epoch end."""
-        logger.info(
-            "Validation epoch complete. Processed %d samples",
-            self.val_samples_count,
-        )
-        self.val_samples_count = 0
+        pred_logits = outputs["pred_logits"]  # [B, Q, C+1]
+        pred_masks = outputs["pred_masks"]  # [B, Q, H, W]
+        return self._convert_to_semantic(pred_logits, pred_masks, y.shape[-2:])
 
     def test_step(
         self,
@@ -301,19 +272,27 @@ class SegmentationDOFA(LightningModule):
         """Run test step."""
         x = batch["image"]
         y = batch["mask"]
-        wv = batch["wavelengths"]
         batch_size = x.shape[0]
         self.test_samples_count += batch_size
         y = y.squeeze(1).long()
-        outputs = self(x, wv)
-        loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
-        if self.num_classes == 1:
-            y_hat = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
-        else:
-            y_hat = outputs.out.softmax(dim=1).argmax(dim=1)
+
+        outputs = self(x)
+        targets = semantic_to_instance_masks(y, self.num_classes)
+        loss_dict = self.criterion(outputs, targets)
+
+        loss = sum(
+            loss_dict[k] * self.criterion.weight_dict[k]
+            for k in loss_dict
+            if k in self.criterion.weight_dict
+        )
+
+        pred_logits = outputs["pred_logits"]  # [B, Q, C+1]
+        pred_masks = outputs["pred_masks"]  # [B, Q, H, W]
+        y_hat = self._convert_to_semantic(pred_logits, pred_masks, y.shape[-2:])
         metrics = self.iou_classwise_metric(y_hat, y)
         metrics["test_loss"] = loss
 
+        # Visualization
         if self._total_samples_visualized < self.max_samples:
             remaining_samples = self.max_samples - self._total_samples_visualized
             samples_to_visualize = min(remaining_samples, len(x))
@@ -334,16 +313,47 @@ class SegmentationDOFA(LightningModule):
             logger=True,
             on_step=False,
             sync_dist=True,
-            rank_zero_only=True,
+            rank_zero_only=False,
         )
 
-    def on_test_epoch_end(self) -> None:
-        """On test epoch end."""
-        logger.info(
-            "Test epoch complete. Processed %d samples",
-            self.test_samples_count,
-        )
-        self.test_samples_count = 0
+    def _convert_to_semantic(
+        self,
+        pred_logits: Tensor,
+        pred_masks: Tensor,
+        target_size: tuple[int, int],
+    ) -> Tensor:
+        """
+        Convert Mask2Former outputs to semantic segmentation format.
+
+        Args:
+            pred_logits: Class predictions [B, Q, C+1]
+            pred_masks: Mask predictions [B, Q, H, W]
+            target_size: Target spatial size (H, W)
+
+        Returns:
+            Semantic segmentation predictions [B, H, W]
+
+        """
+        # Upsample masks to target size if needed
+        if pred_masks.shape[-2:] != target_size:
+            pred_masks = torch.nn.functional.interpolate(
+                pred_masks,
+                size=target_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        # Get class probabilities (exclude no-object class)
+        pred_probs = pred_logits.softmax(dim=-1)[..., :-1]  # [B, Q, C]
+        pred_masks = pred_masks.sigmoid()  # [B, Q, H, W]
+
+        # Combine class probabilities with mask predictions
+        # For each class c: sum over queries q of (class_prob[q,c] * mask[q])
+        # Output: [B, C, H, W]
+        semseg = torch.einsum("bqc,bqhw->bchw", pred_probs, pred_masks)
+
+        # Get final prediction by taking argmax over classes
+        return semseg.argmax(dim=1)  # [B, H, W]
 
     def _log_visualizations(  # noqa: PLR0913
         self,
@@ -354,9 +364,9 @@ class SegmentationDOFA(LightningModule):
         artifact_prefix: str = "val",
         *,
         epoch_suffix: bool = True,
-    ) -> None:
+    ) -> int:
         """
-        DOFA-specific log visualizations.
+        DINOv3-specific log visualizations.
 
         Args:
             trainer: Lightning trainer
@@ -409,6 +419,6 @@ class SegmentationDOFA(LightningModule):
                     run_id=trainer.logger.run_id,
                 )
         except Exception:
-            logger.exception("Error in DOFA visualization")
+            logger.exception("Error in DINOv3 visualization")
         else:
             return num_samples

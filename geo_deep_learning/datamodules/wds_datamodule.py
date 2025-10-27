@@ -1,7 +1,9 @@
 """Multi-sensor data module for webdataset."""
 
 import logging
+import math
 
+import torch
 import webdataset as wds
 from lightning.pytorch import LightningDataModule
 from webdataset import WebLoader
@@ -34,7 +36,7 @@ class MultiSensorDataModule(LightningDataModule):
             sensor_configs_path: Path to YAML config with sensor configurations
             model_type: Output format - "clay", "dofa", or "unified"
             patch_size: Target patch size for augmentations
-            epoch_size: Number of patches per epoch
+            epoch_size: Number of iterations (batches) per epoch
             batch_size: Batch size for all dataloaders
             num_workers: Number of worker processes
             prefetch_factor: Number of batches to prefetch
@@ -60,6 +62,10 @@ class MultiSensorDataModule(LightningDataModule):
         self.val_loader = None
         self.test_loader = None
 
+        self.trn_patch_count = 0
+        self.val_patch_count = 0
+        self.tst_patch_count = 0
+
     def prepare_data(self) -> None:
         """Prepare data."""
 
@@ -74,16 +80,64 @@ class MultiSensorDataModule(LightningDataModule):
             shardshuffle=self.shardshuffle,
             seed=self.seed,
         )
+        self._compute_patch_counts()
         self._setup_train_loader()
         self._setup_val_loader()
         self._setup_test_loader()
+
+    def _compute_patch_counts(self) -> None:
+        """Collect total patch counts from all sensors."""
+        for splits in self.datasets.values():
+            if "trn" in splits:
+                self.trn_patch_count += splits["trn"].patch_count
+            if "val" in splits:
+                self.val_patch_count += splits["val"].patch_count
+            if "tst" in splits:
+                self.tst_patch_count += splits["tst"].patch_count
+        logger.info(
+            "Total patch counts - Train: %d, Val: %d, Test: %d",
+            self.trn_patch_count,
+            self.val_patch_count,
+            self.tst_patch_count,
+        )
+
+    def _calculate_epoch_size(self, total_patches: int, split: str = "trn") -> int:
+        """
+        Calculate epoch_size.
+
+        Args:
+            total_patches: Total number of patches in the dataset
+            split: Dataset split (trn, val, tst)
+
+        Returns:
+            Number of iterations (batches) per epoch
+
+        """
+        world_size = 1
+        if torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+        patches_per_gpu = math.ceil(total_patches / world_size)
+        iterations_per_gpu = math.ceil(patches_per_gpu / self.batch_size)
+        logger.info(
+            "Auto-calculated epoch_size for %s split: %d iterations "
+            "(total_patches=%d, world_size=%d, batch_size=%d, patches_per_gpu=%d)",
+            split,
+            iterations_per_gpu,
+            total_patches,
+            world_size,
+            self.batch_size,
+            patches_per_gpu,
+        )
+        return iterations_per_gpu
 
     def _setup_train_loader(self) -> None:
         """Set up training loader with sensor mixing."""
         train_datasets = {}
         for sensor_name, splits in self.datasets.items():
             if "trn" in splits:
-                train_datasets[sensor_name] = splits["trn"]
+                wds_dataset = splits["trn"].build_web_dataset()
+                if wds_dataset is not None:
+                    train_datasets[sensor_name] = wds_dataset
 
         if not train_datasets:
             logger.warning("No training datasets found!")
@@ -92,13 +146,9 @@ class MultiSensorDataModule(LightningDataModule):
         if len(train_datasets) == 1:
             # Single sensor
             sensor_name = next(iter(train_datasets.keys()))
-            sensor_dataset = train_datasets[sensor_name].build_web_dataset()
+            sensor_dataset = train_datasets[sensor_name]
         else:
             # Multiple sensors
-            train_datasets = {
-                name: dataset.build_web_dataset()
-                for name, dataset in train_datasets.items()
-            }
             sensor_dataset = self._create_mixed_dataset(train_datasets)
 
         self.train_loader = WebLoader(
@@ -109,15 +159,19 @@ class MultiSensorDataModule(LightningDataModule):
             prefetch_factor=self.prefetch_factor,
             persistent_workers=(self.num_workers > 0),
         )
-        if self.epoch_size:
-            self.train_loader = self.train_loader.with_epoch(self.epoch_size)
+        epoch_size = self.epoch_size
+        if epoch_size is None:
+            epoch_size = self._calculate_epoch_size(self.trn_patch_count, "trn")
+        self.train_loader = self.train_loader.with_epoch(epoch_size)
 
     def _setup_val_loader(self) -> None:
         """Set up validation loader."""
         val_datasets = {}
         for sensor_name, splits in self.datasets.items():
             if "val" in splits:
-                val_datasets[sensor_name] = splits["val"]
+                wds_dataset = splits["val"].build_web_dataset()
+                if wds_dataset is not None:
+                    val_datasets[sensor_name] = wds_dataset
 
         if not val_datasets:
             logger.warning("No validation datasets found!")
@@ -126,13 +180,9 @@ class MultiSensorDataModule(LightningDataModule):
         if len(val_datasets) == 1:
             # Single sensor
             sensor_name = next(iter(val_datasets.keys()))
-            sensor_dataset = val_datasets[sensor_name].build_web_dataset()
+            sensor_dataset = val_datasets[sensor_name]
         else:
             # Multiple sensors
-            val_datasets = {
-                name: dataset.build_web_dataset()
-                for name, dataset in val_datasets.items()
-            }
             sensor_dataset = self._create_mixed_dataset(val_datasets)
 
         self.val_loader = WebLoader(
@@ -143,13 +193,17 @@ class MultiSensorDataModule(LightningDataModule):
             prefetch_factor=self.prefetch_factor,
             persistent_workers=(self.num_workers > 0),
         )
+        epoch_size = self._calculate_epoch_size(self.val_patch_count, "val")
+        self.val_loader = self.val_loader.with_epoch(epoch_size)
 
     def _setup_test_loader(self) -> None:
         """Set up test loader."""
         test_datasets = {}
         for sensor_name, splits in self.datasets.items():
             if "tst" in splits:
-                test_datasets[sensor_name] = splits["tst"]
+                wds_dataset = splits["tst"].build_web_dataset()
+                if wds_dataset is not None:
+                    test_datasets[sensor_name] = wds_dataset
 
         if not test_datasets:
             logger.info("No test datasets found - this is optional")
@@ -158,13 +212,9 @@ class MultiSensorDataModule(LightningDataModule):
         if len(test_datasets) == 1:
             # Single sensor
             sensor_name = next(iter(test_datasets.keys()))
-            sensor_dataset = test_datasets[sensor_name].build_web_dataset()
+            sensor_dataset = test_datasets[sensor_name]
         else:
             # Multiple sensors
-            test_datasets = {
-                name: dataset.build_web_dataset()
-                for name, dataset in test_datasets.items()
-            }
             sensor_dataset = self._create_mixed_dataset(test_datasets)
 
         self.test_loader = WebLoader(
