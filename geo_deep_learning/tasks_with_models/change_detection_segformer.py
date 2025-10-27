@@ -12,6 +12,7 @@ import torch
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
+from lightning.pytorch.loggers import TensorBoardLogger
 from torch import Tensor
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
@@ -53,6 +54,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
         batch: dict[str, Any],
         dataloader_idx: int,  # noqa: ARG002
     ) -> dict[str, Any]:
+
         aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
                                      pad_mode='constant',
                                      pad_value=0,
@@ -63,16 +65,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
         batch.update(transformed)
         return batch
 
-    def on_after_batch_transfer(self, batch, dataloader_idx):
-        aug = self._apply_aug()
 
-        if self.trainer.training:
-            transformed = aug({
-                               "image": batch["image"],
-                               "mask": batch["mask"]})
-            batch.update(transformed)
-
-        return batch
 
     def forward(self, image: Tensor) -> Tensor:
         """Forward pass."""
@@ -136,11 +129,22 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
                     )
                 else:
                     artifact_file = f"{base_path}/idx_{i}.png"
-                trainer.logger.experiment.log_figure(
-                    figure=fig,
-                    artifact_file=artifact_file,
-                    run_id=trainer.logger.run_id,
-                )
+                if hasattr(trainer.logger, "experiment") and hasattr(trainer.logger.experiment, "log_figure"):
+                    # MLflowLogger
+                    trainer.logger.experiment.log_figure(
+                        figure=fig,
+                        artifact_file=artifact_file,
+                        run_id=getattr(trainer.logger, "run_id", None),
+                    )
+                elif isinstance(trainer.logger, TensorBoardLogger):
+                    # TensorBoardLogger
+                    trainer.logger.experiment.add_figure(
+                        tag=artifact_file,
+                        figure=fig,
+                        global_step=trainer.current_epoch if epoch_suffix else 0,
+                    )
+                else:
+                    logger.warning("Logger does not support figure logging.")
         except Exception:
             logger.exception("Error in SegFormer visualization")
         else:
