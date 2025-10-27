@@ -3,12 +3,15 @@
 import logging
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import kornia as krn
+import torch
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import Trainer
+from lightning.pytorch.cli import OptimizerCallable, LRSchedulerCallable
 from lightning.pytorch.loggers import TensorBoardLogger
+from segmentation_models_pytorch.losses import SoftCrossEntropyLoss
 from torch import Tensor
 
 from geo_deep_learning.tasks_with_models.segmentation_segformer import SegmentationSegformer
@@ -24,6 +27,22 @@ logger = logging.getLogger(__name__)
 
 class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
     """Segmentation SegFormer model."""
+
+    def __init__(self, encoder: str, *, image_size: tuple[int, int], in_channels: int, num_classes: int,
+                 max_samples: int, loss: Callable, optimizer: OptimizerCallable = torch.optim.Adam,
+                 scheduler: LRSchedulerCallable = torch.optim.lr_scheduler.ConstantLR,
+                 scheduler_config: dict[str, Any] | None = None, use_dynamic_encoder: bool = False,
+                 freeze_layers: list[str] | None = None, weights: str | None = None,
+                 class_labels: list[str] | None = None, class_colors: list[str] | None = None,
+                 weights_from_checkpoint_path: str | None = None, **kwargs: object) -> None:
+        super().__init__(encoder, image_size=image_size, in_channels=in_channels, num_classes=num_classes,
+                         max_samples=max_samples, loss=loss, optimizer=optimizer, scheduler=scheduler,
+                         scheduler_config=scheduler_config, use_dynamic_encoder=use_dynamic_encoder,
+                         freeze_layers=freeze_layers, weights=weights, class_labels=class_labels,
+                         class_colors=class_colors, weights_from_checkpoint_path=weights_from_checkpoint_path, **kwargs)
+
+        self.ce_loss = SoftCrossEntropyLoss(smooth_factor=0.1, ignore_index=1)
+
 
     def _apply_aug(self) -> AugmentationSequential:
         """Augmentation pipeline."""
@@ -48,7 +67,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
 
         aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
                                                             pad_mode='constant',
-                                                            pad_value=0,
+                                                            pad_value=1,
                                                             keepdim=False), data_keys=None)
         transformed = aug({
             "image": batch["image"],
