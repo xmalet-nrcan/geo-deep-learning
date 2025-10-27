@@ -60,6 +60,14 @@ class Decoder(nn.Module):
         self.linear_c2 = MLP(input_dim=c2_in_channels, embed_dim=embedding_dim)
         self.linear_c1 = MLP(input_dim=c1_in_channels, embed_dim=embedding_dim)
 
+        self.aux_heads = nn.ModuleDict(
+            {
+                "s4": nn.Conv2d(embedding_dim, self.num_classes, 1),
+                "s3": nn.Conv2d(embedding_dim, self.num_classes, 1),
+                "s2": nn.Conv2d(embedding_dim, self.num_classes, 1),
+            },
+        )
+
         self.linear_fuse = nn.Sequential(
             nn.Conv2d(
                 in_channels=embedding_dim * 4,
@@ -124,7 +132,14 @@ class Decoder(nn.Module):
             .reshape(n, -1, c1.shape[2], c1.shape[3])
             .contiguous()
         )
+        aux = None
+        if self.training:
+            aux = {
+                "s4": self.aux_heads["s4"](_c4),
+                "s3": self.aux_heads["s3"](_c3),
+                "s2": self.aux_heads["s2"](_c2),
+            }
         _c = self.linear_fuse(torch.cat([_c4, _c3, _c2, _c1], dim=1))
-
         x = self.dropout(_c)
-        return self.linear_pred(x)
+        out = self.linear_pred(x)
+        return out, aux
