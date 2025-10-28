@@ -109,11 +109,10 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
 
         try:
             logger.info("Logging visualizations")
+            logger.info("Batch size: %d", len(batch["image"]))
             image_batch = batch["image"]
             mask_batch = batch["mask"].squeeze(1).long()
             batch_image_name = batch["image_name"]
-            mean_batch = batch["mean"]
-            std_batch = batch["std"]
             num_samples = min(max_samples, len(image_batch))
             for i in range(num_samples):
                 image = image_batch[i]
