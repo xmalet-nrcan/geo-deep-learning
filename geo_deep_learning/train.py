@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from lightning.fabric.loggers import TensorBoardLogger
+from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.cli import ArgsType, LightningCLI
 from lightning.pytorch.loggers import MLFlowLogger
@@ -48,16 +48,26 @@ class GeoDeepLearningCLI(LightningCLI):
             best_model_path = self.trainer.checkpoint_callback.best_model_path
 
             try:
-                test_logger = TestMLFlowLogger(
-                    experiment_name=safe_name(self.trainer.logger._experiment_name),
-                    run_name=safe_name(str(self.trainer.logger._run_name)),
-                    run_id=safe_name(str(self.trainer.logger.run_id)),
-                    save_dir=self.trainer.logger.save_dir,
-                )
+                if isinstance(self.trainer.logger, MLFlowLogger):
+                    test_logger = TestMLFlowLogger(
+                        experiment_name=safe_name(self.trainer.logger._experiment_name),
+                        run_name=safe_name(str(self.trainer.logger.tags["mlflow.runName"])),
+                        run_id=safe_name(str(self.trainer.logger.version)),
+                        save_dir=self.trainer.logger.save_dir,
+                    )
+                elif isinstance(self.trainer.logger, TensorBoardLogger):
+                    test_logger = TensorBoardLogger(
+                        save_dir=self.trainer.logger.save_dir,
+                        name=self.trainer.logger.name,
+                        version=self.trainer.logger.version,
+                        prefix='test_',
+                    )
+                else:
+                    raise ValueError("Unsupported logger type for testing.")
             except Exception as e:
-                logger.warning(f"Failed to create TestMLFlowLogger: {e}. Using original logger.")
+                logger.warning(f"Failed to create TestMLFlowLogger or TensorBoardLogger: {e}. Using original logger.")
                 test_logger = TensorBoardLogger(
-                    root_dir=self.trainer.logger.save_dir,
+                    save_dir=self.trainer.logger.save_dir,
                     name=self.trainer.logger.name,
                     version=self.trainer.logger.version,
                     prefix='test_',
