@@ -3,6 +3,7 @@
 import logging
 from typing import Any
 
+from lightning.fabric.loggers import TensorBoardLogger
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.cli import ArgsType, LightningCLI
 from lightning.pytorch.loggers import MLFlowLogger
@@ -55,8 +56,12 @@ class GeoDeepLearningCLI(LightningCLI):
                 )
             except Exception as e:
                 logger.warning(f"Failed to create TestMLFlowLogger: {e}. Using original logger.")
-                test_logger = self.trainer.logger
-                test_logger.name = safe_name('test_logger_'+test_logger.name)
+                test_logger = TensorBoardLogger(
+                    root_dir=self.trainer.logger.save_dir,
+                    name=self.trainer.logger.name,
+                    version=self.trainer.logger.version,
+                    prefix='test_',
+                )
 
             test_trainer = Trainer(
                 devices=1,
