@@ -9,6 +9,9 @@ from lightning.pytorch.cli import ArgsType, LightningCLI
 from lightning.pytorch.loggers import MLFlowLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
 from configs import logging_config  # noqa: F401
+import torch
+
+torch.set_float32_matmul_precision('medium' )
 
 def safe_name(name: str) -> str:
     """Replace invalid MLflow characters in artifact or run names."""
