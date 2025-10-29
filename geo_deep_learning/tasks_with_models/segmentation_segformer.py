@@ -301,7 +301,7 @@ class SegmentationSegformer(LightningModule):
             artifact_prefix: str = "val",
             *,
             epoch_suffix: bool = True,
-    ) -> None:
+    ) -> int:
         """
         SegFormer-specific log visualizations.
 
@@ -357,5 +357,6 @@ class SegmentationSegformer(LightningModule):
                 )
         except Exception:
             logger.exception("Error in SegFormer visualization")
+            return 0
         else:
             return num_samples

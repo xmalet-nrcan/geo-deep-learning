@@ -67,7 +67,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
 
         aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
                                                             pad_mode='constant',
-                                                            pad_value=1,
+                                                            pad_value=-1,
                                                             keepdim=False), data_keys=None)
         transformed = aug({
             "image": batch["image"],
@@ -88,7 +88,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
             artifact_prefix: str = "val",
             *,
             epoch_suffix: bool = True,
-    ) -> None:
+    ) -> int:
         """
         SegFormer-specific log visualizations.
 
@@ -154,5 +154,6 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
                     logger.warning("Logger does not support figure logging.")
         except Exception:
             logger.exception("Error in SegFormer visualization")
+            return 0
         else:
             return num_samples
