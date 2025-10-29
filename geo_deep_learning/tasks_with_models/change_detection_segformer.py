@@ -67,7 +67,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
 
         aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
                                                             pad_mode='constant',
-                                                            pad_value=-1,
+                                                            pad_value=0,
                                                             keepdim=False), data_keys=None)
         transformed = aug({
             "image": batch["image"],
