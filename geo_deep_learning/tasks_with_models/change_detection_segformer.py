@@ -41,7 +41,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
                          freeze_layers=freeze_layers, weights=weights, class_labels=class_labels,
                          class_colors=class_colors, weights_from_checkpoint_path=weights_from_checkpoint_path, **kwargs)
 
-        self.ce_loss = SoftCrossEntropyLoss(smooth_factor=0.1, ignore_index=1)
+        self.ce_loss = SoftCrossEntropyLoss(smooth_factor=0.1, ignore_index=-1)
 
 
     def _apply_aug(self) -> AugmentationSequential:
@@ -67,7 +67,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
 
         aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
                                                             pad_mode='constant',
-                                                            pad_value=0,
+                                                            pad_value=-1,
                                                             keepdim=False), data_keys=None)
         transformed = aug({
             "image": batch["image"],

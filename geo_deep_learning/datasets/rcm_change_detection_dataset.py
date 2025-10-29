@@ -278,10 +278,10 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         mask, mask_name = self._load_mask(index)
 
         # Apply common mask to all and set NO_DATA where mask is False
-        image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre, 0)
-        image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, 0)
+        image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre, -1)
+        image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, -1)
 
-        mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, 0)
+        mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, -1)
 
 
 
