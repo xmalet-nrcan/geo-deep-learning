@@ -278,10 +278,10 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         mask, mask_name = self._load_mask(index)
 
         # Apply common mask to all and set NO_DATA where mask is False
-        image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre, 1)
-        image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, 1)
+        image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre, -1)
+        image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, -1)
 
-        mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, 0)
+        mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, -1)
 
 
 
@@ -346,8 +346,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
 
         # Gestion finale des NaN ou valeurs extrêmes
-        image_pre = torch.nan_to_num(image_pre, nan=1, posinf=0, neginf=0)
-        image_post = torch.nan_to_num(image_post, nan=1, posinf=0, neginf=0)
+        image_pre = torch.nan_to_num(image_pre, nan=-1, posinf=-1, neginf=-1)
+        image_post = torch.nan_to_num(image_post, nan=-1, posinf=-1, neginf=-1)
 
         return image_post, image_pre, mean, std, min_vals, max_vals
 
