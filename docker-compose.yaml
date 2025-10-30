@@ -18,7 +18,6 @@ services:
     entrypoint: ["python",  "geo_deep_learning/train.py","fit", "--config", "configs/model_conf.yaml"]
     deploy:
       resources:
-
         reservations:
           devices:
           - driver: nvidia
