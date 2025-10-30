@@ -100,7 +100,7 @@ data:
     patch_size:
     - 256
     - 256
-
+    split_on_columns: cell_id
     csv_root_folder: /mnt/data_disk/projet_RCM_scanfire
     patches_root_folder: /mnt/data_disk/projet_RCM_scanfire
     csv_file_name: pre_post_datasets_all.csv
