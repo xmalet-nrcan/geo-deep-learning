@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.utils.data as data
 from lightning.pytorch import LightningDataModule
+from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Subset
 
 from geo_deep_learning.datasets.rcm_change_detection_dataset import SatellitePass, RCMChangeDetectionDataset
@@ -64,7 +65,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self.satellite_pass = satellite_pass
         self.beams = beams
         self.split_ratios = split_ratios
-        self.dataset = None
+        self.dataset: RCMChangeDetectionDataset = None
         if split_on_columns is None:
             self._split_on_columns = None
         elif isinstance(split_on_columns, str):
@@ -88,8 +89,10 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self._set_train_test_val_datasets()
 
     def _split_by_column(self, column_name, split_ratios=(0.7, 0.15, 0.15), seed=42):
+        """Split dataset by unique values in a specified column."""
+
         # Récupère la valeur de la colonne pour chaque sample
-        values = [sample[column_name] for sample in self.dataset]
+        values = [sample[column_name] for sample in self.dataset.files]
         unique_values = list(set(values))
         rng = np.random.default_rng(seed)
         rng.shuffle(unique_values)
