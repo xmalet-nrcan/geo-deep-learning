@@ -177,18 +177,17 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
         loss = super().training_step(batch, batch_idx)
 
         x, y = batch["image"], batch["mask"].squeeze(1).long()
-        with torch.no_grad():
-            outputs = self(x)
-            if self.num_classes == 1:
-                preds = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
-            else:
-                preds = outputs.out.softmax(dim=1).argmax(dim=1)
+        outputs = self(x).detach()  # détaché proprement sans no_grad()
+        if self.num_classes == 1:
+            preds = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
+        else:
+            preds = outputs.out.softmax(dim=1).argmax(dim=1)
 
-            self.train_iou(preds, y)
-            self.train_f1(preds, y)
+        self.train_iou(preds, y)
+        self.train_f1(preds, y)
 
-            self.log("train_iou", self.train_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-            self.log("train_f1", self.train_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train_iou", self.train_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train_f1", self.train_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
         return loss
 
