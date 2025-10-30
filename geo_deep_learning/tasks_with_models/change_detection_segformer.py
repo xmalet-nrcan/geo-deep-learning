@@ -11,8 +11,10 @@ from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import Trainer
 from lightning.pytorch.cli import OptimizerCallable, LRSchedulerCallable
 from lightning.pytorch.loggers import TensorBoardLogger
-from segmentation_models_pytorch.losses import SoftCrossEntropyLoss, JaccardLoss
+from segmentation_models_pytorch.losses import JaccardLoss
 from torch import Tensor
+from torchmetrics import JaccardIndex, F1Score
+from torchmetrics.classification import BinaryJaccardIndex
 
 from geo_deep_learning.tasks_with_models.segmentation_segformer import SegmentationSegformer
 from geo_deep_learning.tools.visualization import visualize_prediction
@@ -41,8 +43,22 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
                          freeze_layers=freeze_layers, weights=weights, class_labels=class_labels,
                          class_colors=class_colors, weights_from_checkpoint_path=weights_from_checkpoint_path, **kwargs)
 
-        self.ce_loss = JaccardLoss(mode ='binary', smooth= 1e-6, eps=1e-7)
+        self.ce_loss = JaccardLoss(mode='binary', smooth=1e-6, eps=1e-7)
 
+        num_classes = self.num_classes if self.num_classes > 1 else 2
+        task_type = "multiclass" if num_classes > 2 else "binary"
+        if num_classes == 2:
+            self.train_iou = BinaryJaccardIndex(threshold=0.3)
+            self.val_iou = BinaryJaccardIndex(threshold=0.3)
+            self.test_iou = BinaryJaccardIndex(threshold=0.3)
+        else:
+            self.train_iou = JaccardIndex(task=task_type, num_classes=num_classes)
+            self.val_iou = JaccardIndex(task=task_type, num_classes=num_classes)
+            self.test_iou = JaccardIndex(task=task_type, num_classes=num_classes)
+
+        self.train_f1 = F1Score(task=task_type, num_classes=num_classes)
+        self.val_f1 = F1Score(task=task_type, num_classes=num_classes)
+        self.test_f1 = F1Score(task=task_type, num_classes=num_classes)
 
     def _apply_aug(self) -> AugmentationSequential:
         """Augmentation pipeline."""
@@ -65,7 +81,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
     ) -> dict[str, Any]:
 
         aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
-                                                            pad_mode='constant',pad_value=0,
+                                                            pad_mode='constant', pad_value=0,
                                                             keepdim=False), data_keys=None)
         transformed = aug({
             "image": batch["image"],
@@ -155,3 +171,48 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
             return 0
         else:
             return num_samples
+
+    # --- TRAINING ---
+    def training_step(self, batch, batch_idx):
+        loss = super().training_step(batch, batch_idx)
+
+        x, y = batch["image"], batch["mask"].squeeze(1).long()
+        with torch.no_grad():
+            outputs = self(x)
+            preds = (outputs.sigmoid() > 0.5).long() if self.num_classes == 1 else outputs.softmax(dim=1).argmax(
+                dim=1)
+
+            self.train_iou(preds, y)
+            self.train_f1(preds, y)
+
+            self.log("train_iou", self.train_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.log("train_f1", self.train_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+
+        return loss
+
+    # --- VALIDATION ---
+    def validation_step(self, batch, batch_idx):
+        y_hat = super().validation_step(batch, batch_idx)
+        y = batch["mask"].squeeze(1).long()
+
+        self.val_iou(y_hat, y)
+        self.val_f1(y_hat, y)
+
+        self.log("val_iou", self.val_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("val_f1", self.val_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+
+        return y_hat
+
+    # --- TEST ---
+    def test_step(self, batch, batch_idx):
+        super().test_step(batch, batch_idx)
+        x, y = batch["image"], batch["mask"].squeeze(1).long()
+        outputs = self(x)
+
+        preds = (outputs.sigmoid() > 0.5).long() if self.num_classes == 1 else outputs.softmax(dim=1).argmax(dim=1)
+
+        self.test_iou(preds, y)
+        self.test_f1(preds, y)
+
+        self.log("test_iou", self.test_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("test_f1", self.test_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
