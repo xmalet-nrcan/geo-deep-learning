@@ -179,8 +179,10 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
         x, y = batch["image"], batch["mask"].squeeze(1).long()
         with torch.no_grad():
             outputs = self(x)
-            preds = (outputs.sigmoid() > 0.5).long() if self.num_classes == 1 else outputs.softmax(dim=1).argmax(
-                dim=1)
+            if self.num_classes == 1:
+                preds = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
+            else:
+                preds = outputs.out.softmax(dim=1).argmax(dim=1)
 
             self.train_iou(preds, y)
             self.train_f1(preds, y)
@@ -209,8 +211,10 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
         x, y = batch["image"], batch["mask"].squeeze(1).long()
         outputs = self(x)
 
-        preds = (outputs.sigmoid() > 0.5).long() if self.num_classes == 1 else outputs.softmax(dim=1).argmax(dim=1)
-
+        if self.num_classes == 1:
+            preds = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
+        else:
+            preds = outputs.out.softmax(dim=1).argmax(dim=1)
         self.test_iou(preds, y)
         self.test_f1(preds, y)
 
