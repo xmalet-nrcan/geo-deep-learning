@@ -2,27 +2,23 @@ services:
   geo-deep-learning:
     build:
       dockerfile: Dockerfile
-#    env_file:
-#      - .env
-#    tty: true
-#    stdin_open: true
     environment:
       - PYTORCH_ALLOC_CONF=expandable_segments:True
     user: '9005'
     shm_size: '32gb'
     container_name: geo-deep-learning
     volumes:
+      # MOUNT THE DATASET REPO
       - "/mnt/data_disk/projet_RCM_scanfire:/mnt/data_disk/projet_RCM_scanfire:rw"
-#      - "/home/xmalet/projects/geo-deep-learning/data:/app/data:rw"
+      # MOUNT THE CONFIG
       - "/home/xmalet/projects/geo-deep-learning/configs/seg_former_rcm_change_detection.yaml:/app/configs/model_conf.yaml"
+      # MOUNT THE MODEL CHECKPOINTS AND LOGS
       - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/model_checkpoints:rw"
       - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
     entrypoint: ["python",  "geo_deep_learning/train.py","fit", "--config", "configs/model_conf.yaml"]
     deploy:
       resources:
-#        limits:
-#          cpus: 0.5
-#          memory: 50gb
+
         reservations:
           devices:
           - driver: nvidia
