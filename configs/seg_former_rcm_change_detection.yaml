@@ -41,6 +41,15 @@ trainer:
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 10
+
+    - class_path: lightning.pytorch.callbacks.GradientAccumulationScheduler
+      init_args:
+        scheduling:
+          0: 16    # 16*8 = 128 effective batch size at start
+          20: 8    # to epoch 20, accumule 8 batchs 16*8 = 128 effective batch size
+          40: 4    # to epoch 40, accumule 4 batchs 16*4 = 64 effective batch size
+          50: 2    # to epoch 50, accumule 2 batchs 16*2 = 32 effective batch size
+          60: 1    # then normal training with 16 batch size
   max_epochs: 200
 
 model:
