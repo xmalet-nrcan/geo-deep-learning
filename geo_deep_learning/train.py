@@ -49,6 +49,7 @@ class GeoDeepLearningCLI(LightningCLI):
                 logger.warning("No test dataloader found.")
                 return
             best_model_path = self.trainer.checkpoint_callback.best_model_path
+            logger.info("Testing best model from path: %s", best_model_path)
 
             try:
                 if isinstance(self.trainer.logger, MLFlowLogger):

@@ -56,8 +56,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
                 align_corners=True,
                 keepdim=True,
             ),
-            data_keys=None,
-            random_apply=1, )
+            data_keys=None, )
 
     def on_before_batch_transfer(
             self,
