@@ -55,32 +55,30 @@ trainer:
 model:
   class_path: tasks_with_models.change_detection_segformer.ChangeDetectionSegmentationSegformer
   init_args:
-#    change_detection_model: "changeformer"
     image_size: [256,256]
     encoder: "mit_b3"
     use_dynamic_encoder: true
-    in_channels: 15 #(5+1)x2+3 # Should be : len(band_names [+1 if BITMASK not included in band_names ] )X2 + 3
+    in_channels: 15 #(5+1)x2+3 # Should be : len(band_names [+1 if BITMASK not included in band_names ] )X2 + 3 (COMMON AREA MASK; SAT_PASS; BEAM)
     weights: #imagenet
     max_samples: 10
     num_classes: 1  # binary change detection
     loss:
-      # class_path: loss.dice_bce_loss.DiceBCELoss
       class_path: segmentation_models_pytorch.losses.DiceLoss
       init_args:
         mode: "binary"
-        #alpha: 0.5
-        #smooth: 1e-6
-        #eps: 1e-7
+        smooth: 1e-6
     optimizer:
-      class_path: torch.optim.Adam
+      class_path: torch.optim.AdamW
       init_args:
-        lr: 6e-5
+        lr: 1e-4
+        weight_decay: 0.01
     scheduler:
       class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
       init_args:
         mode: "min"
-        factor: 0.1
-        patience: 10
+        threshold: 1e-4
+        factor: 0.5
+        patience: 15
         cooldown: 1
         min_lr: 6e-8
     scheduler_config:
@@ -131,8 +129,8 @@ data:
     #    SP2
     #    SP3
 
-    beams:
+    beams: # AVAILABLE: ['A','B','C','D']
     - 'A'
     #- 'B'
-    #- 'C'  # AVAILABLE: ['A','B','C','D']
-    satellite_pass:  # 'Descending'  # AVAILABLE: ['Ascending','Descending']
+    #- 'C'
+    satellite_pass:   # AVAILABLE: ['Ascending','Descending']
