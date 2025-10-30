@@ -16,7 +16,7 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: ./lightning_logs
-      name: segformer_rcm_change_detection_A_Asc_Desc_mit_b3_jac_loss
+      name: segformer_rcm_change_detection_dyn_A_Asc_Desc_mit_b3_1
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -36,12 +36,12 @@ trainer:
         dirpath: "./model_checkpoints"
         monitor: "val_loss"
         mode: "min"
-        save_top_k: 10
-        filename: "change_detection_segformer_mit_b3-A-ASC_DESC_jac_loss-{epoch:02d}-{val_loss:.3f}"
+        save_top_k: 5
+        filename: "change_detection_segformer_dyn_mit_b3-A-ASC_DESC-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
-        max_samples: 10
-  max_epochs: 200
+        max_samples: 3
+  max_epochs: 100
 
 model:
   class_path: tasks_with_models.change_detection_segformer.ChangeDetectionSegmentationSegformer
@@ -51,7 +51,7 @@ model:
     encoder: "mit_b3"
     use_dynamic_encoder: true
     in_channels: 15 #(5+1)x2+3 # Should be : len(band_names [+1 if BITMASK not included in band_names ] )X2 + 3
-    weights: #imagenet
+    weights: imagenet
     max_samples: 10
     num_classes: 1  # binary change detection
     loss:
@@ -80,7 +80,7 @@ model:
       monitor: "val_loss"
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    weights_from_checkpoint_path: # /app/model_checkpoints/change_detection_segformer_mit_b3-A-ASC_DESC-epoch=99-val_loss=0.011.ckpt
+    weights_from_checkpoint_path: /app/model_checkpoints/change_detection_segformer_mit_b3-A-DESC-epoch=99-val_loss=0.015.ckpt
 
 
 
@@ -88,7 +88,7 @@ data:
   class_path: datamodules.rcm_change_detection_one_output_datamodule.RcmChangeDetectionOneOutputDataModule
   init_args:
     batch_size: 16
-    num_workers: 10
+    num_workers: 20
     data_type_max: 1
     patch_size:
     - 256

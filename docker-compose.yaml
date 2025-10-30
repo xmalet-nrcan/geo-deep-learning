@@ -6,8 +6,8 @@ services:
 #      - .env
 #    tty: true
 #    stdin_open: true
-#    environment:
-#      - PYTORCH_ALLOC_CONF=expandable_segments:True
+    environment:
+      - PYTORCH_ALLOC_CONF=expandable_segments:True
     user: '9005'
     shm_size: '32gb'
     container_name: geo-deep-learning

@@ -11,7 +11,7 @@ from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import Trainer
 from lightning.pytorch.cli import OptimizerCallable, LRSchedulerCallable
 from lightning.pytorch.loggers import TensorBoardLogger
-from segmentation_models_pytorch.losses import SoftCrossEntropyLoss
+from segmentation_models_pytorch.losses import SoftCrossEntropyLoss, JaccardLoss
 from torch import Tensor
 
 from geo_deep_learning.tasks_with_models.segmentation_segformer import SegmentationSegformer
@@ -41,7 +41,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
                          freeze_layers=freeze_layers, weights=weights, class_labels=class_labels,
                          class_colors=class_colors, weights_from_checkpoint_path=weights_from_checkpoint_path, **kwargs)
 
-        self.ce_loss = SoftCrossEntropyLoss(smooth_factor=0.1, ignore_index=-1)
+        self.ce_loss = JaccardLoss(mode ='binary', smooth= 1e-6, eps=1e-7)
 
 
     def _apply_aug(self) -> AugmentationSequential:
@@ -66,8 +66,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
     ) -> dict[str, Any]:
 
         aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
-                                                            pad_mode='constant',
-                                                            pad_value=-1,
+                                                            pad_mode='constant',pad_value=0,
                                                             keepdim=False), data_keys=None)
         transformed = aug({
             "image": batch["image"],
