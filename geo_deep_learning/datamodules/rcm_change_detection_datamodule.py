@@ -89,25 +89,58 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self._set_train_test_val_datasets()
 
     def _split_by_column(self, column_name, split_ratios=(0.7, 0.15, 0.15), seed=42):
-        """Split dataset by unique values in a specified column."""
+        """
+        Split dataset by unique values in a specified column, while trying to respect sample count ratios.
 
-        # Récupère la valeur de la colonne pour chaque sample
-        values = [sample[column_name] for sample in self.dataset.files]
-        unique_values = list(set(values))
+        This method ensures that all samples belonging to a unique value in `column_name`
+        are assigned to the same subset (train, val, or test). It uses a greedy approach
+        to distribute these unique values among the subsets in a way that the total number
+        of samples in each subset is as close as possible to the desired `split_ratios`.
+        The process is randomized but reproducible using the provided seed.
+        """
+        # 1. Count samples per unique value in the specified column
+        value_counts = {}
+        for sample in self.dataset.files:
+            value = sample[column_name]
+            value_counts[value] = value_counts.get(value, 0) + 1
+
+        # 2. Get unique values and shuffle them for random assignment
+        unique_values = list(value_counts.keys())
         rng = np.random.default_rng(seed)
         rng.shuffle(unique_values)
 
-        n = len(unique_values)
-        n_train = int(split_ratios[0] * n)
-        n_val = int(split_ratios[1] * n)
+        # 3. Initialize subsets and their target sample counts
+        total_samples = len(self.dataset.files)
+        train_target = total_samples * split_ratios[0]
+        val_target = total_samples * split_ratios[1]
 
-        train_values = set(unique_values[:n_train])
-        val_values = set(unique_values[n_train:n_train + n_val])
-        test_values = set(unique_values[n_train + n_val:])
+        train_values, val_values, test_values = set(), set(), set()
+        train_count, val_count, test_count = 0, 0, 0
 
-        train_indices = [i for i, v in enumerate(values) if v in train_values]
-        val_indices = [i for i, v in enumerate(values) if v in val_values]
-        test_indices = [i for i, v in enumerate(values) if v in test_values]
+        # 4. Greedily assign each unique value group to a subset
+        for value in unique_values:
+            count = value_counts[value]
+            # Assign to the subset that is most 'under-filled' relative to its target
+            if train_count < train_target:
+                train_values.add(value)
+                train_count += count
+            elif val_count < val_target:
+                val_values.add(value)
+                val_count += count
+            else:
+                test_values.add(value)
+                test_count += count
+
+        # 5. Create index lists for each subset
+        train_indices, val_indices, test_indices = [], [], []
+        for i, sample in enumerate(self.dataset.files):
+            value = sample[column_name]
+            if value in train_values:
+                train_indices.append(i)
+            elif value in val_values:
+                val_indices.append(i)
+            else:
+                test_indices.append(i)
 
         return Subset(self.dataset, train_indices), Subset(self.dataset, val_indices), Subset(self.dataset,
                                                                                               test_indices)
