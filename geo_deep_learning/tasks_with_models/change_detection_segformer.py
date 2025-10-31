@@ -1,5 +1,4 @@
 """Segmentation SegFormer model."""
-
 import logging
 import warnings
 from pathlib import Path
@@ -200,7 +199,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
         # --- Main loss ---
         try:
             main_loss = self.loss(logits, y_long) + self.ce_loss(logits, y_long)
-        except TypeError:
+        except ValueError:
             # Si self.ce_loss attend un float (comme JaccardLoss)
             main_loss = self.loss(logits, y_long) + self.ce_loss(logits, y_float)
 
@@ -216,7 +215,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
                     aux_loss += weight * (
                             self.loss(logits_aux, y_long) + self.ce_loss(logits_aux, y_long)
                     )
-                except TypeError:
+                except ValueError:
                     aux_loss += weight * (
                             self.loss(logits_aux, y_long) + self.ce_loss(logits_aux, y_float)
                     )
@@ -237,7 +236,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
         # --- Calcul des métriques différé (pour éviter de casser autograd) ---
         with torch.no_grad():
             if self.num_classes == 1:
-                preds = (logits.sigmoid() > self.threshold).long()
+                preds = (logits.sigmoid() > self.threshold).long().squeeze(1)
             else:
                 preds = logits.softmax(dim=1).argmax(dim=1)
 
