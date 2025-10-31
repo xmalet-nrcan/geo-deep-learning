@@ -11,11 +11,11 @@ from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import Trainer
 from lightning.pytorch.cli import OptimizerCallable, LRSchedulerCallable
 from lightning.pytorch.loggers import TensorBoardLogger
-from segmentation_models_pytorch.losses import JaccardLoss
+#from segmentation_models_pytorch.losses import JaccardLoss
 from torch import Tensor
 from torchmetrics import JaccardIndex, F1Score
 from torchmetrics.classification import BinaryJaccardIndex
-
+from torch.nn import BCEWithLogitsLoss
 from geo_deep_learning.tasks_with_models.segmentation_segformer import SegmentationSegformer
 from geo_deep_learning.tools.visualization import visualize_prediction
 
@@ -43,8 +43,8 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
                          freeze_layers=freeze_layers, weights=weights, class_labels=class_labels,
                          class_colors=class_colors, weights_from_checkpoint_path=weights_from_checkpoint_path, **kwargs)
 
-        self.ce_loss = JaccardLoss(mode='binary', smooth=1e-6, eps=1e-7)
-
+        #self.ce_loss = JaccardLoss(mode='binary', smooth=1e-6, eps=1e-7)
+        self.ce_loss = BCEWithLogitsLoss()
         num_classes = self.num_classes if self.num_classes > 1 else 2
         task_type = "multiclass" if num_classes > 2 else "binary"
         if num_classes == 2:
@@ -173,23 +173,7 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
             return num_samples
 
     # --- TRAINING ---
-    def training_step(self, batch, batch_idx):
-        loss = super().training_step(batch, batch_idx)
-
-        x, y = batch["image"], batch["mask"].squeeze(1).long()
-        outputs = self(x).detach()  # détaché proprement sans no_grad()
-        if self.num_classes == 1:
-            preds = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
-        else:
-            preds = outputs.out.softmax(dim=1).argmax(dim=1)
-
-        self.train_iou(preds, y)
-        self.train_f1(preds, y)
-
-        self.log("train_iou", self.train_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("train_f1", self.train_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-
-        return loss
+    
 
     # --- VALIDATION ---
     def validation_step(self, batch, batch_idx):

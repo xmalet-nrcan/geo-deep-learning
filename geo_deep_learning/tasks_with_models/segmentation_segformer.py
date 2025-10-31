@@ -193,15 +193,24 @@ class SegmentationSegformer(LightningModule):
         batch_size = x.shape[0]
         y = y.squeeze(1).long()
         outputs = self(x)
-        main_loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
+        try:
+            main_loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
+        except:
+            y_ce = y.unsqueeze(1).float()
+            main_loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y_ce)
+
         aux_loss = torch.zeros((), device=y.device, dtype=main_loss.dtype)
         aux = outputs.aux or {}
         for key, weight in self.aux_weight.items():
             if weight and key in aux:
                 logits = aux[key]
-                aux_loss = aux_loss + weight * (
+                try:
+                    aux_loss = aux_loss + weight * (
                         self.loss(logits, y) + self.ce_loss(logits, y)
                 )
+                except:
+                    aux_loss = aux_loss + weight * (
+                        self.loss(logits, y) + self.ce_loss(logits, y_ce) )
         loss = main_loss + aux_loss
 
         self.log(
@@ -229,7 +238,12 @@ class SegmentationSegformer(LightningModule):
         batch_size = x.shape[0]
         y = y.squeeze(1).long()
         outputs = self(x)
-        loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
+        try:
+            loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
+        except:
+            y_ce = y.unsqueeze(1).float()
+            loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y_ce)
+    
         self.log(
             "val_loss",
             loss,
@@ -259,8 +273,11 @@ class SegmentationSegformer(LightningModule):
         batch_size = x.shape[0]
         y = y.squeeze(1).long()
         outputs = self(x)
-        loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
-
+        try:
+            loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
+        except:
+            y_ce = y.unsqueeze(1).float()
+            loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y_ce)
         if self.num_classes == 1:
             y_hat = (outputs.out.sigmoid().squeeze(1) > self.threshold).long()
         else:
