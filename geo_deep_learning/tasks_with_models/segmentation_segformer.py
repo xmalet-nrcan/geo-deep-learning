@@ -193,24 +193,16 @@ class SegmentationSegformer(LightningModule):
         batch_size = x.shape[0]
         y = y.squeeze(1).long()
         outputs = self(x)
-        try:
-            main_loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
-        except:
-            y_ce = y.unsqueeze(1).float()
-            main_loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y_ce)
+        main_loss = self.loss(outputs.out, y) + self.ce_loss(outputs.out, y)
 
         aux_loss = torch.zeros((), device=y.device, dtype=main_loss.dtype)
         aux = outputs.aux or {}
         for key, weight in self.aux_weight.items():
             if weight and key in aux:
                 logits = aux[key]
-                try:
-                    aux_loss = aux_loss + weight * (
+                aux_loss = aux_loss + weight * (
                         self.loss(logits, y) + self.ce_loss(logits, y)
                 )
-                except:
-                    aux_loss = aux_loss + weight * (
-                        self.loss(logits, y) + self.ce_loss(logits, y_ce) )
         loss = main_loss + aux_loss
 
         self.log(

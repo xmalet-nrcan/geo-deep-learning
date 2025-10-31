@@ -11,11 +11,12 @@ from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import Trainer
 from lightning.pytorch.cli import OptimizerCallable, LRSchedulerCallable
 from lightning.pytorch.loggers import TensorBoardLogger
-#from segmentation_models_pytorch.losses import JaccardLoss
+# from segmentation_models_pytorch.losses import JaccardLoss
 from torch import Tensor
+from torch.nn import BCEWithLogitsLoss
 from torchmetrics import JaccardIndex, F1Score
 from torchmetrics.classification import BinaryJaccardIndex
-from torch.nn import BCEWithLogitsLoss
+
 from geo_deep_learning.tasks_with_models.segmentation_segformer import SegmentationSegformer
 from geo_deep_learning.tools.visualization import visualize_prediction
 
@@ -30,20 +31,29 @@ logger = logging.getLogger(__name__)
 class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
     """Segmentation SegFormer model."""
 
-    def __init__(self, encoder: str, *, image_size: tuple[int, int], in_channels: int, num_classes: int,
-                 max_samples: int, loss: Callable, optimizer: OptimizerCallable = torch.optim.Adam,
+    def __init__(self, encoder: str, *,
+                 image_size: tuple[int, int],
+                 in_channels: int,
+                 num_classes: int,
+                 max_samples: int,
+                 loss: Callable,
+                 optimizer: OptimizerCallable = torch.optim.Adam,
                  scheduler: LRSchedulerCallable = torch.optim.lr_scheduler.ConstantLR,
-                 scheduler_config: dict[str, Any] | None = None, use_dynamic_encoder: bool = False,
-                 freeze_layers: list[str] | None = None, weights: str | None = None,
-                 class_labels: list[str] | None = None, class_colors: list[str] | None = None,
-                 weights_from_checkpoint_path: str | None = None, **kwargs: object) -> None:
+                 scheduler_config: dict[str, Any] | None = None,
+                 use_dynamic_encoder: bool = False,
+                 freeze_layers: list[str] | None = None,
+                 weights: str | None = None,
+                 class_labels: list[str] | None = None,
+                 class_colors: list[str] | None = None,
+                 weights_from_checkpoint_path: str | None = None,
+                 **kwargs: object) -> None:
         super().__init__(encoder, image_size=image_size, in_channels=in_channels, num_classes=num_classes,
                          max_samples=max_samples, loss=loss, optimizer=optimizer, scheduler=scheduler,
                          scheduler_config=scheduler_config, use_dynamic_encoder=use_dynamic_encoder,
                          freeze_layers=freeze_layers, weights=weights, class_labels=class_labels,
                          class_colors=class_colors, weights_from_checkpoint_path=weights_from_checkpoint_path, **kwargs)
 
-        #self.ce_loss = JaccardLoss(mode='binary', smooth=1e-6, eps=1e-7)
+        # self.ce_loss = JaccardLoss(mode='binary', smooth=1e-6, eps=1e-7)
         self.ce_loss = BCEWithLogitsLoss()
         num_classes = self.num_classes if self.num_classes > 1 else 2
         task_type = "multiclass" if num_classes > 2 else "binary"
@@ -173,7 +183,93 @@ class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
             return num_samples
 
     # --- TRAINING ---
-    
+    def training_step(self, batch: dict[str, Any], batch_idx: int) -> Tensor:
+        """Run one training step on a batch."""
+        x = batch["image"]
+        y = batch["mask"].squeeze(1)  # (B, H, W)
+        batch_size = x.size(0)
+
+        # Get the targets in the right format
+        y_long = y.long()
+        y_float = y.unsqueeze(1).float()
+
+        # Forward
+        outputs = self(x)
+        logits = outputs.out
+
+        # --- Main loss ---
+        try:
+            main_loss = self.loss(logits, y_long) + self.ce_loss(logits, y_long)
+        except TypeError:
+            # Si self.ce_loss attend un float (comme JaccardLoss)
+            main_loss = self.loss(logits, y_long) + self.ce_loss(logits, y_float)
+
+        # --- Auxiliary losses (si disponibles) ---
+        aux_loss = torch.zeros((), device=y.device, dtype=main_loss.dtype)
+        if hasattr(outputs, "aux") and outputs.aux:
+            for key, weight in getattr(self, "aux_weight", {}).items():
+                if not weight or key not in outputs.aux:
+                    continue
+
+                logits_aux = outputs.aux[key]
+                try:
+                    aux_loss += weight * (
+                            self.loss(logits_aux, y_long) + self.ce_loss(logits_aux, y_long)
+                    )
+                except TypeError:
+                    aux_loss += weight * (
+                            self.loss(logits_aux, y_long) + self.ce_loss(logits_aux, y_float)
+                    )
+
+        total_loss = main_loss + aux_loss
+
+        # --- Logging ---
+        self.log(
+            "train_loss",
+            total_loss,
+            batch_size=batch_size,
+            prog_bar=True,
+            logger=True,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
+        # --- Calcul des métriques différé (pour éviter de casser autograd) ---
+        with torch.no_grad():
+            if self.num_classes == 1:
+                preds = (logits.sigmoid() > self.threshold).long()
+            else:
+                preds = logits.softmax(dim=1).argmax(dim=1)
+
+            # On accumule les prédictions pour calculer les métriques à la fin
+            self.train_iou.update(preds, y_long)
+
+            self.train_f1.update(preds, y_long)
+            self.log(
+                "train_iou_step",
+                self.train_iou(preds, y_long),
+                prog_bar=False,
+                on_step=True,
+                on_epoch=False,
+                sync_dist=False,
+            )
+
+        return total_loss
+
+    def on_train_epoch_end(self) -> None:
+        """Aggregate and log metrics at the end of each training epoch."""
+        try:
+            train_iou = self.train_iou.compute()
+            train_f1 = self.train_f1.compute()
+
+            self.log("train_iou", train_iou, prog_bar=True, sync_dist=True)
+            self.log("train_f1", train_f1, prog_bar=True, sync_dist=True)
+        finally:
+            # Important : reset pour la prochaine époque
+            self.train_iou.reset()
+            self.train_f1.reset()
+
+
 
     # --- VALIDATION ---
     def validation_step(self, batch, batch_idx):
