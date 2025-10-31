@@ -87,7 +87,7 @@ model:
       monitor: "val_loss"
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    weights_from_checkpoint_path: /app/model_checkpoints/change_detection_segformer_mit_b3-A-ASC_DESC_jac_loss-epoch=62-val_loss=0.644.ckpt
+    weights_from_checkpoint_path: #/app/model_checkpoints/change_detection_segformer_mit_b3-A-ASC_DESC_jac_loss-epoch=62-val_loss=0.644.ckpt
 
 
 
