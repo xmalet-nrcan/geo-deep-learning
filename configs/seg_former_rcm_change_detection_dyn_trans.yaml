@@ -3,12 +3,12 @@ seed_everything: true
 trainer:
   accelerator: "gpu"
   devices: -1
-  strategy:
-    class_path: lightning.pytorch.strategies.DDPStrategy
-    init_args:
-      find_unused_parameters: false
-      gradient_as_bucket_view: true
-      static_graph: true
+  strategy: auto
+#    class_path: lightning.pytorch.strategies.DDPStrategy
+#    init_args:
+#      find_unused_parameters: false
+#      gradient_as_bucket_view: true
+#      static_graph: true
   gradient_clip_val: 1.0
   precision: "16-mixed"
   sync_batchnorm: true
@@ -16,7 +16,7 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: ./lightning_logs
-      name: segformer_rcm_change_detection_dyn_A_Asc_Desc_mit_b3_1
+      name: segformer_rcm_change_detection_A_mit_b3_dice-bce
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -30,57 +30,74 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         verbose: True
-        patience: 20
+        patience: 30
+        min_delta: 1e-3
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         dirpath: "./model_checkpoints"
         monitor: "val_loss"
         mode: "min"
-        save_top_k: 5
-        filename: "change_detection_segformer_dyn_mit_b3-A-ASC_DESC-{epoch:02d}-{val_loss:.3f}"
+        save_top_k: 10
+        filename: "change_detection_segformer_mit_b3-A_dice_bce-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
-        max_samples: 3
-  max_epochs: 100
+        max_samples: 10
+
+    - class_path: lightning.pytorch.callbacks.GradientAccumulationScheduler
+      init_args:
+        scheduling:
+          0: 16    # 16*8 = 128 effective batch size at start
+          30: 8    # to epoch 20, accumule 8 batchs 16*8 = 128 effective batch size
+          60: 4    # to epoch 40, accumule 4 batchs 16*4 = 64 effective batch size
+          80: 2    # to epoch 50, accumule 2 batchs 16*2 = 32 effective batch size
+          100: 1    # then normal training with 16 batch size
+  max_epochs: 250
 
 model:
   class_path: tasks_with_models.change_detection_segformer.ChangeDetectionSegmentationSegformer
   init_args:
-#    change_detection_model: "changeformer"
     image_size: [256,256]
     encoder: "mit_b3"
     use_dynamic_encoder: true
-    in_channels: 15 #(5+1)x2+3 # Should be : len(band_names [+1 if BITMASK not included in band_names ] )X2 + 3
-    weights: imagenet
+    in_channels: 15 #(5+1)x2+3 # Should be : len(band_names [+1 if BITMASK not included in band_names ] )X2 + 3 (COMMON AREA MASK; SAT_PASS; BEAM)
+    weights: null #imagenet
     max_samples: 10
     num_classes: 1  # binary change detection
     loss:
-      # class_path: loss.dice_bce_loss.DiceBCELoss
       class_path: segmentation_models_pytorch.losses.DiceLoss
       init_args:
         mode: "binary"
-        #alpha: 0.5
-        #smooth: 1e-6
-        #eps: 1e-7
+        smooth: 1e-6
     optimizer:
-      class_path: torch.optim.Adam
+      class_path: torch.optim.AdamW
       init_args:
-        lr: 6e-5
+        lr: 1e-4
+        weight_decay: 0.01
+#    scheduler:
+#      class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
+#      init_args:
+#        mode: "min"
+#        threshold: 1e-4
+#        factor: 0.5
+#        patience: 15
+#        cooldown: 1
+#        min_lr: 6e-8
+#    scheduler_config:
+#      interval: "epoch"
+#      frequency: 1
+#      monitor: "val_loss"
     scheduler:
-      class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
+      class_path: torch.optim.lr_scheduler.CosineAnnealingLR
       init_args:
-        mode: "min"
-        factor: 0.1
-        patience: 10
-        cooldown: 1
-        min_lr: 6e-8
+        T_max: 250  # Corresponds to the max_epochs
+        eta_min: 1e-6 # The minimum learning rate
     scheduler_config:
       interval: "epoch"
       frequency: 1
-      monitor: "val_loss"
+
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    weights_from_checkpoint_path: /app/model_checkpoints/change_detection_segformer_mit_b3-A-DESC-epoch=99-val_loss=0.015.ckpt
+    weights_from_checkpoint_path: #/app/model_checkpoints/change_detection_segformer_mit_b3-A-ASC_DESC_jac_loss-epoch=62-val_loss=0.644.ckpt
 
 
 
@@ -88,12 +105,12 @@ data:
   class_path: datamodules.rcm_change_detection_one_output_datamodule.RcmChangeDetectionOneOutputDataModule
   init_args:
     batch_size: 16
-    num_workers: 20
+    num_workers: 10
     data_type_max: 1
     patch_size:
     - 256
     - 256
-
+    split_on_columns: cell_id
     csv_root_folder: /mnt/data_disk/projet_RCM_scanfire
     patches_root_folder: /mnt/data_disk/projet_RCM_scanfire
     csv_file_name: pre_post_datasets_all.csv
@@ -122,8 +139,8 @@ data:
     #    SP2
     #    SP3
 
-    beams:
+    beams: # AVAILABLE: ['A','B','C','D']
     - 'A'
     #- 'B'
-    #- 'C'  # AVAILABLE: ['A','B','C','D']
-    satellite_pass:  # 'Descending'  # AVAILABLE: ['Ascending','Descending']
+    #- 'C'
+    satellite_pass:   # AVAILABLE: ['Ascending','Descending']
