@@ -18,3 +18,5 @@ torchvision>=0.19.1
 whitebox>=2.3.6
 hydra-core
 hydra-colorlog
+tensorboard
+tensorboardX
