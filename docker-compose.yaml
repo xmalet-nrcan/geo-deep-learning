@@ -25,3 +25,30 @@ services:
           - driver: nvidia
             count: 1
             capabilities: [gpu]
+
+  geo-deep-learning_tversky_loss:
+    build:
+      dockerfile: Dockerfile
+    environment:
+      - PYTORCH_ALLOC_CONF=expandable_segments:True
+    #      - NVIDIA_VISIBLE_DEVICES=all
+    runtime: nvidia
+    user: '9005'
+    shm_size: '32gb'
+    container_name: geo-deep-learning_tversky_loss
+    volumes:
+      # MOUNT THE DATASET REPO
+      - "/mnt/data_disk/projet_RCM_scanfire:/mnt/data_disk/projet_RCM_scanfire:rw"
+      # MOUNT THE CONFIG
+      - "/home/xmalet/projects/geo-deep-learning/configs/seg_former_rcm_change_detection_dyn_trans.yaml:/app/configs/model_conf.yaml"
+      # MOUNT THE MODEL CHECKPOINTS AND LOGS
+      - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/model_checkpoints:rw"
+      - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
+    entrypoint: [ "python",  "geo_deep_learning/train.py","fit", "--config", "configs/model_conf.yaml" ]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]

@@ -64,10 +64,12 @@ model:
     max_samples: 10
     num_classes: 1  # binary change detection
     loss:
-      class_path: segmentation_models_pytorch.losses.DiceLoss
+      class_path: segmentation_models_pytorch.losses.TverskyLoss
       init_args:
         mode: "binary"
         smooth: 1e-6
+        alpha: 0.3
+        beta: 0.7
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
