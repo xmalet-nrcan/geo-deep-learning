@@ -30,7 +30,8 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         verbose: True
-        patience: 20
+        patience: 30
+        min_delta: 1e-3
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         dirpath: "./model_checkpoints"
@@ -59,7 +60,7 @@ model:
     encoder: "mit_b3"
     use_dynamic_encoder: true
     in_channels: 15 #(5+1)x2+3 # Should be : len(band_names [+1 if BITMASK not included in band_names ] )X2 + 3 (COMMON AREA MASK; SAT_PASS; BEAM)
-    weights: #imagenet
+    weights: null #imagenet
     max_samples: 10
     num_classes: 1  # binary change detection
     loss:
@@ -67,24 +68,35 @@ model:
       init_args:
         mode: "binary"
         smooth: 1e-6
+ #       alpha: 0.3
+#        beta: 0.7
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
         lr: 1e-4
         weight_decay: 0.01
+#    scheduler:
+#      class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
+#      init_args:
+#        mode: "min"
+#        threshold: 1e-4
+#        factor: 0.5
+#        patience: 15
+#        cooldown: 1
+#        min_lr: 6e-8
+#    scheduler_config:
+#      interval: "epoch"
+#      frequency: 1
+#      monitor: "val_loss"
     scheduler:
-      class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
+      class_path: torch.optim.lr_scheduler.CosineAnnealingLR
       init_args:
-        mode: "min"
-        threshold: 1e-4
-        factor: 0.5
-        patience: 15
-        cooldown: 1
-        min_lr: 6e-8
+        T_max: 250  # Corresponds to the max_epochs
+        eta_min: 1e-6 # The minimum learning rate
     scheduler_config:
       interval: "epoch"
       frequency: 1
-      monitor: "val_loss"
+
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
     weights_from_checkpoint_path: #/app/model_checkpoints/change_detection_segformer_mit_b3-A-ASC_DESC_jac_loss-epoch=62-val_loss=0.644.ckpt
