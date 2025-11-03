@@ -16,7 +16,7 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: ./lightning_logs
-      name: segformer_rcm_change_detection_A_mit_b3_dice-bce
+      name: segformer_rcm_change_detection_A_mit_b5_tversky-bce_fire_id
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -38,7 +38,7 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         save_top_k: 10
-        filename: "change_detection_segformer_mit_b3-A_dice_bce-{epoch:02d}-{val_loss:.3f}"
+        filename: "change_detection_segformer_mit_b5-A_tversky_bce_fire-id-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 10
@@ -57,19 +57,22 @@ model:
   class_path: tasks_with_models.change_detection_segformer.ChangeDetectionSegmentationSegformer
   init_args:
     image_size: [256,256]
-    encoder: "mit_b3"
+    encoder: "mit_b5"
     use_dynamic_encoder: true
     in_channels: 15 #(5+1)x2+3 # Should be : len(band_names [+1 if BITMASK not included in band_names ] )X2 + 3 (COMMON AREA MASK; SAT_PASS; BEAM)
     weights: null #imagenet
     max_samples: 10
     num_classes: 1  # binary change detection
     loss:
-      class_path: segmentation_models_pytorch.losses.DiceLoss
+      class_path: segmentation_models_pytorch.losses.TverskyLoss
       init_args:
         mode: "binary"
-        smooth: 1e-6
- #       alpha: 0.3
-#        beta: 0.7
+        from_logits: True
+        #smooth: 1e-6
+        #eps: 1e-6
+        alpha: 0.3
+        beta: 0.7
+        gamma: 0.75
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
@@ -112,7 +115,7 @@ data:
     patch_size:
     - 256
     - 256
-    split_on_columns: cell_id
+    split_on_columns: db_nbac_fire_id
     csv_root_folder: /mnt/data_disk/projet_RCM_scanfire
     patches_root_folder: /mnt/data_disk/projet_RCM_scanfire
     csv_file_name: pre_post_datasets_all.csv
