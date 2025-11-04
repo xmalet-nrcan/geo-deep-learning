@@ -19,7 +19,7 @@ from functools import partial
 
 import torch.nn.functional
 import torch.nn.functional as F
-from timm.models.layers import DropPath, to_2tuple, trunc_normal_
+from timm.layers import DropPath, to_2tuple, trunc_normal_
 
 from geo_deep_learning.models.change_detection.sub_models.changeformer.original_change_former_base_network import *
 

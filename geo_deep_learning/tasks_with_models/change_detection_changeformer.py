@@ -242,7 +242,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
     def forward(self, image_pre: Tensor, image_post: Tensor) -> Tensor:
         """Forward pass."""
-        return self.model(image_pre, image_post)
+        return self.model(image_pre, image_post)[-1]  # Because ChangeFormer output a list in its forward pass.
 
     # # TODO : Modifier pour avoir image pre/post transformées
     # def on_before_batch_transfer(
@@ -409,7 +409,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         y_long = y.squeeze(1).long()
         y_float = y.unsqueeze(1).float()
 
-        logits = self(x_pre, x_post)[-1]
+        logits = self(x_pre, x_post)
 
         # --- Main loss ---
         try:

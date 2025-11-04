@@ -35,8 +35,8 @@ class ChangeDetectionModel(BaseSegmentationModel):
         model_kwargs.update(kwargs)
         model = model_selection[change_detection_model]
 
-        self.change_detection_model = model(in_channels=in_channels,
-                                            out_channels=out_channels,
+        self.change_detection_model = model(input_nc=in_channels,
+                                            output_nc=out_channels,
                                             **model_kwargs)
 
     def forward(self, x1: Tensor, x2: Tensor) -> Tensor:
@@ -53,9 +53,9 @@ class ChangeDetectionModel(BaseSegmentationModel):
 
 
 if __name__ == '__main__':
-    model = ChangeDetectionModel(change_detection_model='changeformer_6', in_channels=3, out_channels=2)
-    x1 = torch.randn(5, 3, 512, 512)
-    x2 = torch.randn(5, 3, 512, 512)
-    outputs = model(x1, x2)
+    model = ChangeDetectionModel(change_detection_model='changeformer_6', in_channels=9, out_channels=2)
+    x1 = torch.randn(5, 9, 512, 512)
+    x2 = torch.randn(5, 9, 512, 512)
+    outputs = model(x1, x2)[-1]
     print(f"outputs.shape: {outputs.shape}")
 
