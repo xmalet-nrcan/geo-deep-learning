@@ -402,7 +402,9 @@ class ChangeDetectionChangeFormer(LightningModule):
             raise ValueError(f"Unexpected mask shape: {y.shape}")
 
         logits = self(x_pre, x_post)
-
+        logger.debug(f"y_float {y_float.shape}")
+        logger.debug(f"y_long {y_long.shape}")
+        logger.debug(f"logits {logits.shape}")
         # --- Main loss ---
         try:
             main_loss = self.loss(logits, y_long) + self.ce_loss(logits, y_long)
