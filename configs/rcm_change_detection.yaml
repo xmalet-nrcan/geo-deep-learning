@@ -38,7 +38,7 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         save_top_k: 10
-        filename: "change_detection_segformer_mit_b5-A_tversky_bce_fire-id-{epoch:02d}-{val_loss:.3f}"
+        filename: "changeformer_tversky_bce_fire-id-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 10

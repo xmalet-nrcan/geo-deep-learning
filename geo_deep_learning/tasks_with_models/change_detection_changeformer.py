@@ -172,7 +172,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.model = ChangeDetectionModel(
             change_detection_model=self.change_detection_model,
             in_channels=self.in_channels,
-            out_channels=self.num_classes,
+            out_channels=self.num_classes  + 1 if self.num_classes == 1 else self.num_classes,
         )
 
         if self.weights_from_checkpoint_path:
@@ -298,18 +298,13 @@ class ChangeDetectionChangeFormer(LightningModule):
         )
         # --- Calcul des métriques différé (pour éviter de casser autograd) ---
         with torch.no_grad():
-            if self.num_classes == 1:
-                preds = (logits.sigmoid() > self.threshold).long().squeeze(1)
-            else:
-                preds = logits.softmax(dim=1).argmax(dim=1)
-
             # On accumule les prédictions pour calculer les métriques à la fin
-            self.train_iou.update(preds, y)
+            self.train_iou.update(logits, y)
 
-            self.train_f1.update(preds, y)
+            self.train_f1.update(logits, y)
             self.log(
                 "train_iou_step",
-                self.train_iou(preds, y),
+                self.train_iou(logits, y),
                 prog_bar=False,
                 on_step=True,
                 on_epoch=False,
@@ -338,10 +333,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             sync_dist=True,
             rank_zero_only=True,
         )
-        if self.num_classes == 1:
-            y_hat = (y_hat.sigmoid().squeeze(1) > self.threshold).long()
-        else:
-            y_hat = y_hat.softmax(dim=1).argmax(dim=1)
+
 
         self.val_iou(y_hat, y)
         self.val_f1(y_hat, y)
@@ -358,12 +350,6 @@ class ChangeDetectionChangeFormer(LightningModule):
     ) -> None:
         """Run test step."""
         x_pre, x_post, y, y_hat, loss, batch_size = self._forward_and_get_loss(batch)
-
-        if self.num_classes == 1:
-            y_hat = (y_hat.sigmoid().squeeze(1) > self.threshold).long()
-        else:
-            y_hat = y_hat.softmax(dim=1).argmax(dim=1)
-
 
         metrics = self.iou_classwise_metric(y_hat, y)
         metrics["test_loss"] = loss
