@@ -12,8 +12,11 @@ import torch
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
-from lightning.pytorch.loggers import MLFlowLogger
+from lightning.pytorch.loggers import  TensorBoardLogger
+from segmentation_models_pytorch.utils.losses import BCEWithLogitsLoss
 from torch import Tensor
+from torchmetrics import JaccardIndex, F1Score
+from torchmetrics.classification import BinaryJaccardIndex
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
 
@@ -118,23 +121,51 @@ class ChangeDetectionChangeFormer(LightningModule):
         )
         self._total_samples_visualized = 0
 
-        # self.transform = DataAugmentation(image_size=self.image_size)
+        self.ce_loss = BCEWithLogitsLoss()
+        num_classes = self.num_classes if self.num_classes > 1 else 2
+        task_type = "multiclass" if num_classes > 2 else "binary"
+        if num_classes == 2:
+            self.train_iou = BinaryJaccardIndex(threshold=0.3)
+            self.val_iou = BinaryJaccardIndex(threshold=0.3)
+            self.test_iou = BinaryJaccardIndex(threshold=0.3)
+        else:
+            self.train_iou = JaccardIndex(task=task_type, num_classes=num_classes)
+            self.val_iou = JaccardIndex(task=task_type, num_classes=num_classes)
+            self.test_iou = JaccardIndex(task=task_type, num_classes=num_classes)
+
+        self.train_f1 = F1Score(task=task_type, num_classes=num_classes)
+        self.val_f1 = F1Score(task=task_type, num_classes=num_classes)
+        self.test_f1 = F1Score(task=task_type, num_classes=num_classes)
 
     def _apply_aug(self) -> AugmentationSequential:
         """Augmentation pipeline."""
 
-        pad_to_patch_size = krn.augmentation.PadTo(size=self.image_size,
-                                                   pad_mode='constant',
-                                                   pad_value=0,
-                                                   keepdim=False)
-
         return AugmentationSequential(
-            pad_to_patch_size,
             krn.augmentation.RandomHorizontalFlip(p=0.5, keepdim=True),
             krn.augmentation.RandomVerticalFlip(p=0.5, keepdim=True),
-            krn.augmentation.RandomAffine(degrees=360, p=0.5),
-            data_keys=None,
-        )
+            krn.augmentation.RandomRotation90(
+                times=(1, 3),
+                p=0.5,
+                align_corners=True,
+                keepdim=True,
+            ),
+            data_keys=None, )
+
+    def on_before_batch_transfer(
+            self,
+            batch: dict[str, Any],
+            dataloader_idx: int,  # noqa: ARG002
+    ) -> dict[str, Any]:
+
+        aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
+                                                            pad_mode='constant', pad_value=0,
+                                                            keepdim=False), data_keys=None)
+        transformed = aug({"image_pre": batch["image_pre"],
+                           "image_post": batch["image_post"],
+                           "image": batch["image_post"],
+                           "mask": batch["mask"]})
+        batch.update(transformed)
+        return batch
 
     def configure_model(self) -> None:
         """Configure model."""
@@ -231,25 +262,18 @@ class ChangeDetectionChangeFormer(LightningModule):
     #     return batch
 
     def on_after_batch_transfer(self, batch, dataloader_idx):
+        if not self.trainer.training:
+            return batch
         aug = self._apply_aug()
+        device = batch["image"].device
 
-        if self.trainer.training:
-            transformed = aug({"image_pre": batch["image_pre"],
-                               "image_post": batch["image_post"],
-                               "image": batch["image_post"],
-                               "mask": batch["mask"]})
-            batch.update(transformed)
-        else:
-            aug = krn.augmentation.PadTo(size=self.image_size,
-                                                   pad_mode='constant',
-                                                   pad_value=0,
-                                                   keepdim=False)
-            aug = AugmentationSequential(aug, data_keys=None)
-            transformed = aug({"image_pre": batch["image_pre"],
-                               "image_post": batch["image_post"],
-                               "image": batch["image_post"],
-                               "mask": batch["mask"]})
-            batch.update(transformed)
+        transformed = aug({"image_pre": batch["image_pre"],
+                           "image_post": batch["image_post"],
+                           "image": batch["image_post"],
+                           "mask": batch["mask"]})
+        for key in ["image", "mask", "image_pre", "image_post"]:
+            if key in transformed:
+                batch[key] = transformed[key].to(device, non_blocking=True)
         return batch
 
     # TODO : Modifier pour avoir image pre/post
@@ -259,8 +283,9 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> Tensor:
         """Run training step."""
-        x_pre, x_post, y, y_hat, loss, batch_size = self._forward_and_get_loss(batch)
+        x_pre, x_post, y, logits, loss, batch_size = self._forward_and_get_loss(batch)
 
+        # --- Logging ---
         self.log(
             "train_loss",
             loss,
@@ -270,8 +295,26 @@ class ChangeDetectionChangeFormer(LightningModule):
             on_step=False,
             on_epoch=True,
             sync_dist=True,
-            rank_zero_only=True,
         )
+        # --- Calcul des métriques différé (pour éviter de casser autograd) ---
+        with torch.no_grad():
+            if self.num_classes == 1:
+                preds = (logits.sigmoid() > self.threshold).long().squeeze(1)
+            else:
+                preds = logits.softmax(dim=1).argmax(dim=1)
+
+            # On accumule les prédictions pour calculer les métriques à la fin
+            self.train_iou.update(preds, y)
+
+            self.train_f1.update(preds, y)
+            self.log(
+                "train_iou_step",
+                self.train_iou(preds, y),
+                prog_bar=False,
+                on_step=True,
+                on_epoch=False,
+                sync_dist=False,
+            )
 
         return loss
 
@@ -300,6 +343,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         else:
             y_hat = y_hat.softmax(dim=1).argmax(dim=1)
 
+        self.val_iou(y_hat, y)
+        self.val_f1(y_hat, y)
+
+        self.log("val_iou", self.val_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("val_f1", self.val_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+
         return y_hat
 
     def test_step(
@@ -315,8 +364,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         else:
             y_hat = y_hat.softmax(dim=1).argmax(dim=1)
 
+
         metrics = self.iou_classwise_metric(y_hat, y)
-        self.iou_classwise_metric.reset()
         metrics["test_loss"] = loss
 
         if self._total_samples_visualized < self.max_samples:
@@ -337,17 +386,38 @@ class ChangeDetectionChangeFormer(LightningModule):
             prog_bar=False,
             logger=True,
             on_step=False,
-            rank_zero_only=True,
+            on_epoch=True,
+            sync_dist=True,
+            rank_zero_only=False,
         )
+
+        if self.num_classes == 1:
+            preds = (y_hat.sigmoid().squeeze(1) > self.threshold).long()
+        else:
+            preds = y_hat.softmax(dim=1).argmax(dim=1)
+        self.test_iou(preds, y)
+        self.test_f1(preds, y)
+
+        self.log("test_iou", self.test_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("test_f1", self.test_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+
 
     def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[Any, Any, Any, Any, Any, Any]:
         x_pre, x_post = batch["image_pre"], batch["image_post"]
         y = batch["mask"]
         batch_size = x_post.shape[0]
-        y = y.squeeze(1).long()
-        y_hat = self(x_pre, x_post)
-        loss = self.loss(y_hat, y)
-        return x_pre, x_post, y, y_hat, loss, batch_size
+        y_long = y.squeeze(1).long()
+        y_float = y.unsqueeze(1).float()
+
+        logits = self(x_pre, x_post)[-1]
+
+        # --- Main loss ---
+        try:
+            main_loss = self.loss(logits, y_long) + self.ce_loss(logits, y_long)
+        except ValueError:
+            # Si self.ce_loss attend un float (comme JaccardLoss)
+            main_loss = self.loss(logits, y_long) + self.ce_loss(logits, y_float)
+        return x_pre, x_post, y_long, logits, main_loss, batch_size
 
     def _log_visualizations(  # noqa: PLR0913
             self,
@@ -358,7 +428,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             artifact_prefix: str = "val",
             *,
             epoch_suffix: bool = True,
-    ) -> Optional[int]:
+    ) -> int:
         """
         SegFormer-specific log visualizations.
 
@@ -378,21 +448,19 @@ class ChangeDetectionChangeFormer(LightningModule):
             return 0
 
         try:
-            logger.info("\nLogging visualizations")
+            logger.info("Logging visualizations")
+            logger.info("Batch size: %d", len(batch["image"]))
             image_batch = batch["image"]
             mask_batch = batch["mask"].squeeze(1).long()
             batch_image_name = batch["image_name"]
-            mean_batch = batch["mean"]
-            std_batch = batch["std"]
-            max_batch = batch["max"]
             num_samples = min(max_samples, len(image_batch))
             for i in range(num_samples):
                 image = image_batch[i]
                 image_name = batch_image_name[i]
-                # TODO : RESTORE WHEN CHECKED
-                mean = mean_batch[i]
-                std = std_batch[i]
-                # image = denormalization(image, mean=mean, std=std,data_type_max=max_batch)
+                # mean = mean_batch[i]
+                # std = std_batch[i]
+                # image = denormalization(image, mean=mean, std=std)
+
                 fig = visualize_prediction(
                     image=image,
                     mask=mask_batch[i],
@@ -408,14 +476,24 @@ class ChangeDetectionChangeFormer(LightningModule):
                     )
                 else:
                     artifact_file = f"{base_path}/idx_{i}.png"
-                if isinstance(trainer.logger, MLFlowLogger):
+                if hasattr(trainer.logger, "experiment") and hasattr(trainer.logger.experiment, "log_figure"):
+                    # MLflowLogger
                     trainer.logger.experiment.log_figure(
                         figure=fig,
                         artifact_file=artifact_file,
-                        run_id=trainer.logger.run_id,
+                        run_id=getattr(trainer.logger, "run_id", None),
                     )
-
+                elif isinstance(trainer.logger, TensorBoardLogger):
+                    # TensorBoardLogger
+                    trainer.logger.experiment.add_figure(
+                        tag=artifact_file,
+                        figure=fig,
+                        global_step=trainer.current_epoch if epoch_suffix else 0,
+                    )
+                else:
+                    logger.warning("Logger does not support figure logging.")
         except Exception:
             logger.exception("Error in SegFormer visualization")
+            return 0
         else:
             return num_samples

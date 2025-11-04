@@ -647,14 +647,14 @@ class convprojection_base(nn.Module):
 ### This is the basic ChangeFormer module
 class ChangeFormerV1(nn.Module):
 
-    def __init__(self, in_channels=3, out_channels=2, decoder_softmax=False):
+    def __init__(self, input_nc=3, output_nc=2, decoder_softmax=False):
         super(ChangeFormerV1, self).__init__()
 
         self.Tenc = Tenc()
 
         self.convproj = convprojection_base()
 
-        self.change_probability = ConvLayer(8, out_channels, kernel_size=3, stride=1, padding=1)
+        self.change_probability = ConvLayer(8, output_nc, kernel_size=3, stride=1, padding=1)
 
         self.output_softmax = decoder_softmax
         self.active = torch.nn.Softmax(dim=1)
@@ -700,7 +700,7 @@ class TDec(nn.Module):
     """
 
     def __init__(self, input_transform='multiple_select', in_index=[0, 1, 2, 3], align_corners=True,
-                 in_channels=[64, 128, 256, 512], embedding_dim=256, out_channels=2,
+                 in_channels=[64, 128, 256, 512], embedding_dim=256, output_nc=2,
                  decoder_softmax=False, feature_strides=[4, 8, 16, 32]):
         super(TDec, self).__init__()
         assert len(feature_strides) == len(in_channels)
@@ -717,7 +717,7 @@ class TDec(nn.Module):
         self.embedding_dim = embedding_dim
 
         # Final prediction
-        self.out_channels = out_channels
+        self.output_nc = output_nc
 
         c1_in_channels, c2_in_channels, c3_in_channels, c4_in_channels = self.in_channels
 
@@ -736,7 +736,7 @@ class TDec(nn.Module):
         self.dense_1x = nn.Sequential(ResidualBlock(self.embedding_dim))
 
         # Final prediction
-        self.change_probability = ConvLayer(self.embedding_dim, self.out_channels, kernel_size=3, stride=1, padding=1)
+        self.change_probability = ConvLayer(self.embedding_dim, self.output_nc, kernel_size=3, stride=1, padding=1)
         self.output_softmax = decoder_softmax
         self.active = nn.Softmax(dim=1)
 
@@ -803,7 +803,7 @@ class TDecV2(nn.Module):
     """
 
     def __init__(self, input_transform='multiple_select', in_index=[0, 1, 2, 3], align_corners=True,
-                 in_channels=[64, 128, 256, 512], embedding_dim=256, out_channels=2,
+                 in_channels=[64, 128, 256, 512], embedding_dim=256, output_nc=2,
                  decoder_softmax=False, feature_strides=[4, 8, 16, 32]):
         super(TDecV2, self).__init__()
         assert len(feature_strides) == len(in_channels)
@@ -820,7 +820,7 @@ class TDecV2(nn.Module):
         self.embedding_dim = embedding_dim
 
         # Final prediction
-        self.out_channels = out_channels
+        self.output_nc = output_nc
 
         c1_in_channels, c2_in_channels, c3_in_channels, c4_in_channels = self.in_channels
 
@@ -839,13 +839,13 @@ class TDecV2(nn.Module):
         # self.dense_1x   = nn.Sequential( ResidualBlock(self.embedding_dim))
 
         # Pixel Shiffle
-        self.pix_shuffle_conv = nn.Conv2d(in_channels=self.embedding_dim, out_channels=16 * out_channels, kernel_size=3,
+        self.pix_shuffle_conv = nn.Conv2d(in_channels=self.embedding_dim, out_channels=16 * output_nc, kernel_size=3,
                                           stride=1, padding=1)
         self.relu = nn.ReLU()
         self.pix_shuffle = nn.PixelShuffle(4)
 
         # Final prediction
-        # self.change_probability = ConvLayer(self.embedding_dim, self.out_channels, kernel_size=3, stride=1, padding=1)
+        # self.change_probability = ConvLayer(self.embedding_dim, self.output_nc, kernel_size=3, stride=1, padding=1)
 
         # Final activation
         self.output_softmax = decoder_softmax
@@ -929,14 +929,14 @@ class TDecV2(nn.Module):
 # Feature differencing and pass it through Transformer decoder
 class ChangeFormerV2(nn.Module):
 
-    def __init__(self, in_channels=3, out_channels=2, decoder_softmax=False):
+    def __init__(self, input_nc=3, output_nc=2, decoder_softmax=False):
         super(ChangeFormerV2, self).__init__()
         # Transformer Encoder
         self.Tenc = Tenc()
 
         # Transformer Decoder
         self.TDec = TDec(input_transform='multiple_select', in_index=[0, 1, 2, 3], align_corners=True,
-                         in_channels=[64, 128, 320, 512], embedding_dim=32, out_channels=out_channels,
+                         in_channels=[64, 128, 320, 512], embedding_dim=32, output_nc=output_nc,
                          decoder_softmax=decoder_softmax, feature_strides=[4, 8, 16, 32])
         # Final activation
         self.decoder_softmax = decoder_softmax
@@ -963,7 +963,7 @@ class ChangeFormerV2(nn.Module):
 # Feature differencing and pass it through Transformer decoder
 class ChangeFormerV3(nn.Module):
 
-    def __init__(self, in_channels=3, out_channels=2, decoder_softmax=False):
+    def __init__(self, input_nc=3, output_nc=2, decoder_softmax=False):
         super(ChangeFormerV3, self).__init__()
         # Transformer Encoder
         self.Tenc = Tenc(patch_size=16, embed_dims=[64, 128, 320, 512], num_heads=[1, 2, 4, 8],
@@ -972,7 +972,7 @@ class ChangeFormerV3(nn.Module):
 
         # Transformer Decoder
         self.TDec = TDecV2(input_transform='multiple_select', in_index=[0, 1, 2, 3], align_corners=True,
-                           in_channels=[64, 128, 320, 512], embedding_dim=64, out_channels=out_channels,
+                           in_channels=[64, 128, 320, 512], embedding_dim=64, output_nc=output_nc,
                            decoder_softmax=decoder_softmax, feature_strides=[4, 8, 16, 32])
 
     def forward(self, x1, x2):
@@ -1166,7 +1166,7 @@ class DecoderTransformer_x2(nn.Module):
     """
 
     def __init__(self, input_transform='multiple_select', in_index=[0, 1, 2, 3, 4], align_corners=True,
-                 in_channels=[32, 64, 128, 256, 512], embedding_dim=64, out_channels=2,
+                 in_channels=[32, 64, 128, 256, 512], embedding_dim=64, output_nc=2,
                  decoder_softmax=False, feature_strides=[2, 4, 8, 16, 32]):
         super(DecoderTransformer_x2, self).__init__()
         assert len(feature_strides) == len(in_channels)
@@ -1183,7 +1183,7 @@ class DecoderTransformer_x2(nn.Module):
         self.embedding_dim = embedding_dim
 
         # Final prediction
-        self.out_channels = out_channels
+        self.output_nc = output_nc
 
         c1_in_channels, c2_in_channels, c3_in_channels, c4_in_channels, c5_in_channels = self.in_channels
 
@@ -1201,11 +1201,11 @@ class DecoderTransformer_x2(nn.Module):
         self.diff_c1 = conv_diff(in_channels=3 * self.embedding_dim, out_channels=self.embedding_dim)
 
         # Taking outputs from middle of the encoder
-        self.make_pred_c5 = make_prediction(in_channels=self.embedding_dim, out_channels=self.out_channels)
-        self.make_pred_c4 = make_prediction(in_channels=self.embedding_dim, out_channels=self.out_channels)
-        self.make_pred_c3 = make_prediction(in_channels=self.embedding_dim, out_channels=self.out_channels)
-        self.make_pred_c2 = make_prediction(in_channels=self.embedding_dim, out_channels=self.out_channels)
-        self.make_pred_c1 = make_prediction(in_channels=self.embedding_dim, out_channels=self.out_channels)
+        self.make_pred_c5 = make_prediction(in_channels=self.embedding_dim, out_channels=self.output_nc)
+        self.make_pred_c4 = make_prediction(in_channels=self.embedding_dim, out_channels=self.output_nc)
+        self.make_pred_c3 = make_prediction(in_channels=self.embedding_dim, out_channels=self.output_nc)
+        self.make_pred_c2 = make_prediction(in_channels=self.embedding_dim, out_channels=self.output_nc)
+        self.make_pred_c1 = make_prediction(in_channels=self.embedding_dim, out_channels=self.output_nc)
 
         self.linear_fuse = nn.Conv2d(in_channels=self.embedding_dim * len(in_channels), out_channels=self.embedding_dim,
                                      kernel_size=1)
@@ -1217,7 +1217,7 @@ class DecoderTransformer_x2(nn.Module):
         self.dense_1x = nn.Sequential(ResidualBlock(self.embedding_dim))
 
         # Final prediction
-        self.change_probability = ConvLayer(self.embedding_dim, self.out_channels, kernel_size=3, stride=1, padding=1)
+        self.change_probability = ConvLayer(self.embedding_dim, self.output_nc, kernel_size=3, stride=1, padding=1)
 
         # Final activation
         self.output_softmax = decoder_softmax
@@ -1317,14 +1317,14 @@ class DecoderTransformer_x2(nn.Module):
 # ChangeFormerV4:
 class ChangeFormerV4(nn.Module):
 
-    def __init__(self, in_channels=3, out_channels=2, decoder_softmax=False):
+    def __init__(self, input_nc=3, output_nc=2, decoder_softmax=False):
         super(ChangeFormerV4, self).__init__()
         # Transformer Encoder
         self.embed_dims = [32, 64, 128, 320, 512]
         self.depths = [3, 3, 4, 12, 3]  # [3, 3, 6, 18, 3]
         self.embedding_dim = 256
 
-        self.Tenc_x2 = EncoderTransformer_x2(img_size=256, patch_size=3, in_chans=in_channels, num_classes=out_channels,
+        self.Tenc_x2 = EncoderTransformer_x2(img_size=256, patch_size=3, in_chans=input_nc, num_classes=output_nc,
                                              embed_dims=self.embed_dims,
                                              num_heads=[2, 2, 4, 8, 16], mlp_ratios=[2, 2, 2, 2, 2], qkv_bias=False,
                                              qk_scale=None, drop_rate=0.,
@@ -1334,7 +1334,7 @@ class ChangeFormerV4(nn.Module):
         # Transformer Decoder
         self.TDec_x2 = DecoderTransformer_x2(input_transform='multiple_select', in_index=[0, 1, 2, 3, 4],
                                              align_corners=True,
-                                             in_channels=self.embed_dims, embedding_dim=256, out_channels=out_channels,
+                                             in_channels=self.embed_dims, embedding_dim=256, output_nc=output_nc,
                                              decoder_softmax=decoder_softmax, feature_strides=[2, 4, 8, 16, 32])
 
     def forward(self, x1, x2):
@@ -1493,7 +1493,7 @@ class DecoderTransformer_v3(nn.Module):
     """
 
     def __init__(self, input_transform='multiple_select', in_index=[0, 1, 2, 3], align_corners=True,
-                 in_channels=[32, 64, 128, 256], embedding_dim=64, out_channels=2,
+                 in_channels=[32, 64, 128, 256], embedding_dim=64, output_nc=2,
                  decoder_softmax=False, feature_strides=[2, 4, 8, 16]):
         super(DecoderTransformer_v3, self).__init__()
         # assert
@@ -1507,7 +1507,7 @@ class DecoderTransformer_v3(nn.Module):
         self.align_corners = align_corners
         self.in_channels = in_channels
         self.embedding_dim = embedding_dim
-        self.out_channels = out_channels
+        self.output_nc = output_nc
         c1_in_channels, c2_in_channels, c3_in_channels, c4_in_channels = self.in_channels
 
         # MLP decoder heads
@@ -1523,10 +1523,10 @@ class DecoderTransformer_v3(nn.Module):
         self.diff_c1 = conv_diff(in_channels=2 * self.embedding_dim, out_channels=self.embedding_dim)
 
         # taking outputs from middle of the encoder
-        self.make_pred_c4 = make_prediction(in_channels=self.embedding_dim, out_channels=self.out_channels)
-        self.make_pred_c3 = make_prediction(in_channels=self.embedding_dim, out_channels=self.out_channels)
-        self.make_pred_c2 = make_prediction(in_channels=self.embedding_dim, out_channels=self.out_channels)
-        self.make_pred_c1 = make_prediction(in_channels=self.embedding_dim, out_channels=self.out_channels)
+        self.make_pred_c4 = make_prediction(in_channels=self.embedding_dim, out_channels=self.output_nc)
+        self.make_pred_c3 = make_prediction(in_channels=self.embedding_dim, out_channels=self.output_nc)
+        self.make_pred_c2 = make_prediction(in_channels=self.embedding_dim, out_channels=self.output_nc)
+        self.make_pred_c1 = make_prediction(in_channels=self.embedding_dim, out_channels=self.output_nc)
 
         # Final linear fusion layer
         self.linear_fuse = nn.Sequential(
@@ -1540,7 +1540,7 @@ class DecoderTransformer_v3(nn.Module):
         self.dense_2x = nn.Sequential(ResidualBlock(self.embedding_dim))
         self.convd1x = UpsampleConvLayer(self.embedding_dim, self.embedding_dim, kernel_size=4, stride=2)
         self.dense_1x = nn.Sequential(ResidualBlock(self.embedding_dim))
-        self.change_probability = ConvLayer(self.embedding_dim, self.out_channels, kernel_size=3, stride=1, padding=1)
+        self.change_probability = ConvLayer(self.embedding_dim, self.output_nc, kernel_size=3, stride=1, padding=1)
 
         # Final activation
         self.output_softmax = decoder_softmax
@@ -1595,7 +1595,7 @@ class DecoderTransformer_v3(nn.Module):
         # Stage 3: x1/16 scale
         _c3_1 = self.linear_c3(c3_1).permute(0, 2, 1).reshape(n, -1, c3_1.shape[2], c3_1.shape[3])
         _c3_2 = self.linear_c3(c3_2).permute(0, 2, 1).reshape(n, -1, c3_2.shape[2], c3_2.shape[3])
-        _c3 = self.diff_c3(torch.cat((_c3_1, _c3_2), dim=1)) + F.interpolate(_c4,size=_c3_1.shape[2:], mode="bilinear",align_corners=False)
+        _c3 = self.diff_c3(torch.cat((_c3_1, _c3_2), dim=1)) + F.interpolate(_c4, scale_factor=2, mode="bilinear")
         p_c3 = self.make_pred_c3(_c3)
         outputs.append(p_c3)
         _c3_up = resize(_c3, size=c1_2.size()[2:], mode='bilinear', align_corners=False)
@@ -1603,7 +1603,7 @@ class DecoderTransformer_v3(nn.Module):
         # Stage 2: x1/8 scale
         _c2_1 = self.linear_c2(c2_1).permute(0, 2, 1).reshape(n, -1, c2_1.shape[2], c2_1.shape[3])
         _c2_2 = self.linear_c2(c2_2).permute(0, 2, 1).reshape(n, -1, c2_2.shape[2], c2_2.shape[3])
-        _c2 = self.diff_c2(torch.cat((_c2_1, _c2_2), dim=1)) + F.interpolate(_c3, size=_c2_2.shape[2:], mode="bilinear")
+        _c2 = self.diff_c2(torch.cat((_c2_1, _c2_2), dim=1)) + F.interpolate(_c3, scale_factor=2, mode="bilinear")
         p_c2 = self.make_pred_c2(_c2)
         outputs.append(p_c2)
         _c2_up = resize(_c2, size=c1_2.size()[2:], mode='bilinear', align_corners=False)
@@ -1611,7 +1611,7 @@ class DecoderTransformer_v3(nn.Module):
         # Stage 1: x1/4 scale
         _c1_1 = self.linear_c1(c1_1).permute(0, 2, 1).reshape(n, -1, c1_1.shape[2], c1_1.shape[3])
         _c1_2 = self.linear_c1(c1_2).permute(0, 2, 1).reshape(n, -1, c1_2.shape[2], c1_2.shape[3])
-        _c1 = self.diff_c1(torch.cat((_c1_1, _c1_2), dim=1)) + F.interpolate(_c2, size=_c1_2.shape[2:], mode="bilinear")
+        _c1 = self.diff_c1(torch.cat((_c1_1, _c1_2), dim=1)) + F.interpolate(_c2, scale_factor=2, mode="bilinear")
         p_c1 = self.make_pred_c1(_c1)
         outputs.append(p_c1)
 
@@ -1650,7 +1650,7 @@ class DecoderTransformer_v3(nn.Module):
 # ChangeFormerV5:
 class ChangeFormerV5(nn.Module):
 
-    def __init__(self, in_channels=3, out_channels=2, decoder_softmax=False, embed_dim=256):
+    def __init__(self, input_nc=3, output_nc=2, decoder_softmax=False, embed_dim=256):
         super(ChangeFormerV5, self).__init__()
         # Transformer Encoder
         self.embed_dims = [64, 128, 320, 512]
@@ -1660,7 +1660,7 @@ class ChangeFormerV5(nn.Module):
         self.attn_drop = 0.0
         self.drop_path_rate = 0.1
 
-        self.Tenc_x2 = EncoderTransformer_v3(img_size=256, patch_size=4, in_chans=in_channels, num_classes=out_channels,
+        self.Tenc_x2 = EncoderTransformer_v3(img_size=256, patch_size=4, in_chans=input_nc, num_classes=output_nc,
                                              embed_dims=self.embed_dims,
                                              num_heads=[1, 2, 5, 8], mlp_ratios=[4, 4, 4, 4], qkv_bias=True,
                                              qk_scale=None, drop_rate=self.drop_rate,
@@ -1672,7 +1672,7 @@ class ChangeFormerV5(nn.Module):
         self.TDec_x2 = DecoderTransformer_v3(input_transform='multiple_select', in_index=[0, 1, 2, 3],
                                              align_corners=False,
                                              in_channels=self.embed_dims, embedding_dim=self.embedding_dim,
-                                             out_channels=out_channels,
+                                             output_nc=output_nc,
                                              decoder_softmax=decoder_softmax, feature_strides=[2, 4, 8, 16])
 
     def forward(self, x1, x2):
@@ -1690,7 +1690,7 @@ class ChangeFormerV5(nn.Module):
 # ChangeFormerV6:
 class ChangeFormerV6(nn.Module):
 
-    def __init__(self, in_channels=3, out_channels=2, decoder_softmax=True, embed_dim=256, **kwargs):
+    def __init__(self, input_nc=3, output_nc=2, decoder_softmax=False, embed_dim=256):
         super(ChangeFormerV6, self).__init__()
         # Transformer Encoder
         self.embed_dims = [64, 128, 320, 512]
@@ -1700,14 +1700,10 @@ class ChangeFormerV6(nn.Module):
         self.attn_drop = 0.1
         self.drop_path_rate = 0.1
 
-        self.Tenc_x2 = EncoderTransformer_v3(img_size=256, patch_size=7, in_chans=in_channels,
-                                             num_classes=out_channels,
+        self.Tenc_x2 = EncoderTransformer_v3(img_size=256, patch_size=7, in_chans=input_nc, num_classes=output_nc,
                                              embed_dims=self.embed_dims,
-                                             num_heads=[1, 2, 4, 8],
-                                             mlp_ratios=[4, 4, 4, 4],
-                                             qkv_bias=True,
-                                             qk_scale=None,
-                                             drop_rate=self.drop_rate,
+                                             num_heads=[1, 2, 4, 8], mlp_ratios=[4, 4, 4, 4], qkv_bias=True,
+                                             qk_scale=None, drop_rate=self.drop_rate,
                                              attn_drop_rate=self.attn_drop, drop_path_rate=self.drop_path_rate,
                                              norm_layer=partial(nn.LayerNorm, eps=1e-6),
                                              depths=self.depths, sr_ratios=[8, 4, 2, 1])
@@ -1716,7 +1712,7 @@ class ChangeFormerV6(nn.Module):
         self.TDec_x2 = DecoderTransformer_v3(input_transform='multiple_select', in_index=[0, 1, 2, 3],
                                              align_corners=False,
                                              in_channels=self.embed_dims, embedding_dim=self.embedding_dim,
-                                             out_channels=out_channels,
+                                             output_nc=output_nc,
                                              decoder_softmax=decoder_softmax, feature_strides=[2, 4, 8, 16])
 
     def forward(self, x1, x2):
@@ -1724,6 +1720,8 @@ class ChangeFormerV6(nn.Module):
 
         cp = self.TDec_x2(fx1, fx2)
 
-        return cp[-1]
+        # # Save to mat
+        # save_to_mat(x1, x2, fx1, fx2, cp, "ChangeFormerV4")
 
-
+        # exit()
+        return cp

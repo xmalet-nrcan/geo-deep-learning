@@ -13,22 +13,21 @@ Original code from https://github.com/wgcban/ChangeFormer.git
   doi={10.1109/IGARSS46834.2022.9883686}}
 """
 
-import torch
+from math import sqrt
 
+import torch
 from torch import nn
 from torch.nn import init
 
 
-from math import sqrt
-
-
 class ConvBlock(torch.nn.Module):
-    def __init__(self, input_size, output_size, kernel_size=3, stride=1, padding=1, bias=True, activation='prelu', norm=None):
+    def __init__(self, input_size, output_size, kernel_size=3, stride=1, padding=1, bias=True, activation='prelu',
+                 norm=None):
         super(ConvBlock, self).__init__()
         self.conv = torch.nn.Conv2d(input_size, output_size, kernel_size, stride, padding, bias=bias)
 
         self.norm = norm
-        if self.norm =='batch':
+        if self.norm == 'batch':
             self.bn = torch.nn.BatchNorm2d(output_size)
         elif self.norm == 'instance':
             self.bn = torch.nn.InstanceNorm2d(output_size)
@@ -56,8 +55,10 @@ class ConvBlock(torch.nn.Module):
         else:
             return out
 
+
 class DeconvBlock(torch.nn.Module):
-    def __init__(self, input_size, output_size, kernel_size=4, stride=2, padding=1, bias=True, activation='prelu', norm=None):
+    def __init__(self, input_size, output_size, kernel_size=4, stride=2, padding=1, bias=True, activation='prelu',
+                 norm=None):
         super(DeconvBlock, self).__init__()
         self.deconv = torch.nn.ConvTranspose2d(input_size, output_size, kernel_size, stride, padding, bias=bias)
 
@@ -94,20 +95,20 @@ class DeconvBlock(torch.nn.Module):
 class ConvLayer(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
         super(ConvLayer, self).__init__()
-#         reflection_padding = kernel_size // 2
-#         self.reflection_pad = nn.ReflectionPad2d(reflection_padding)
+        #         reflection_padding = kernel_size // 2
+        #         self.reflection_pad = nn.ReflectionPad2d(reflection_padding)
         self.conv2d = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
 
     def forward(self, x):
-#         out = self.reflection_pad(x)
+        #         out = self.reflection_pad(x)
         out = self.conv2d(x)
         return out
 
 
 class UpsampleConvLayer(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride):
-      super(UpsampleConvLayer, self).__init__()
-      self.conv2d = nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride=stride, padding=1)
+        super(UpsampleConvLayer, self).__init__()
+        self.conv2d = nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride=stride, padding=1)
 
     def forward(self, x):
         out = self.conv2d(x)
@@ -127,9 +128,8 @@ class ResidualBlock(torch.nn.Module):
         out = self.conv2(out) * 0.1
         out = torch.add(out, residual)
         return out
-    
-    
-    
+
+
 def init_linear(linear):
     init.xavier_normal(linear.weight)
     linear.bias.data.zero_()
