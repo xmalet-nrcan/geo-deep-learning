@@ -200,7 +200,7 @@ class MSDeformAttnFunction(Function):
     """Multi-Scale Deformable Attention Function."""
 
     @staticmethod
-    @custom_fwd(cast_inputs=torch.float32)
+    @torch.amp.custom_fwd(cast_inputs=torch.float32, device_type='cuda')
     def forward(  # noqa: PLR0913
         ctx: object,
         value: torch.Tensor,
