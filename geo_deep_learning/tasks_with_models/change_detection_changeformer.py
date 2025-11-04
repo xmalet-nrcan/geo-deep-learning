@@ -397,14 +397,16 @@ class ChangeDetectionChangeFormer(LightningModule):
         logits = torch.argmax(logits, dim=1, keepdim=True)
         y_float = y.float()
         logger.info(f"y_float {y_float.shape}")
-        logger.info(f"y_long {y_long.shape}")
+#        logger.info(f"y_long {y_long.shape}")
         logger.info(f"logits {logits.shape}")
         # --- Main loss ---
-        try:
-            main_loss = self.loss(logits, y_long) + self.ce_loss(logits, y_long)
-        except ValueError, Exception:
-            # Si self.ce_loss attend un float (comme JaccardLoss)
-            main_loss = self.loss(logits, y_float) + self.ce_loss(logits, y_float)
+        main_loss = self.loss(logits, y_float) + self.ce_loss(logits, y_float)
+ 
+        #try:
+        #    main_loss = self.loss(logits, y_long) + self.ce_loss(logits, y_long)
+        #except ValueError, Exception:
+        #    # Si self.ce_loss attend un float (comme JaccardLoss)
+        #    main_loss = self.loss(logits, y_float) + self.ce_loss(logits, y_float)
         return x_pre, x_post, y_long, logits, main_loss, batch_size
 
     def _log_visualizations(  # noqa: PLR0913
