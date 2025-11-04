@@ -406,8 +406,14 @@ class ChangeDetectionChangeFormer(LightningModule):
         x_pre, x_post = batch["image_pre"], batch["image_post"]
         y = batch["mask"]
         batch_size = x_post.shape[0]
-        y_long = y.squeeze(1).long()
-        y_float = y.unsqueeze(1).float()
+        if y.dim() == 3:
+            y_float = y.unsqueeze(1).float()
+            y_long = y.long()
+        elif y.dim() == 4 and y.shape[1] == 1:
+            y_float = y.float()
+            y_long = y.squeeze(1).long()
+        else:
+            raise ValueError(f"Unexpected mask shape: {y.shape}")
 
         logits = self(x_pre, x_post)
 
