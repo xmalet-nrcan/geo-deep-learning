@@ -353,6 +353,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         x_pre, x_post, y,one_hot, y_hat, loss, batch_size = self._forward_and_get_loss(batch)
 
         metrics = self.iou_classwise_metric(y_hat, one_hot)
+
         metrics["test_loss"] = loss
 
         if self._total_samples_visualized < self.max_samples:
@@ -392,14 +393,11 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         logits = self(x_pre, x_post)
         y_float = y.float()
-        logger.info(f"y_float {y_float.shape}")
-#        logger.info(f"y_long {y_long.shape}")
-        logger.info(f"logits {logits.shape}")
+
 
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
         one_hot = torch.nn.functional.one_hot(y_one_hot.long(), num_classes=self.num_classes+1 if self.num_classes==1 else self.num_classes)
         one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
-        logger.info(f"one_hot {one_hot.shape}")
 
         # --- Main loss ---
         main_loss = self.loss(logits.contiguous(),one_hot) + self.ce_loss(logits.contiguous(), one_hot)
@@ -456,7 +454,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 fig = visualize_prediction(
                     image=image,
                     mask=mask_batch[i],
-                    prediction=torch.argmax(outputs[i], dim=1, keepdim=True),
+                    prediction=torch.argmax(outputs[i], dim=1),
                     sample_name=image_name,
                     num_classes=self.num_classes,
                     class_colors=self.class_colors,
