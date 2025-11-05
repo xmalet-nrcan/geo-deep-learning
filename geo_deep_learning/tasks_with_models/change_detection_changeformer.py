@@ -285,8 +285,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> Tensor:
         """Run training step."""
-        x_pre, x_post, y, logits, loss, batch_size = self._forward_and_get_loss(batch)
-
+        x_pre, x_post, y,one_hot,  logits, loss, batch_size = self._forward_and_get_loss(batch)
         # --- Logging ---
         self.log(
             "train_loss",
@@ -301,12 +300,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Calcul des métriques différé (pour éviter de casser autograd) ---
         with torch.no_grad():
             # On accumule les prédictions pour calculer les métriques à la fin
-            self.train_iou.update(logits, y)
+            self.train_iou.update(logits, one_hot)
 
-            self.train_f1.update(logits, y)
+            self.train_f1.update(logits, one_hot)
             self.log(
                 "train_iou_step",
-                self.train_iou(logits, y),
+                self.train_iou(logits, one_hot),
                 prog_bar=False,
                 on_step=True,
                 on_epoch=False,
@@ -322,7 +321,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> Tensor:
         """Run validation step."""
-        x_pre, x_post, y, y_hat, loss, batch_size = self._forward_and_get_loss(batch)
+        x_pre, x_post, y,one_hot,  y_hat, loss, batch_size = self._forward_and_get_loss(batch)
 
         self.log(
             "val_loss",
@@ -337,8 +336,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         )
 
 
-        self.val_iou(y_hat, y)
-        self.val_f1(y_hat, y)
+        self.val_iou(y_hat, one_hot)
+        self.val_f1(y_hat, one_hot)
 
         self.log("val_iou", self.val_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("val_f1", self.val_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -351,9 +350,9 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> None:
         """Run test step."""
-        x_pre, x_post, y, y_hat, loss, batch_size = self._forward_and_get_loss(batch)
+        x_pre, x_post, y,one_hot, y_hat, loss, batch_size = self._forward_and_get_loss(batch)
 
-        metrics = self.iou_classwise_metric(y_hat, y)
+        metrics = self.iou_classwise_metric(y_hat, one_hot)
         metrics["test_loss"] = loss
 
         if self._total_samples_visualized < self.max_samples:
@@ -379,18 +378,14 @@ class ChangeDetectionChangeFormer(LightningModule):
             rank_zero_only=False,
         )
 
-        if self.num_classes == 1:
-            preds = (y_hat.sigmoid().squeeze(1) > self.threshold).long()
-        else:
-            preds = y_hat.softmax(dim=1).argmax(dim=1)
-        self.test_iou(preds, y)
-        self.test_f1(preds, y)
+        self.test_iou(y_hat, one_hot)
+        self.test_f1(y_hat, one_hot)
 
         self.log("test_iou", self.test_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("test_f1", self.test_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
 
-    def _forward_and_get_loss(self,batch: dict[str, Any]) -> tuple[Any, Any, Any, Any, Any, Any]:
+    def _forward_and_get_loss(self,batch: dict[str, Any]) -> tuple[Any, Any,Any,  Any, Any, Any, Any]:
         x_pre, x_post = batch["image_pre"], batch["image_post"]
         y = batch["mask"]
         batch_size = x_post.shape[0]
@@ -400,15 +395,21 @@ class ChangeDetectionChangeFormer(LightningModule):
         logger.info(f"y_float {y_float.shape}")
 #        logger.info(f"y_long {y_long.shape}")
         logger.info(f"logits {logits.shape}")
+
+        y_one_hot = y.squeeze(1) if y.dim() == 4 else y
+        one_hot = torch.nn.functional.one_hot(y_one_hot.long(), num_classes=self.num_classes+1 if self.num_classes==1 else self.num_classes)
+        one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
+        logger.info(f"one_hot {one_hot.shape}")
+
         # --- Main loss ---
-        main_loss = self.loss(logits.contiguous(), y_float.contiguous()) + self.ce_loss(logits.contiguous(), y_float.contiguous())
+        main_loss = self.loss(logits.contiguous(),one_hot) + self.ce_loss(logits.contiguous(), one_hot)
  
         #try:
         #    main_loss = self.loss(logits, y_long) + self.ce_loss(logits, y_long)
         #except ValueError, Exception:
         #    # Si self.ce_loss attend un float (comme JaccardLoss)
         #    main_loss = self.loss(logits, y_float) + self.ce_loss(logits, y_float)
-        return x_pre, x_post, y_float, logits, main_loss, batch_size
+        return x_pre, x_post, y_float,one_hot, logits, main_loss, batch_size
 
     def _log_visualizations(  # noqa: PLR0913
             self,
