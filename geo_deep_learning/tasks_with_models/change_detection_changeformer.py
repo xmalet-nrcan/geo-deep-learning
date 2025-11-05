@@ -14,6 +14,8 @@ from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.loggers import  TensorBoardLogger
 from segmentation_models_pytorch.utils.losses import BCEWithLogitsLoss
+from segmentation_models_pytorch.losses import FocalLoss
+
 from torch import Tensor
 from torchmetrics import JaccardIndex, F1Score
 from torchmetrics.classification import BinaryJaccardIndex
@@ -121,7 +123,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         )
         self._total_samples_visualized = 0
 
-        self.ce_loss = BCEWithLogitsLoss()
+        self.ce_loss = FocalLoss(mode='binary')
         num_classes = self.num_classes if self.num_classes > 1 else 2
         task_type = "multiclass" if num_classes > 2 else "binary"
         if num_classes == 2:
@@ -394,20 +396,19 @@ class ChangeDetectionChangeFormer(LightningModule):
         batch_size = x_post.shape[0]
 
         logits = self(x_pre, x_post)
-        logits = torch.argmax(logits, dim=1, keepdim=True)
         y_float = y.float()
         logger.info(f"y_float {y_float.shape}")
 #        logger.info(f"y_long {y_long.shape}")
         logger.info(f"logits {logits.shape}")
         # --- Main loss ---
-        main_loss = self.loss(logits, y_float) + self.ce_loss(logits, y_float)
+        main_loss = self.loss(logits.contiguous(), y_float.contiguous()) + self.ce_loss(logits.contiguous(), y_float.contiguous())
  
         #try:
         #    main_loss = self.loss(logits, y_long) + self.ce_loss(logits, y_long)
         #except ValueError, Exception:
         #    # Si self.ce_loss attend un float (comme JaccardLoss)
         #    main_loss = self.loss(logits, y_float) + self.ce_loss(logits, y_float)
-        return x_pre, x_post, y_long, logits, main_loss, batch_size
+        return x_pre, x_post, y_float, logits, main_loss, batch_size
 
     def _log_visualizations(  # noqa: PLR0913
             self,
@@ -454,7 +455,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 fig = visualize_prediction(
                     image=image,
                     mask=mask_batch[i],
-                    prediction=outputs[i],
+                    prediction=torch.argmax(outputs[i], dim=1, keepdim=True),
                     sample_name=image_name,
                     num_classes=self.num_classes,
                     class_colors=self.class_colors,
