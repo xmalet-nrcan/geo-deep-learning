@@ -30,7 +30,7 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         verbose: True
-        patience: 30
+        patience: 15
         min_delta: 1e-3
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
@@ -41,7 +41,7 @@ trainer:
         filename: "changeformer_tversky_bce_fire-id-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
-        max_samples: 10
+        max_samples: 20
 
     - class_path: lightning.pytorch.callbacks.GradientAccumulationScheduler
       init_args:
@@ -51,7 +51,7 @@ trainer:
           60: 4    # to epoch 40, accumule 4 batchs 16*4 = 64 effective batch size
           80: 2    # to epoch 50, accumule 2 batchs 16*2 = 32 effective batch size
           100: 1    # then normal training with 16 batch size
-  max_epochs: 250
+  max_epochs: 150
 
 model:
   class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
@@ -97,7 +97,7 @@ model:
     scheduler:
       class_path: torch.optim.lr_scheduler.CosineAnnealingLR
       init_args:
-        T_max: 250  # Corresponds to the max_epochs
+        T_max: 150  # Corresponds to the max_epochs
         eta_min: 1e-6 # The minimum learning rate
     scheduler_config:
       interval: "epoch"
@@ -105,9 +105,7 @@ model:
 
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
-    weights_from_checkpoint_path: #/app/model_checkpoints/change_detection_segformer_mit_b3-A-ASC_DESC_jac_loss-epoch=62-val_loss=0.644.ckpt
-
-
+    weights_from_checkpoint_path: /app/model_checkpoints/changeformer_tversky_bce_fire-id-epoch=02-val_loss=0.550.ckpt
 
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
@@ -123,12 +121,10 @@ data:
     patches_root_folder: /mnt/data_disk/projet_RCM_scanfire
     csv_file_name: pre_post_datasets_all.csv
     #csv_file_name: pre_post_datasets.csv
-    split_ratios: [0.8, 0.1, 0.1]
-    # band_names: [ 'LOCALINCANGLE', '']
+    split_ratios: [0.8,0.1,0.1]
     # band_names: [ 'LOCALINCANGLE', 'RL','RR' ] # RCM INPUT (non-polarimetric intensity)
     band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' ] # MCHI-DECOMP ==> 5 bands
-    # band_names: null # all bands
-    #
+    # band_names: null # All Bands
     # band_names: [ 'M','RL','RR','S0','SP1','SP2','LOCALINCANGLE' ]
     # RCM bands AVAILABLE
     # -------------------
