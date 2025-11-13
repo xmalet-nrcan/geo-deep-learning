@@ -456,7 +456,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 fig = visualize_prediction(
                     image=image,
                     mask=mask_batch[i],
-                    prediction=torch.argmax(outputs[i], dim=0),
+                    prediction=torch.argmax(outputs[i], dim=1),
                     sample_name=image_name,
                     num_classes=self.num_classes,
                     class_colors=self.class_colors,
