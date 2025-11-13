@@ -127,9 +127,9 @@ class ChangeDetectionChangeFormer(LightningModule):
         num_classes = self.num_classes if self.num_classes > 1 else 2
         task_type = "multiclass" if num_classes > 2 else "binary"
         if num_classes == 2:
-            self.train_iou = BinaryJaccardIndex(threshold=0.3)
-            self.val_iou = BinaryJaccardIndex(threshold=0.3)
-            self.test_iou = BinaryJaccardIndex(threshold=0.3)
+            self.train_iou = BinaryJaccardIndex(threshold=0.5)
+            self.val_iou = BinaryJaccardIndex(threshold=0.5)
+            self.test_iou = BinaryJaccardIndex(threshold=0.5)
         else:
             self.train_iou = JaccardIndex(task=task_type, num_classes=num_classes)
             self.val_iou = JaccardIndex(task=task_type, num_classes=num_classes)
@@ -312,6 +312,9 @@ class ChangeDetectionChangeFormer(LightningModule):
                 sync_dist=False,
             )
 
+            self.log("train_iou", self.train_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.log("train_f1", self.train_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+
         return loss
 
     # TODO : Modifier pour avoir image pre/post
@@ -351,8 +354,11 @@ class ChangeDetectionChangeFormer(LightningModule):
     ) -> None:
         """Run test step."""
         x_pre, x_post, y,one_hot, y_hat, loss, batch_size = self._forward_and_get_loss(batch)
+        # Convert logits to class predictions
+        y_pred = torch.argmax(y_hat, dim=1)
+        y_true = torch.argmax(one_hot, dim=1)
 
-        metrics = self.iou_classwise_metric(y_hat, one_hot)
+        metrics = self.iou_classwise_metric(y_pred, y_true)
 
         metrics["test_loss"] = loss
 
@@ -402,11 +408,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Main loss ---
         main_loss = self.loss(logits.contiguous(),one_hot) + self.ce_loss(logits.contiguous(), one_hot)
  
-        #try:
-        #    main_loss = self.loss(logits, y_long) + self.ce_loss(logits, y_long)
-        #except ValueError, Exception:
-        #    # Si self.ce_loss attend un float (comme JaccardLoss)
-        #    main_loss = self.loss(logits, y_float) + self.ce_loss(logits, y_float)
+
         return x_pre, x_post, y_float,one_hot, logits, main_loss, batch_size
 
     def _log_visualizations(  # noqa: PLR0913
