@@ -1,12 +1,5 @@
 seed_everything: true
 
-run_name: changeformer_tversky-focal_fire_id_cosine_warm_restarts
-csv_file_name: pre_post_datasets_all.csv
-
-paths:
-  log_dir: &log_dir ./lightning_logs
-  checkpoint_dir: &checkpoint_dir ./model_checkpoints
-  data_root: &data_root /mnt/data_disk/projet_RCM_scanfire
 
 trainer:
   accelerator: "gpu"
@@ -24,8 +17,8 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
-      save_dir: *log_dir
-      name: ${run_name}
+      save_dir: &log_dir ./lightning_logs
+      name: &run_name changeformer_tversky-focal_fire_id_cosine_warm_restarts
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -43,7 +36,7 @@ trainer:
         min_delta: 1e-3
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: *checkpoint_dir
+        dirpath: &checkpoint_dir ./model_checkpoints
         monitor: "val_loss"
         mode: "min"
         save_top_k: 10
@@ -124,9 +117,9 @@ data:
     - 256
     - 256
     split_on_columns: db_nbac_fire_id
-    csv_root_folder: *data_root
+    csv_root_folder: &data_root /mnt/data_disk/projet_RCM_scanfire
     patches_root_folder: *data_root
-    csv_file_name: ${csv_file_name}
+    csv_file_name:  pre_post_datasets_all.csv
     #csv_file_name: pre_post_datasets.csv
     split_ratios: [0.8,0.1,0.1]
     # band_names: [ 'LOCALINCANGLE', 'RL','RR' ] # RCM INPUT (non-polarimetric intensity)
