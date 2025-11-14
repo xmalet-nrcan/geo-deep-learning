@@ -16,7 +16,7 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: ./lightning_logs
-      name: change_former_tversky-bce_fire_id
+      name: change_former_tversky-focal_fire_id
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -38,7 +38,7 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         save_top_k: 10
-        filename: "changeformer_tversky_bce_fire-id-{epoch:02d}-{val_loss:.3f}"
+        filename: "changeformer_tversky-focal_fire-id-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 20
@@ -75,25 +75,12 @@ model:
         #eps: 1e-6
         alpha: 0.3
         beta: 0.7
-        gamma: 0.75
+        gamma: 1.5
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
-        lr: 1e-4
+        lr: 6e-5
         weight_decay: 0.01
-    #    scheduler:
-    #      class_path: torch.optim.lr_scheduler.ReduceLROnPlateau
-    #      init_args:
-    #        mode: "min"
-    #        threshold: 1e-4
-    #        factor: 0.5
-    #        patience: 15
-    #        cooldown: 1
-    #        min_lr: 6e-8
-    #    scheduler_config:
-    #      interval: "epoch"
-    #      frequency: 1
-    #      monitor: "val_loss"
     scheduler:
       class_path: torch.optim.lr_scheduler.CosineAnnealingLR
       init_args:
@@ -105,13 +92,13 @@ model:
 
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
-    weights_from_checkpoint_path: /app/model_checkpoints/changeformer_tversky_bce_fire-id-epoch=02-val_loss=0.550.ckpt
+    weights_from_checkpoint_path: # /app/model_checkpoints/changeformer_tversky_bce_fire-id-epoch=02-val_loss=0.550.ckpt
 
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
   init_args:
     batch_size: 16
-    num_workers: 10
+    num_workers: 20
     data_type_max: 1
     patch_size:
     - 256
