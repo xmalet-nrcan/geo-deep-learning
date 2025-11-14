@@ -20,3 +20,4 @@ hydra-core
 hydra-colorlog
 tensorboard
 tensorboardX
+rich

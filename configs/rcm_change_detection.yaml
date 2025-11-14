@@ -10,8 +10,9 @@ trainer:
 #      gradient_as_bucket_view: true
 #      static_graph: true
   gradient_clip_val: 1.0
-  precision: "16-mixed"
+  precision: "bf16-mixed"
   sync_batchnorm: true
+  gradient_clip_algorithm: "norm"
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
@@ -42,7 +43,15 @@ trainer:
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 20
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: "epoch"
+#    - class_path: lightning.pytorch.callbacks.RichProgressBar
 
+    - class_path: lightning.pytorch.callbacks.StochasticWeightAveraging
+      init_args:
+        swa_lrs: 1e-5
+        annealing_epochs: 10
     - class_path: lightning.pytorch.callbacks.GradientAccumulationScheduler
       init_args:
         scheduling:
@@ -52,6 +61,7 @@ trainer:
           80: 2    # to epoch 50, accumule 2 batchs 16*2 = 32 effective batch size
           100: 1    # then normal training with 16 batch size
   max_epochs: 150
+  check_val_every_n_epoch: 1
 
 model:
   class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
@@ -75,7 +85,7 @@ model:
         #eps: 1e-6
         alpha: 0.3
         beta: 0.7
-        gamma: 1.5
+        gamma: 0.7
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
@@ -84,12 +94,12 @@ model:
     scheduler:
       class_path: torch.optim.lr_scheduler.CosineAnnealingLR
       init_args:
-        T_max: 150  # Corresponds to the max_epochs
-        eta_min: 1e-6 # The minimum learning rate
+        T_max: 150
+        eta_min: 1e-6
     scheduler_config:
       interval: "epoch"
       frequency: 1
-
+    
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
     weights_from_checkpoint_path: # /app/model_checkpoints/changeformer_tversky_bce_fire-id-epoch=02-val_loss=0.550.ckpt
