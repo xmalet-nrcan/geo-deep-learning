@@ -127,9 +127,9 @@ class ChangeDetectionChangeFormer(LightningModule):
         num_classes = self.num_classes if self.num_classes > 1 else 2
         task_type = "multiclass" if num_classes > 2 else "binary"
         if num_classes == 2:
-            self.train_iou = BinaryJaccardIndex(threshold=0.5)
-            self.val_iou = BinaryJaccardIndex(threshold=0.5)
-            self.test_iou = BinaryJaccardIndex(threshold=0.5)
+            self.train_iou = BinaryJaccardIndex(threshold=0.3)
+            self.val_iou = BinaryJaccardIndex(threshold=0.3)
+            self.test_iou = BinaryJaccardIndex(threshold=0.3)
         else:
             self.train_iou = JaccardIndex(task=task_type, num_classes=num_classes)
             self.val_iou = JaccardIndex(task=task_type, num_classes=num_classes)
