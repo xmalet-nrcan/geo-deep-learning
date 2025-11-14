@@ -1,5 +1,13 @@
 seed_everything: true
 
+run_name: changeformer_tversky-focal_fire_id_cosine_warm_restarts
+csv_file_name: pre_post_datasets_all.csv
+
+paths:
+  log_dir: &log_dir ./lightning_logs
+  checkpoint_dir: &checkpoint_dir ./model_checkpoints
+  data_root: &data_root /mnt/data_disk/projet_RCM_scanfire
+
 trainer:
   accelerator: "gpu"
   devices: -1
@@ -16,8 +24,8 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
-      save_dir: ./lightning_logs
-      name: change_former_tversky-focal_fire_id
+      save_dir: *log_dir
+      name: ${run_name}
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -35,11 +43,11 @@ trainer:
         min_delta: 1e-3
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: "./model_checkpoints"
+        dirpath: *checkpoint_dir
         monitor: "val_loss"
         mode: "min"
         save_top_k: 10
-        filename: "changeformer_tversky-focal_fire-id-{epoch:02d}-{val_loss:.3f}"
+        filename: "${run_name}-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 20
@@ -92,9 +100,11 @@ model:
         lr: 6e-5
         weight_decay: 0.01
     scheduler:
-      class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
       init_args:
-        T_max: 150
+        #T_max: 150
+        T_0: 5
+        T_mult: 2
         eta_min: 1e-6
     scheduler_config:
       interval: "epoch"
@@ -114,9 +124,9 @@ data:
     - 256
     - 256
     split_on_columns: db_nbac_fire_id
-    csv_root_folder: /mnt/data_disk/projet_RCM_scanfire
-    patches_root_folder: /mnt/data_disk/projet_RCM_scanfire
-    csv_file_name: pre_post_datasets_all.csv
+    csv_root_folder: *data_root
+    patches_root_folder: *data_root
+    csv_file_name: ${csv_file_name}
     #csv_file_name: pre_post_datasets.csv
     split_ratios: [0.8,0.1,0.1]
     # band_names: [ 'LOCALINCANGLE', 'RL','RR' ] # RCM INPUT (non-polarimetric intensity)
