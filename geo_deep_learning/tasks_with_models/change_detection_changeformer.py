@@ -111,21 +111,37 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.threshold = 0.5
 
         self.changed_num_classes = num_classes + 1 if num_classes == 1 else num_classes
-        self.iou_metric = MeanIoU(
-            num_classes=self.changed_num_classes,
-            per_class=True,
-            input_format="index",
-            include_background=True,
-        )
         self.labels = (
             [str(i) for i in range(self.changed_num_classes)]
             if class_labels is None
             else class_labels
         )
-        self.iou_classwise_metric = ClasswiseWrapper(
-            self.iou_metric,
+        # ----- Validation -----
+        self.val_iou_metric = MeanIoU(
+            num_classes=self.changed_num_classes,
+            per_class=True,
+            input_format="index",
+            include_background=True,
+        )
+
+        self.val_iou_classwise = ClasswiseWrapper(
+            self.val_iou_metric,
             labels=self.labels,
         )
+
+        # ----- Test -----
+        self.test_iou_metric = MeanIoU(
+            num_classes=self.changed_num_classes,
+            per_class=True,
+            input_format="index",
+            include_background=True,
+        )
+
+        self.test_iou_classwise = ClasswiseWrapper(
+            self.test_iou_metric,
+            labels=self.labels,
+        )
+
         self._total_samples_visualized = 0
 
         num_classes = self.num_classes if self.num_classes > 1 else 2
@@ -274,7 +290,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> Tensor:
         """Run training step."""
-        x_pre, x_post, y,one_hot,  logits, loss, batch_size = self._forward_and_get_loss(batch)
+        x_pre, x_post, y,one_hot,  logits, loss,main_loss, ce_loss,  batch_size = self._forward_and_get_loss(batch)
         # --- Logging ---
         self.log(
             "train_loss",
@@ -286,6 +302,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             on_epoch=True,
             sync_dist=True,
         )
+
+        self.log("loss_bce", main_loss, on_epoch=True, sync_dist=True)
+        self.log("loss_focal", ce_loss, on_epoch=True, sync_dist=True)
+
         # --- Calcul des métriques différé (pour éviter de casser autograd) ---
         with torch.no_grad():
             # On accumule les prédictions pour calculer les métriques à la fin
@@ -311,7 +331,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> Tensor:
         """Run validation step."""
-        x_pre, x_post, y,one_hot,  y_hat, loss, batch_size = self._forward_and_get_loss(batch)
+        x_pre, x_post, y,one_hot,  logits, loss,main_loss, ce_loss,  batch_size = self._forward_and_get_loss(batch)
 
         self.log(
             "val_loss",
@@ -324,15 +344,32 @@ class ChangeDetectionChangeFormer(LightningModule):
             sync_dist=True,
             rank_zero_only=True,
         )
+        with torch.no_grad():
+            y_pred = torch.argmax(logits, dim=1)
+            y_true = torch.argmax(one_hot, dim=1)
+            self.val_iou_classwise.update(y_pred, y_true)
 
-
-        self.val_iou(y_hat, one_hot)
-        self.val_f1(y_hat, one_hot)
+        self.val_iou(logits, one_hot)
+        self.val_f1(logits, one_hot)
 
         self.log("val_iou", self.val_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("val_f1", self.val_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
-        return y_hat
+        return loss
+
+
+    def on_validation_epoch_end(self):
+        classwise_iou = self.val_iou_classwise.compute()
+
+        for class_name, value in classwise_iou.items():
+            self.log(
+                f"val_iou_{class_name}",
+                value,
+                prog_bar=False,
+                sync_dist=True,
+            )
+
+        self.val_iou_classwise.reset()
 
     def test_step(
             self,
@@ -340,46 +377,66 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> None:
         """Run test step."""
-        x_pre, x_post, y,one_hot, y_hat, loss, batch_size = self._forward_and_get_loss(batch)
+        x_pre, x_post, y,one_hot,  logits, loss,main_loss, ce_loss,  batch_size = self._forward_and_get_loss(batch)
         # Convert logits to class predictions
-        y_pred = torch.argmax(y_hat, dim=1)
+        y_pred = torch.argmax(logits, dim=1)
         y_true = torch.argmax(one_hot, dim=1)
 
-        metrics = self.iou_classwise_metric(y_pred, y_true)
+        # --- Update metrics ---
+        with torch.no_grad():
+            self.test_iou_classwise.update(y_pred, y_true)
+            self.test_iou.update(logits, one_hot)
+            self.test_f1.update(logits, one_hot)
 
-        metrics["test_loss"] = loss
+        # --- Log test loss (epoch-aggregated) ---
+        self.log(
+            "test_loss",
+            loss,
+            batch_size=batch_size,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
 
+        # --- Visualisations ---
         if self._total_samples_visualized < self.max_samples:
-            remaining_samples = self.max_samples - self._total_samples_visualized
-            samples_to_visualize = min(remaining_samples, len(x_post))
-            samples_visualized = self._log_visualizations(
+            remaining = self.max_samples - self._total_samples_visualized
+            samples_to_visualize = min(remaining, len(x_post))
+
+            self._total_samples_visualized += self._log_visualizations(
                 trainer=self.trainer,
                 batch=batch,
-                outputs=y_hat,
+                outputs=logits,
                 max_samples=samples_to_visualize,
                 artifact_prefix="test",
                 epoch_suffix=False,
             )
-            self._total_samples_visualized += samples_visualized
-        self.log_dict(
-            metrics,
-            batch_size=batch_size,
-            prog_bar=False,
-            logger=True,
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-            rank_zero_only=False,
-        )
 
-        self.test_iou(y_hat, one_hot)
-        self.test_f1(y_hat, one_hot)
+    def on_test_epoch_end(self):
+        # --- Classwise IoU ---
+        classwise_metrics = self.test_iou_classwise.compute()
+        for class_name, value in classwise_metrics.items():
+            self.log(
+                f"test_iou_{class_name}",
+                value,
+                prog_bar=False,
+                sync_dist=True,
+            )
 
-        self.log("test_iou", self.test_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("test_f1", self.test_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        # --- Global metrics ---
+        self.log("test_iou", self.test_iou.compute(), prog_bar=True, sync_dist=True)
+        self.log("test_f1", self.test_f1.compute(), prog_bar=True, sync_dist=True)
+
+        # --- Reset metrics ---
+        self.test_iou_classwise.reset()
+        self.test_iou.reset()
+        self.test_f1.reset()
 
 
-    def _forward_and_get_loss(self,batch: dict[str, Any]) -> tuple[Any, Any,Any,  Any, Any, Any, Any]:
+
+
+    def _forward_and_get_loss(self,batch: dict[str, Any]) -> tuple[
+        Any, Any, Any, Tensor, Any, float | Any, Any, Any, Any]:
         x_pre, x_post = batch["image_pre"], batch["image_post"]
         y = batch["mask"]
         batch_size = x_post.shape[0]
@@ -398,7 +455,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         loss = self.main_loss(logits.contiguous(), one_hot)
         main_loss = w_sl * ce_loss + w_ml * loss
 
-        return x_pre, x_post, y_float,one_hot, logits, main_loss, batch_size
+        return x_pre, x_post, y_float,one_hot, logits, main_loss, loss, ce_loss, batch_size
 
     def _log_visualizations(  # noqa: PLR0913
             self,
