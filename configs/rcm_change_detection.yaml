@@ -18,7 +18,7 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: &log_dir ./lightning_logs
-      name: &run_name changeformer_soft_bce-focal_fire_id_cosine_warm_restarts_mchi_rr_rl
+      name: &run_name changeformer_soft_bce-focal_fire_id_cosinelr__mchi_rr_rl
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -94,7 +94,7 @@ model:
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
-        lr: 5e-5
+        lr: 1e-4
         weight_decay: 0.01
         betas:
         - 0.9
