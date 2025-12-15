@@ -74,7 +74,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             num_classes: int,
             max_samples: int,
             main_loss: Callable,
-            secondary_loss: Callable = FocalLoss(mode='binary'),
+            secondary_loss: Callable,
             loss_ratio = (1.0, 1.0),
             optimizer: OptimizerCallable = torch.optim.Adam,
             scheduler: LRSchedulerCallable = torch.optim.lr_scheduler.ConstantLR,
@@ -250,22 +250,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         """Forward pass."""
         return self.model(image_pre, image_post)[-1]  # Because ChangeFormer output a list in its forward pass.
 
-    # # TODO : Modifier pour avoir image pre/post transformées
-    # def on_before_batch_transfer(
-    #         self,
-    #         batch: dict[str, Any],
-    #         dataloader_idx: int,  # noqa: ARG002
-    # ) -> dict[str, Any]:
-    #     """On before batch transfer."""
-    #     if self.trainer.training:
-    #         aug = self._apply_aug()
-    #
-    #         transformed = aug({"image_pre": batch["image_pre"],
-    #                           "image_post": batch["image_post"],
-    #                             "image": batch["image_post"],
-    #                           "mask": batch["mask"]})
-    #         batch.update(transformed)
-    #     return batch
+
 
     def on_after_batch_transfer(self, batch, dataloader_idx):
         if not self.trainer.training:
@@ -305,21 +290,20 @@ class ChangeDetectionChangeFormer(LightningModule):
         with torch.no_grad():
             # On accumule les prédictions pour calculer les métriques à la fin
             self.train_iou.update(logits, one_hot)
-
             self.train_f1.update(logits, one_hot)
-            self.log(
-                "train_iou_step",
-                self.train_iou(logits, one_hot),
-                prog_bar=False,
-                on_step=True,
-                on_epoch=False,
-                sync_dist=False,
-            )
-
-            self.log("train_iou", self.train_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-            self.log("train_f1", self.train_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
         return loss
+
+    def on_train_epoch_end(self):
+        self.log("train_iou", self.train_iou.compute(), prog_bar=True, sync_dist=True)
+        self.log("train_f1", self.train_f1.compute(), prog_bar=True, sync_dist=True)
+
+        lr = self.trainer.optimizers[0].param_groups[0]["lr"]
+        self.log("lr", lr, prog_bar=True)
+
+        self.train_iou.reset()
+        self.train_f1.reset()
+
 
     def validation_step(
             self,
