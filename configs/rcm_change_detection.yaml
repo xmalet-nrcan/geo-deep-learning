@@ -43,7 +43,7 @@ trainer:
         filename: "${trainer.logger.init_args.name}-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
-        max_samples: 20
+        max_samples: 50
     - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: "epoch"
@@ -77,44 +77,41 @@ model:
     in_channels: 11 # Should be the length of data.band_names + 4
     max_samples: 10
     num_classes: 1  # binary change detection
-    loss:
-#      class_path: segmentation_models_pytorch.losses.TverskyLoss
-#      init_args:
-#        mode: "binary"
-#        from_logits: True
-#        #smooth: 1e-6
-        #eps: 1e-6
-#        alpha: 0.3
-#        beta: 0.7
-#        gamma: 0.75
+
+    main_loss:
       class_path: segmentation_models_pytorch.losses.SoftBCEWithLogitsLoss
       init_args:
         smooth_factor: 0.05
-       # mode: "binary"
-        #from_logits: True
-        #smooth: 1e-3
-        #eps: 1e-6
-        #alpha: 0
-        #beta: 0.7
-        #gamma: 0.65
+    secondary_loss:
+      class_path: segmentation_models_pytorch.losses.FocalLoss
+      init_args:
+        mode: "binary"
+        gamma: 2.0
+        alpha: 0.25
+    loss_ratio:
+      - 0.7  # weight for the main_loss
+      - 0.3  # weight for the secondary_loss
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
-        lr: 1e-4
+        lr: 5e-5
         weight_decay: 0.01
         betas:
         - 0.9
         - 0.999
     scheduler:
-      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
+      class_path: torch.optim.lr_scheduler.CosineAnnealingLR
       init_args:
-        #T_max: 150
-        T_0: 5
-        T_mult: 2
+        T_max: 150
+        #T_0: 5
+        #T_mult: 2
         eta_min: 1e-6
     scheduler_config:
       interval: "epoch"
       frequency: 1
+      warmup_epochs: 10
+      warmup_strategy: "linear"
+
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
     weights_from_checkpoint_path: # /app/model_checkpoints/changeformer_tversky_bce_fire-id-epoch=02-val_loss=0.550.ckpt

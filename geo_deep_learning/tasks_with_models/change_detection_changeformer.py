@@ -73,7 +73,9 @@ class ChangeDetectionChangeFormer(LightningModule):
             image_size: tuple[int, int],
             num_classes: int,
             max_samples: int,
-            loss: Callable,
+            main_loss: Callable,
+            secondary_loss: Callable = FocalLoss(mode='binary'),
+            loss_ratio = (1.0, 1.0),
             optimizer: OptimizerCallable = torch.optim.Adam,
             scheduler: LRSchedulerCallable = torch.optim.lr_scheduler.ConstantLR,
             scheduler_config: dict[str, Any] | None = None,
@@ -94,7 +96,10 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.image_size = image_size
         self.max_samples = max_samples
 
-        self.loss = loss
+        self.main_loss = main_loss
+        self.secondary_loss = secondary_loss
+        self.loss_ratio = loss_ratio
+
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.scheduler_config = scheduler_config or {"interval": "epoch"}
@@ -123,7 +128,6 @@ class ChangeDetectionChangeFormer(LightningModule):
         )
         self._total_samples_visualized = 0
 
-        self.ce_loss = FocalLoss(mode='binary')
         num_classes = self.num_classes if self.num_classes > 1 else 2
         task_type = "multiclass" if num_classes > 2 else "binary"
         if num_classes == 2:
@@ -317,7 +321,6 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         return loss
 
-    # TODO : Modifier pour avoir image pre/post
     def validation_step(
             self,
             batch: dict[str, Any],
@@ -404,10 +407,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
         one_hot = torch.nn.functional.one_hot(y_one_hot.long(), num_classes=self.num_classes+1 if self.num_classes==1 else self.num_classes)
         one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
+        w_ml, w_sl = self.loss_ratio
 
         # --- Main loss ---
-        main_loss = self.loss(logits.contiguous(),one_hot) + self.ce_loss(logits.contiguous(), one_hot)
- 
+        ce_loss = self.secondary_loss(logits.contiguous(), one_hot)
+        loss = self.main_loss(logits.contiguous(), one_hot)
+        main_loss = w_sl * ce_loss + w_ml * loss
 
         return x_pre, x_post, y_float,one_hot, logits, main_loss, batch_size
 
