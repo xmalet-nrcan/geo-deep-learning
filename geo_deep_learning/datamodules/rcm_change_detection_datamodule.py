@@ -1,5 +1,6 @@
 """RcmChangeDetectionDataModule."""
-
+import logging
+from collections import defaultdict, Counter
 from typing import Any, Optional, List, Iterable
 
 import numpy as np
@@ -23,6 +24,13 @@ bands_stats = {
             9901.0, 9999.0]
     }
 
+logger = logging.getLogger(__name__)
+ch = logging.StreamHandler()
+ch.setLevel(logging.DEBUG)
+formatter = logging.Formatter('[%(asctime)s - %(name)s - [%(levelname)s] ] - %(message)s')
+ch.setFormatter(formatter)
+logger.addHandler(ch)
+logger.setLevel(logging.DEBUG)
 
 class RcmChangeDetectionDataModule(LightningDataModule):
     """RCM Change Detection DataModule."""
@@ -42,7 +50,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             satellite_pass: Optional[str | SatellitePass] = None,
             beams: Optional[List[str]] = None,
             split_ratios=(0.70, 0.15, 0.15),
-            split_on_columns: Optional[str] = None,
+            split_on_columns: Optional[str | Iterable] = None,
             data_type_max: Optional[int] = None,
 
     ) -> None:
@@ -71,7 +79,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         elif isinstance(split_on_columns, str):
             self._split_on_columns = split_on_columns
         elif isinstance(split_on_columns, Iterable):
-            self._split_on_columns = list(split_on_columns)[0]
+            self._split_on_columns = list(split_on_columns)
 
     def setup(self, stage: str | None = None) -> None:  # noqa: ARG002
         """Create dataset."""
@@ -90,60 +98,74 @@ class RcmChangeDetectionDataModule(LightningDataModule):
 
     def _split_by_column(self, column_name, split_ratios=(0.7, 0.15, 0.15), seed=42):
         """
-        Split dataset by unique values in a specified column, while trying to respect sample count ratios.
-
-        This method ensures that all samples belonging to a unique value in `column_name`
-        are assigned to the same subset (train, val, or test). It uses a greedy approach
-        to distribute these unique values among the subsets in a way that the total number
-        of samples in each subset is as close as possible to the desired `split_ratios`.
-        The process is randomized but reproducible using the provided seed.
+        Split the dataset by unique values in `column_name`, ensuring that all samples
+        sharing the same value are placed in the same subset.
+        Uses a round-robin assignment strategy while approximately respecting ratio targets.
         """
-        # 1. Count samples per unique value in the specified column
-        value_counts = {}
-        for sample in self.dataset.files:
-            value = sample[column_name]
-            value_counts[value] = value_counts.get(value, 0) + 1
+        assert abs(sum(split_ratios) - 1.0) < 1e-6, "Ratios must sum to 1."
+        is_multi = isinstance(column_name, (list, tuple))
 
-        # 2. Get unique values and shuffle them for random assignment
-        unique_values = list(value_counts.keys())
+        # Count samples per unique group and gather indices per group ---
+        value_counts = defaultdict(int)
+        value_indices = defaultdict(list)
+        for i, sample in enumerate(self.dataset.files):
+            key = tuple(sample[col] for col in column_name) if is_multi else sample[column_name]
+            value_counts[key] += 1
+            value_indices[key].append(i)
+
+        # # Shuffle groups randomly for fair distribution ---
         rng = np.random.default_rng(seed)
+        unique_values = list(value_counts.keys())
         rng.shuffle(unique_values)
 
-        # 3. Initialize subsets and their target sample counts
-        total_samples = len(self.dataset.files)
-        train_target = total_samples * split_ratios[0]
-        val_target = total_samples * split_ratios[1]
+        # Initialize split containers and targets ---
+        total = len(self.dataset.files)
+        ratios = dict(zip(["train", "test", "val"], split_ratios))
+        splits = {
+            name: {"target": ratios[name] * total,
+                   "count": 0,
+                   "indices": []}
+            for name in ratios
+        }
+        cycle = list(ratios.keys())
+        idx = 0
 
-        train_values, val_values, test_values = set(), set(), set()
-        train_count, val_count, test_count = 0, 0, 0
-
-        # 4. Greedily assign each unique value group to a subset
+        # Round-robin assignment with target constraints ---
         for value in unique_values:
             count = value_counts[value]
-            # Assign to the subset that is most 'under-filled' relative to its target
-            if train_count < train_target:
-                train_values.add(value)
-                train_count += count
-            elif val_count < val_target:
-                val_values.add(value)
-                val_count += count
-            else:
-                test_values.add(value)
-                test_count += count
+            assigned = False
+            attempts = 0
+            group_indices = value_indices[value]
 
-        # 5. Create index lists for each subset
-        train_indices, val_indices, test_indices = [], [], []
-        for i, sample in enumerate(self.dataset.files):
-            value = sample[column_name]
-            if value in train_values:
-                train_indices.append(i)
-            elif value in val_values:
-                val_indices.append(i)
-            else:
-                test_indices.append(i)
+            while not assigned and attempts < len(cycle):
+                name = cycle[idx % len(cycle)]
+                if splits[name]["count"] + count <= splits[name]["target"]:
+                    splits[name]["count"] += count
+                    splits[name]["indices"].extend(group_indices)
+                    assigned = True
+                else:
+                    idx += 1
+                    attempts += 1
 
-        return Subset(self.dataset, train_indices), Subset(self.dataset, val_indices), Subset(self.dataset,
-                                                                                              test_indices)
+            if not assigned:
+                # Toutes pleines : on ajoute au plus petit split actuel
+                name = min(splits, key=lambda k: splits[k]["count"])
+                splits[name]["indices"].extend(group_indices)
+                splits[name]["count"] += count
+
+            idx += 1  # passe au subset suivant
+
+        # Log final subset statistics ---
+        for name in cycle:
+            pct = splits[name]["count"] / total
+            logger.debug(f"{name.capitalize():<5}: {splits[name]['count']} ({pct:.2%})")
+
+        # Return the dataset subsets ---
+        return (
+            Subset(self.dataset, splits["train"]["indices"]),
+            Subset(self.dataset, splits["val"]["indices"]),
+            Subset(self.dataset, splits["test"]["indices"]),
+        )
 
     def _set_train_test_val_datasets(self):
         if self._split_on_columns is not None:
@@ -206,15 +228,48 @@ if __name__ == "__main__":
         patch_size=(256, 256),
         band_names=['M', 'RL', 'RR', 'S0'],
         beams=['A'],
-        split_on_columns='cell_id')
+        split_on_columns=['db_nbac_fire_id'],
+    split_ratios=(0.8, 0.1, 0.1))
     dataset.setup()
 
-    tdl = dataset.train_dataloader()
-    val = dataset.val_dataloader()
-    test = dataset.test_dataloader()
+    tdl = dataset.train_dataset
+    val = dataset.val_dataset
+    test = dataset.test_dataset
 
-    print(len(tdl.dataset))
-    print(len(val.dataset))
-    print(len(test.dataset))
 
-    # print(f"mean:{dataset.mean}, std:{dataset.std}")
+    print(f"Final split counts: "
+          f"train={len(tdl)} ({len(tdl) / len(dataset.dataset.files):.2%}), "
+          f"val={len(val)} ({len(val) / len(dataset.dataset.files):.2%}), "
+          f"test={len(test)} ({len(test) / len(dataset.dataset.files):.2%})")
+
+    print("cells, fires, group_pre, group_post")
+
+    for n, d in (['train', tdl], ['val', val], ['test', test]):
+        cells, fires, group_pre, group_post = set(), set(), set(), set()
+        print("creating for ", n)
+        for i in d:
+            cells.add(i['cell_id'])
+            fires.add(i['db_nbac_fire_id'])
+            group_pre.add(i['group_id_pre'])
+            group_post.add(i['group_id_post'])
+        print(f"{len(cells)}, {len(fires)}, {len(group_pre)}, {len(group_post)}")
+        with open(f'C:\\Users\\xmalet\\PycharmProjects\\geo-deep-learning\\data\\{n}_cells.txt', 'w') as f:
+            f.write('"cell_id" in (')
+            for c in cells:
+                f.write(f"'{str(c)}'" + ', ')
+            f.write(")")
+        with open(f'C:\\Users\\xmalet\\PycharmProjects\\geo-deep-learning\\data\\{n}_fires.txt', 'w') as f:
+            f.write('"db_nbac_fire_id" in (')
+            for c in fires:
+                f.write(str(c) + ', ')
+            f.write(')')
+        with open(f'C:\\Users\\xmalet\\PycharmProjects\\geo-deep-learning\\data\\{n}_group_pre.txt', 'w') as f:
+            f.write('"group_id" in (')
+            for c in group_pre:
+                f.write(f"{str(c)}" + ', ')
+            f.write(')')
+        with open(f'C:\\Users\\xmalet\\PycharmProjects\\geo-deep-learning\\data\\{n}_group_post.txt', 'w') as f:
+            f.write('"group_id" in (')
+            for c in group_post:
+                f.write(f"{str(c)}" + ', ')
+            f.write(')')
