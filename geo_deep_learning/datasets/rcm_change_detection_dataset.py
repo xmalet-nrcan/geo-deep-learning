@@ -1,4 +1,5 @@
 import logging
+import re
 from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Any
@@ -256,9 +257,26 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         Tensor, bool | ndarray[tuple[Any, ...], dtype[Any]] | Any]:
         return super().convert_tif_to_tensor(in_image, in_dtype)
 
-
-
     def __getitem__(self, index: int) -> dict:
+        # Uncomment for local tests on data splits
+    #     data = self.files[index]
+    #
+    #     match = re.search(r'gid(\d+)',  data['image_pre'])
+    #     group_id_pre, group_id_post = None, None
+    #     if match:
+    #         group_id_pre = match.group(1)
+    #     match = re.search(r'gid(\d+)', data['image'])
+    #     if match:
+    #         group_id_post = match.group(1)
+    #
+    #     return {
+    #         "cell_id": data["cell_id"],
+    #         "db_nbac_fire_id": data["db_nbac_fire_id"],
+    #         "group_id_pre": group_id_pre,
+    #         "group_id_post": group_id_post,
+    #     }
+    #
+    # def __getitem2__(self, index: int) -> dict:
         """
                 Return the image and mask tensors for the given index.
 
