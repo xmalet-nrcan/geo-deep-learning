@@ -355,7 +355,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.log("val_iou", self.val_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("val_f1", self.val_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
 
-        return loss
+        return logits
 
 
     def on_validation_epoch_end(self):
