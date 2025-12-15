@@ -18,7 +18,7 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: &log_dir ./lightning_logs
-      name: &run_name changeformer_tversky-focal_fire_id_cosine_warm_restarts
+      name: &run_name changeformer_soft_bce-focal_fire_id_cosine_warm_restarts_mchi_rr_rl
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -39,8 +39,8 @@ trainer:
         dirpath: &checkpoint_dir ./model_checkpoints
         monitor: "val_loss"
         mode: "min"
-        save_top_k: 10
-        filename: "${run_name}-{epoch:02d}-{val_loss:.3f}"
+        save_top_k: 5
+        filename: "${trainer.logger.init_args.name}-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 20
@@ -51,8 +51,8 @@ trainer:
 
     - class_path: lightning.pytorch.callbacks.StochasticWeightAveraging
       init_args:
-        swa_lrs: 1e-5
-        annealing_epochs: 10
+        swa_lrs: 1e-3
+        annealing_epochs: 5
     - class_path: lightning.pytorch.callbacks.GradientAccumulationScheduler
       init_args:
         scheduling:
@@ -74,24 +74,37 @@ model:
     # 1 for BITMASK
     # 1 for SAT_PASS encoding
     # 1 for BEAM encoding
-    in_channels: 9 # Should be the length of data.band_names + 4
+    in_channels: 11 # Should be the length of data.band_names + 4
     max_samples: 10
     num_classes: 1  # binary change detection
     loss:
-      class_path: segmentation_models_pytorch.losses.TverskyLoss
-      init_args:
-        mode: "binary"
-        from_logits: True
-        #smooth: 1e-6
+#      class_path: segmentation_models_pytorch.losses.TverskyLoss
+#      init_args:
+#        mode: "binary"
+#        from_logits: True
+#        #smooth: 1e-6
         #eps: 1e-6
-        alpha: 0.3
-        beta: 0.7
-        gamma: 0.7
+#        alpha: 0.3
+#        beta: 0.7
+#        gamma: 0.75
+      class_path: segmentation_models_pytorch.losses.SoftBCEWithLogitsLoss
+      init_args:
+        smooth_factor: 0.05
+       # mode: "binary"
+        #from_logits: True
+        #smooth: 1e-3
+        #eps: 1e-6
+        #alpha: 0
+        #beta: 0.7
+        #gamma: 0.65
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
-        lr: 6e-5
+        lr: 1e-4
         weight_decay: 0.01
+        betas:
+        - 0.9
+        - 0.999
     scheduler:
       class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
       init_args:
@@ -102,7 +115,6 @@ model:
     scheduler_config:
       interval: "epoch"
       frequency: 1
-    
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
     weights_from_checkpoint_path: # /app/model_checkpoints/changeformer_tversky_bce_fire-id-epoch=02-val_loss=0.550.ckpt
@@ -122,8 +134,8 @@ data:
     csv_file_name:  pre_post_datasets_all.csv
     #csv_file_name: pre_post_datasets.csv
     split_ratios: [0.8,0.1,0.1]
-    # band_names: [ 'LOCALINCANGLE', 'RL','RR' ] # RCM INPUT (non-polarimetric intensity)
-    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' ] # MCHI-DECOMP ==> 5 bands
+    #band_names: [ 'LOCALINCANGLE', 'RL','RR' ] # RCM INPUT (non-polarimetric intensity)
+    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0', 'RL','RR' ] # MCHI-DECOMP ==> 5 bands
     # band_names: null # All Bands
     # band_names: [ 'M','RL','RR','S0','SP1','SP2','LOCALINCANGLE' ]
     # RCM bands AVAILABLE
