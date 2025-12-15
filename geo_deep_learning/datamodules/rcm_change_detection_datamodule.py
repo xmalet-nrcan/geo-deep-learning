@@ -1,16 +1,15 @@
 """RcmChangeDetectionDataModule."""
 import logging
-from collections import defaultdict, Counter
+from collections import defaultdict
 from typing import Any, Optional, List, Iterable
 
 import numpy as np
 import torch
 import torch.utils.data as data
 from lightning.pytorch import LightningDataModule
-from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Subset
 
-from geo_deep_learning.datasets.rcm_change_detection_dataset import SatellitePass, RCMChangeDetectionDataset
+from geo_deep_learning.datasets.rcm_change_detection_dataset import RCMChangeDetectionDataset
 
 bands_stats = {
     'mean': [1.0088686544882763, 22.678325648034726, 4820.030168929148, -578.1138439754548, 174.35119966169816,
@@ -22,7 +21,7 @@ bands_stats = {
     'min': [1.0, 0.0, 446.0, -9810.0, 0.0, 81.0, 14.0, 93.0, 2.0, 2.0, 5.0, -9340.0, -9584.0, -8947.0],
     'max': [9.0, 112.0, 9985.0, 9969.0, 6358.0, 9971.0, 9553.0, 9979.0, 32766.0, 32766.0, 32766.0, 9484.0,
             9901.0, 9999.0]
-    }
+}
 
 logger = logging.getLogger(__name__)
 ch = logging.StreamHandler()
@@ -31,6 +30,7 @@ formatter = logging.Formatter('[%(asctime)s - %(name)s - [%(levelname)s] ] - %(m
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 logger.setLevel(logging.DEBUG)
+
 
 class RcmChangeDetectionDataModule(LightningDataModule):
     """RCM Change Detection DataModule."""
@@ -47,10 +47,10 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             std: list[float] | None = None,
             bands: Optional[List[int]] = None,
             band_names: Optional[List[str]] = None,
-            satellite_pass: Optional[str | SatellitePass] = None,
+            satellite_pass: Optional[str] = None,
             beams: Optional[List[str]] = None,
             split_ratios=(0.70, 0.15, 0.15),
-            split_on_columns: Optional[str | Iterable] = None,
+            split_on_columns: Optional[str | list] = None,
             data_type_max: Optional[int] = None,
 
     ) -> None:
@@ -104,6 +104,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         """
         assert abs(sum(split_ratios) - 1.0) < 1e-6, "Ratios must sum to 1."
         is_multi = isinstance(column_name, (list, tuple))
+        logger.debug(f"Is split on column multi ? : {is_multi}")
 
         # Count samples per unique group and gather indices per group ---
         value_counts = defaultdict(int)
@@ -235,7 +236,6 @@ if __name__ == "__main__":
     tdl = dataset.train_dataset
     val = dataset.val_dataset
     test = dataset.test_dataset
-
 
     print(f"Final split counts: "
           f"train={len(tdl)} ({len(tdl) / len(dataset.dataset.files):.2%}), "
