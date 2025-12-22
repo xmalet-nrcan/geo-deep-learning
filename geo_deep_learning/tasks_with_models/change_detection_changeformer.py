@@ -492,14 +492,14 @@ class ChangeDetectionChangeFormer(LightningModule):
         try:
             logger.info("Logging visualizations")
             image_batch = batch["image"]
-            batch_size = len(image_batch)
-            logger.info("Batch size: %d", batch_size)
+            c_batch_size = len(image_batch)
+            logger.info("Batch size: %d", c_batch_size)
             mask_batch = batch["mask"].squeeze(1).long()
             batch_image_name = batch["pre_post_name"]
-            num_samples = min(max_samples, batch_size)
+            num_samples = min(max_samples, c_batch_size)
             for i in range(num_samples):
                 image = image_batch[i]
-                image_name = batch_image_name[i]
+                image_name = batch_image_name[i].replace('\n','')
                 # mean = mean_batch[i]
                 # std = std_batch[i]
                 # image = denormalization(image, mean=mean, std=std)
