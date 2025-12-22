@@ -173,7 +173,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 align_corners=True,
                 keepdim=True,
             ),
-            data_keys=["image_pre", "image_post", "image", "mask", "common_data_mask"], )
+            data_keys=None, )
 
     def on_before_batch_transfer(
             self,
@@ -184,12 +184,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
                                                             pad_mode='constant', pad_value=0,
                                                             keepdim=False),
-                                     data_keys=["image_pre", "image_post", "image", "mask", "common_data_mask"])
+                                     data_keys=None)
         transformed = aug({"image_pre": batch["image_pre"],
                            "image_post": batch["image_post"],
                            "image": batch["image_post"],
                            "mask": batch["mask"],
-                           "common_data_mask": batch["common_data_mask"]})
+                           "mask_common": batch["common_data_mask"]})
         batch.update(transformed)
         return batch
 
@@ -282,8 +282,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                            "image_post": batch["image_post"],
                            "image": batch["image_post"],
                            "mask": batch["mask"] ,
-                           "common_data_mask": batch["common_data_mask"]})
-        for key in ["image", "mask", "image_pre", "image_post", "common_data_mask"]:
+                           "mask_common": batch["common_data_mask"]})
+        for key in ["image", "mask", "image_pre", "image_post", "mask_common"]:
             if key in transformed:
                 batch[key] = transformed[key].to(device, non_blocking=True)
         return batch
