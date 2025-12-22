@@ -188,7 +188,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                            "mask-common": batch["mask-common"].to(torch.float32),
                            "mask": batch["mask"],
                            })
-        print(transformed['image_pre'].shape, transformed['image'].shape, transformed['mask-common'].shape, transformed['mask'].shape)
+        #print(transformed['image_pre'].shape, transformed['image'].shape, transformed['mask-common'].shape, transformed['mask'].shape)
         batch.update(transformed)
 
         return batch
