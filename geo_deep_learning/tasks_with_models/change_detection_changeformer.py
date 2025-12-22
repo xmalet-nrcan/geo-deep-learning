@@ -182,12 +182,19 @@ class ChangeDetectionChangeFormer(LightningModule):
                                                             pad_mode='constant', pad_value=0,
                                                             keepdim=False),
                                      data_keys=None)
+
+        print(batch.keys())
+        print(batch["image_pre"].shape, batch["image_post"].shape, batch["mask"].shape, batch["common_data_mask"].shape)
+
         transformed = aug({"image_pre": batch["image_pre"],
                            "image_post": batch["image_post"],
                            "image": batch["image_post"],
                            "mask": batch["mask"],
                            "common_data_mask": batch["common_data_mask"]})
+
         batch.update(transformed)
+        print(batch["image_pre"].shape, batch["image_post"].shape, batch["mask"].shape, batch["common_data_mask"].shape)
+
         return batch
 
     def configure_model(self) -> None:
@@ -290,7 +297,6 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> Tensor:
         """Run training step."""
-        print(batch.keys())
         x_pre, x_post, y, one_hot, logits, loss, main_loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
         # --- Logging ---
         self.log(
@@ -437,7 +443,6 @@ class ChangeDetectionChangeFormer(LightningModule):
         y = batch["mask"]
         common_data_mask = batch["common_data_mask"]
 
-        print(x_pre.shape, x_post.shape, y.shape, common_data_mask.shape)
         batch_size = x_post.shape[0]
 
         logits = self(x_pre, x_post)
