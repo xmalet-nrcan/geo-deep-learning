@@ -294,6 +294,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> Tensor:
         """Run training step."""
+        print(batch.keys())
         x_pre, x_post, y,one_hot,  logits, loss,main_loss, ce_loss,  batch_size = self._forward_and_get_loss(batch)
         # --- Logging ---
         self.log(
@@ -449,8 +450,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         logits = self(x_pre, x_post)
         y_float = y.float()
 
-        if common_data_mask.dim() == 3:
-            common_data_mask = common_data_mask.unsqueeze(1)  # (batch, 1, H, W)
+        #if common_data_mask.dim() == 3:
+        #    common_data_mask = common_data_mask.unsqueeze(1)  # (batch, 1, H, W)
 
         logits = logits.masked_fill_(~common_data_mask, 0)
 
