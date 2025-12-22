@@ -199,12 +199,16 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             df_csv[
                 ['pre_path',
                  'post_path',
+                 'group_id_pre','group_id_post'
                  'db_nbac_fire_id',
                  'cell_id',
                  'group_date_pre',
                  'group_date_post',
                  'beam',
-                 'sat_pass']].itertuples(index=False)
+                 'sat_pass',
+                 'fire_start_date',
+                 'fire_end_date']].itertuples(index=False)
+
         ]
 
     def __len__(self) -> int:
@@ -327,6 +331,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         image_profile['count'] = len(band_names)
         image_profile['crs'] = str(image_profile['crs'])
         image_profile['transform'] = list(image_profile['transform'])
+        pre_post_name = f"{data['cell_id']}_beam_{data['beam'].name}_satpass_{data['sat_pass'].name}\n({data['group_id_pre']}){data['group_date_pre']}_({data['group_id_post']}){data['group_date_post']}\nfire_id_{data['db_nbac_fire_id']}_{data['fire_start_date']}_{data['fire_end_date']}"
 
         sample = {"image": image_post,
                   "image_post": image_post,
@@ -344,7 +349,9 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                   "mean": mean,
                   "std": std,
                   "min" :mins,
-                  "max": maxs
+                  "max": maxs,
+                  "water_mask" : water_mask,
+                  "pre_post_name": pre_post_name
                   }
         return sample
 
