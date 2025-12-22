@@ -445,7 +445,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         Any, Any, Any, Tensor, Any, float | Any, Any, Any, Any]:
         x_pre, x_post = batch["image_pre"], batch["image_post"]
         y = batch["mask"]
-        common_data_mask = batch["common_data_mask"]
+        common_data_mask = batch["mask_common"]
         batch_size = x_post.shape[0]
 
         logits = self(x_pre, x_post)
