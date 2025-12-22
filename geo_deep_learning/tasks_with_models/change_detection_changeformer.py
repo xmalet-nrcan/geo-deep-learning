@@ -444,8 +444,6 @@ class ChangeDetectionChangeFormer(LightningModule):
         logits = self(x_pre, x_post)
         y_float = y.float()
 
-
-
         logits = logits * common_data_mask
 
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
@@ -505,7 +503,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 # image = denormalization(image, mean=mean, std=std)
 
                 fig = visualize_prediction(
-                    image=image,
+                    image=image[[2,3,4], :, :],
                     mask=mask_batch[i],
                     prediction=torch.argmax(outputs[i], dim=0),
                     sample_name=image_name,
@@ -540,3 +538,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             return 0
         else:
             return num_samples
+
+
+    def on_predict_end(self) -> None:
+        pass
