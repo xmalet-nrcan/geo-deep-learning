@@ -185,7 +185,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         print(batch.keys())
         print(batch["image_pre"].shape, batch["image"].shape, batch["mask"].shape, batch["common_data_mask"].shape)
-
+        print(type(batch["image_pre"]), type(batch["common_data_mask"]))
         transformed = aug({"image_pre": batch["image_pre"],
                            "common_data_mask": batch["common_data_mask"],
                            "image": batch["image_post"],
