@@ -340,7 +340,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         image_profile['count'] = len(band_names)
         image_profile['crs'] = str(image_profile['crs'])
         image_profile['transform'] = list(image_profile['transform'])
-        pre_post_name = f"{data['cell_id']}_{data['beam']}|{data['sat_pass']}\n({data['group_id_pre']}){data['group_date_pre']}_({data['group_id_post']}){data['group_date_post']}\nfire_id_{data['db_nbac_fire_id']}_{data['fire_start_date']}_{data['fire_end_date']}"
+        pre_post_name = f"{data['cell_id']}|{'ASC' if data['sat_pass'] == SatellitePass.ASCENDING else 'DESC'}-{data['beam']}|({data['group_id_pre']}){data['group_date_pre']}_({data['group_id_post']}){data['group_date_post']}|fire_({data['db_nbac_fire_id']})_{data['fire_start_date']}_{data['fire_end_date']}"
 
         sample = {"image": image_post,
                   "image_post": image_post,
