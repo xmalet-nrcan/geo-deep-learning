@@ -184,16 +184,15 @@ class ChangeDetectionChangeFormer(LightningModule):
                                      data_keys=None)
 
         print(batch.keys())
-        print(batch["image_pre"].shape, batch["image_post"].shape, batch["mask"].shape, batch["common_data_mask"].shape)
+        print(batch["image_pre"].shape, batch["image"].shape, batch["mask"].shape, batch["common_data_mask"].shape)
 
         transformed = aug({"image_pre": batch["image_pre"],
-                           "image_post": batch["image_post"],
+                           "common_data_mask": batch["common_data_mask"],
                            "image": batch["image_post"],
-                           "mask": batch["mask"],
-                           "common_data_mask": batch["common_data_mask"]})
+                           "mask": batch["mask"]})
 
         batch.update(transformed)
-        print(batch["image_pre"].shape, batch["image_post"].shape, batch["mask"].shape, batch["common_data_mask"].shape)
+        print(batch["image_pre"].shape, batch["image"].shape, batch["mask"].shape, batch["common_data_mask"].shape)
 
         return batch
 
@@ -281,11 +280,10 @@ class ChangeDetectionChangeFormer(LightningModule):
         device = batch["image"].device
 
         transformed = aug({"image_pre": batch["image_pre"],
-                           "image_post": batch["image_post"],
                            "image": batch["image_post"],
                            "mask": batch["mask"],
                            "common_data_mask": batch["common_data_mask"]})
-        for key in ["image", "mask", "image_pre", "image_post", "common_data_mask"]:
+        for key in ["image", "mask", "image_pre",  "common_data_mask"]:
             if key in transformed:
                 batch[key] = transformed[key].to(device, non_blocking=True)
         return batch
@@ -439,7 +437,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
     def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[
         Any, Any, Any, Tensor, Any, float | Any, Any, Any, Any]:
-        x_pre, x_post = batch["image_pre"], batch["image_post"]
+        x_pre, x_post = batch["image_pre"], batch["image"]
         y = batch["mask"]
         common_data_mask = batch["common_data_mask"]
 
