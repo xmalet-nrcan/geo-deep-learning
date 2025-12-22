@@ -506,7 +506,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     image=image[[2,3,4], :, :],
                     mask=mask_batch[i],
                     prediction=torch.argmax(outputs[i], dim=0),
-                    sample_name=image_name,
+                    sample_name=image_name.replace('|','\n'),
                     num_classes=self.num_classes,
                     class_colors=self.class_colors,
                 )
