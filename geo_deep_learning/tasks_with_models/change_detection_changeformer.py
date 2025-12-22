@@ -188,7 +188,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                            "image_post": batch["image_post"],
                            "image": batch["image_post"],
                            "mask": batch["mask"],
-                           "water_mask": batch["water_mask"]})
+                           "common_data_mask": batch["common_data_mask"]})
         batch.update(transformed)
         return batch
 
@@ -281,8 +281,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                            "image_post": batch["image_post"],
                            "image": batch["image_post"],
                            "mask": batch["mask"] ,
-                           "water_mask": batch["water_mask"]})
-        for key in ["image", "mask", "image_pre", "image_post", "water_mask"]:
+                           "common_data_mask": batch["common_data_mask"]})
+        for key in ["image", "mask", "image_pre", "image_post", "common_data_mask"]:
             if key in transformed:
                 batch[key] = transformed[key].to(device, non_blocking=True)
         return batch
@@ -443,17 +443,16 @@ class ChangeDetectionChangeFormer(LightningModule):
         Any, Any, Any, Tensor, Any, float | Any, Any, Any, Any]:
         x_pre, x_post = batch["image_pre"], batch["image_post"]
         y = batch["mask"]
-        water_mask = batch["water_mask"]
+        common_data_mask = batch["common_data_mask"]
         batch_size = x_post.shape[0]
 
         logits = self(x_pre, x_post)
         y_float = y.float()
 
-        if water_mask.dim() == 3:
-            water_mask = water_mask.unsqueeze(1)  # (batch, 1, H, W)
-        # On inverse le masque pour garder uniquement les pixels non-eau
-        non_water_mask = (water_mask == 0)
-        logits = logits * non_water_mask
+        if common_data_mask.dim() == 3:
+            common_data_mask = common_data_mask.unsqueeze(1)  # (batch, 1, H, W)
+
+        logits = logits.masked_fill_(~common_data_mask, 0)
 
 
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
