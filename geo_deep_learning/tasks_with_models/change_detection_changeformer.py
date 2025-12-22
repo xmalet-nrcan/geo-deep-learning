@@ -188,7 +188,6 @@ class ChangeDetectionChangeFormer(LightningModule):
                            "mask-common": batch["mask-common"].to(torch.float32),
                            "mask": batch["mask"],
                            })
-        print(transformed['image_pre'].shape, transformed['image'].shape, transformed['mask-common'].shape, transformed['mask'].shape)
         batch.update(transformed)
 
         return batch
@@ -492,11 +491,12 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         try:
             logger.info("Logging visualizations")
-            logger.info("Batch size: %d", len(batch["image"]))
             image_batch = batch["image"]
+            batch_size = len(image_batch)
+            logger.info("Batch size: %d", batch_size)
             mask_batch = batch["mask"].squeeze(1).long()
             batch_image_name = batch["pre_post_name"]
-            num_samples = min(max_samples, 10)
+            num_samples = min(max_samples, batch_size)
             for i in range(num_samples):
                 image = image_batch[i]
                 image_name = batch_image_name[i]
