@@ -173,7 +173,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 align_corners=True,
                 keepdim=True,
             ),
-            data_keys=None, )
+            data_keys=["image_pre", "image_post", "image", "mask", "common_data_mask"], )
 
     def on_before_batch_transfer(
             self,
@@ -183,7 +183,8 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
                                                             pad_mode='constant', pad_value=0,
-                                                            keepdim=False), data_keys=None)
+                                                            keepdim=False),
+                                     data_keys=["image_pre", "image_post", "image", "mask", "common_data_mask"])
         transformed = aug({"image_pre": batch["image_pre"],
                            "image_post": batch["image_post"],
                            "image": batch["image_post"],
@@ -450,8 +451,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         logits = self(x_pre, x_post)
         y_float = y.float()
 
-        #if common_data_mask.dim() == 3:
-        #    common_data_mask = common_data_mask.unsqueeze(1)  # (batch, 1, H, W)
+        # if common_data_mask.dim() == 3:
+        #     common_data_mask = common_data_mask.unsqueeze(1)  # (batch, 1, H, W)
 
         logits = logits.masked_fill_(~common_data_mask, 0)
 
