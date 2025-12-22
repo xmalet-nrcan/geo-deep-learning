@@ -199,7 +199,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             df_csv[
                 ['pre_path',
                  'post_path',
-                 'group_id_pre','group_id_post'
+                 'group_id_pre','group_id_post',
                  'db_nbac_fire_id',
                  'cell_id',
                  'group_date_pre',
