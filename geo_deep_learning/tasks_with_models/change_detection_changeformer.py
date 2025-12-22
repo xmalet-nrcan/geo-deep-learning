@@ -185,12 +185,12 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         print(batch["image_pre"].shape, batch["image"].shape, batch["mask"].shape, batch["common_data_mask"].shape)
         transformed = aug({"image_pre": batch["image_pre"],
-                           "common_data_mask": batch["common_data_mask"],
+                           "mask-common": batch["common_data_mask"].to(torch.float32),
                            "image": batch["image_post"],
                            "mask": batch["mask"]})
         batch.update(transformed)
-        print(batch["image_pre"].dtype, batch["image"].dtype, batch["mask"].dtype, batch["common_data_mask"].dtype)
-        print(batch["image_pre"].shape, batch["image"].shape, batch["mask"].shape, batch["common_data_mask"].shape)
+        print(batch["image_pre"].dtype, batch["image"].dtype, batch["mask"].dtype, batch["mask-common"].dtype)
+        print(batch["image_pre"].shape, batch["image"].shape, batch["mask"].shape, batch["mask-common"].shape)
 
         return batch
 
@@ -280,8 +280,9 @@ class ChangeDetectionChangeFormer(LightningModule):
         transformed = aug({"image_pre": batch["image_pre"],
                            "image": batch["image_post"],
                            "mask": batch["mask"],
-                           "common_data_mask": batch["common_data_mask"]})
-        for key in ["image", "mask", "image_pre",  "common_data_mask"]:
+                           "mask-common": batch["common_data_mask"].to(torch.float32),
+                           })
+        for key in ["image", "mask", "image_pre",  "mask-common"]:
             if key in transformed:
                 batch[key] = transformed[key].to(device, non_blocking=True)
         return batch
