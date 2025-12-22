@@ -183,14 +183,11 @@ class ChangeDetectionChangeFormer(LightningModule):
                                                             keepdim=False),
                                      data_keys=None)
 
-        print(batch.keys())
         print(batch["image_pre"].shape, batch["image"].shape, batch["mask"].shape, batch["common_data_mask"].shape)
-        print(type(batch["image_pre"]), type(batch["common_data_mask"]))
         transformed = aug({"image_pre": batch["image_pre"],
                            "common_data_mask": batch["common_data_mask"],
                            "image": batch["image_post"],
                            "mask": batch["mask"]})
-        print(transformed.keys())
         batch.update(transformed)
         print(batch["image_pre"].shape, batch["image"].shape, batch["mask"].shape, batch["common_data_mask"].shape)
 
@@ -449,7 +446,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         # if common_data_mask.dim() == 3:
         #     common_data_mask = common_data_mask.unsqueeze(1)  # (batch, 1, H, W)
 
-        logits = logits.masked_fill_(~common_data_mask, 0)
+        logits = logits * common_data_mask
 
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
         one_hot = torch.nn.functional.one_hot(y_one_hot.long(),
