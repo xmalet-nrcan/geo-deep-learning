@@ -186,20 +186,29 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                 "group_date_pre": group_date_pre,
                 "group_date_post": group_date_post,
                 "beam": beam,
-                "sat_pass": sat_pass
+                "sat_pass": sat_pass,
+                "group_id_pre": group_id_pre,
+                "group_id_post": group_id_post,
+                "fire_start_date": fire_start_date,
+                "fire_end_date": fire_end_date
             }
             for img_pre,
             img,
+                group_id_pre,
+            group_id_post,
             db_nbac_fire_id,
             cell_id,
             group_date_pre,
             group_date_post,
             beam,
-            sat_pass in
+            sat_pass,
+            fire_start_date,
+            fire_end_date in
             df_csv[
                 ['pre_path',
                  'post_path',
-                 'group_id_pre','group_id_post',
+                 'group_id_pre',
+                 'group_id_post',
                  'db_nbac_fire_id',
                  'cell_id',
                  'group_date_pre',
