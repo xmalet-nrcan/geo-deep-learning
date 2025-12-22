@@ -185,10 +185,12 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         transformed = aug({"image_pre": batch["image_pre"],
                            "image": batch["image"],
+                           "mask-common": batch["mask-common"].to(torch.float32),
                            "mask": batch["mask"],
-                           "mask-common": batch["common_data_mask"].to(torch.float32),
                            })
+        print(transformed['image_pre'].shape, transformed['image'].shape, transformed['mask-common'].shape, transformed['mask'].shape)
         batch.update(transformed)
+
         return batch
 
     def configure_model(self) -> None:
@@ -276,8 +278,9 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         transformed = aug({"image_pre": batch["image_pre"],
                            "image": batch["image"],
+                           "mask-common": batch["mask-common"].to(torch.float32),
                            "mask": batch["mask"],
-                           "mask-common": batch["common_data_mask"].to(torch.float32),
+
                            })
         for key in ["image_pre", "image", "mask",  "mask-common"]:
             if key in transformed:
