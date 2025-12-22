@@ -183,15 +183,12 @@ class ChangeDetectionChangeFormer(LightningModule):
                                                             keepdim=False),
                                      data_keys=None)
 
-        print(batch["image_pre"].shape, batch["image"].shape, batch["mask"].shape, batch["common_data_mask"].shape)
         transformed = aug({"image_pre": batch["image_pre"],
+                           "image": batch["image"],
+                           "mask": batch["mask"],
                            "mask-common": batch["common_data_mask"].to(torch.float32),
-                           "image": batch["image_post"],
-                           "mask": batch["mask"]})
+                           })
         batch.update(transformed)
-        print(batch["image_pre"].dtype, batch["image"].dtype, batch["mask"].dtype, batch["mask-common"].dtype)
-        print(batch["image_pre"].shape, batch["image"].shape, batch["mask"].shape, batch["mask-common"].shape)
-
         return batch
 
     def configure_model(self) -> None:
@@ -278,11 +275,11 @@ class ChangeDetectionChangeFormer(LightningModule):
         device = batch["image"].device
 
         transformed = aug({"image_pre": batch["image_pre"],
-                           "image": batch["image_post"],
+                           "image": batch["image"],
                            "mask": batch["mask"],
                            "mask-common": batch["common_data_mask"].to(torch.float32),
                            })
-        for key in ["image", "mask", "image_pre",  "mask-common"]:
+        for key in ["image_pre", "image", "mask",  "mask-common"]:
             if key in transformed:
                 batch[key] = transformed[key].to(device, non_blocking=True)
         return batch
@@ -445,8 +442,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         logits = self(x_pre, x_post)
         y_float = y.float()
 
-        # if common_data_mask.dim() == 3:
-        #     common_data_mask = common_data_mask.unsqueeze(1)  # (batch, 1, H, W)
+
 
         logits = logits * common_data_mask
 
