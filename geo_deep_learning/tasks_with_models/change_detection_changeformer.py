@@ -187,7 +187,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         transformed = aug({"image_pre": batch["image_pre"],
                            "image_post": batch["image_post"],
                            "image": batch["image_post"],
-                           "mask": batch["mask"]})
+                           "mask": batch["mask"],
+                           "water_mask": batch["water_mask"]})
         batch.update(transformed)
         return batch
 
@@ -281,7 +282,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                            "image": batch["image_post"],
                            "mask": batch["mask"] ,
                            "water_mask": batch["water_mask"]})
-        for key in ["image", "mask", "image_pre", "image_post"]:
+        for key in ["image", "mask", "image_pre", "image_post", "water_mask"]:
             if key in transformed:
                 batch[key] = transformed[key].to(device, non_blocking=True)
         return batch
@@ -500,7 +501,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             logger.info("Batch size: %d", len(batch["image"]))
             image_batch = batch["image"]
             mask_batch = batch["mask"].squeeze(1).long()
-            batch_image_name = batch["image_name"]
+            batch_image_name = batch["pre_post_name"]
             num_samples = min(max_samples, 10)
             for i in range(num_samples):
                 image = image_batch[i]
