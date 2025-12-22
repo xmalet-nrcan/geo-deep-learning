@@ -84,6 +84,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             class_colors: list[str] | None = None,
             weights_from_checkpoint_path: str | None = None,
             in_channels: int | None = None,
+            threshold:float = 0.5,
             **kwargs: object,  # noqa: ARG002
     ) -> None:
         """Initialize the model."""
@@ -108,7 +109,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.weights_from_checkpoint_path = weights_from_checkpoint_path
 
         self.class_colors = class_colors
-        self.threshold = 0.3
+        self.threshold = threshold
 
         self.changed_num_classes = num_classes + 1 if num_classes == 1 else num_classes
         self.labels = (
@@ -146,6 +147,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         num_classes = self.num_classes if self.num_classes > 1 else 2
         task_type = "multiclass" if num_classes > 2 else "binary"
+
         if num_classes == 2:
             self.train_iou = BinaryJaccardIndex(threshold=self.threshold )
             self.val_iou = BinaryJaccardIndex(threshold=self.threshold )
@@ -277,7 +279,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         transformed = aug({"image_pre": batch["image_pre"],
                            "image_post": batch["image_post"],
                            "image": batch["image_post"],
-                           "mask": batch["mask"]})
+                           "mask": batch["mask"] ,
+                           "water_mask": batch["water_mask"]})
         for key in ["image", "mask", "image_pre", "image_post"]:
             if key in transformed:
                 batch[key] = transformed[key].to(device, non_blocking=True)
@@ -439,10 +442,17 @@ class ChangeDetectionChangeFormer(LightningModule):
         Any, Any, Any, Tensor, Any, float | Any, Any, Any, Any]:
         x_pre, x_post = batch["image_pre"], batch["image_post"]
         y = batch["mask"]
+        water_mask = batch["water_mask"]
         batch_size = x_post.shape[0]
 
         logits = self(x_pre, x_post)
         y_float = y.float()
+
+        if water_mask.dim() == 3:
+            water_mask = water_mask.unsqueeze(1)  # (batch, 1, H, W)
+        # On inverse le masque pour garder uniquement les pixels non-eau
+        non_water_mask = (water_mask == 0)
+        logits = logits * non_water_mask
 
 
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
@@ -491,7 +501,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             image_batch = batch["image"]
             mask_batch = batch["mask"].squeeze(1).long()
             batch_image_name = batch["image_name"]
-            num_samples = min(max_samples, len(image_batch))
+            num_samples = min(max_samples, 10)
             for i in range(num_samples):
                 image = image_batch[i]
                 image_name = batch_image_name[i]
