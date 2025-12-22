@@ -354,7 +354,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                   "cell_id": data["cell_id"],
                   "db_nbac_fire_id": data["db_nbac_fire_id"],
                   "profile": image_profile,
-                  "common_data_mask": common_mask_tensor,
+                  "common_data_mask": common_mask_tensor.long(),
                   "mean": mean,
                   "std": std,
                   "min" :mins,
