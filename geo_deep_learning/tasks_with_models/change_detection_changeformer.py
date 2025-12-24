@@ -490,6 +490,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         try:
             logger.info("Logging visualizations")
             image_batch = batch["image"]
+            pre_image_batch = batch["image_pre"]
             c_batch_size = len(image_batch)
             logger.info("Batch size: %d", c_batch_size)
             mask_batch = batch["mask"].squeeze(1).long()
@@ -497,13 +498,15 @@ class ChangeDetectionChangeFormer(LightningModule):
             num_samples = min(max_samples, c_batch_size)
             for i in range(num_samples):
                 image = image_batch[i]
+                pre_image = pre_image_batch[i]
                 image_name = batch_image_name[i].replace('\n','')
+                image_diff = torch.abs(image - pre_image)
                 # mean = mean_batch[i]
                 # std = std_batch[i]
                 # image = denormalization(image, mean=mean, std=std)
 
                 fig = visualize_prediction(
-                    image=image[[2,3,4], :, :],
+                    image=image_diff[[2,3,4], :, :],
                     mask=mask_batch[i],
                     prediction=torch.argmax(outputs[i], dim=0),
                     sample_name=image_name,
