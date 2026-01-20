@@ -178,7 +178,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                 "image_pre": (img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip()),
                 "image": (img.replace("$ROOT_PATH", self.patches_root_folder).strip()),
                 "mask": Path(
-                    self.patches_root_folder) / cell_id / "static_data" / f"{cell_id}_nbac_{int(group_date_post[:4]) + 1}_prefire_100m.tif",
+                    self.patches_root_folder) / cell_id / "static_data" / f"{cell_id}_nbac_{int(group_date_post[:4])}_mask_unburn_burn_reject_100m.tif",
                 "water_mask": Path(
                     self.patches_root_folder) / cell_id / "static_data" / f"{cell_id}_WATER_mask_100m.tif",
                 "cell_id": cell_id,
