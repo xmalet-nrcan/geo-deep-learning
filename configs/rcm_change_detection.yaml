@@ -18,6 +18,7 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: &log_dir ./lightning_logs
+
       name: &run_name 2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
@@ -94,8 +95,8 @@ model:
         #normalized: 1
         #alpha: 0.25
     loss_ratio:
-      - 0.7  # weight for the main_loss
-      - 0.3  # weight for the secondary_loss
+      - 0.8  # weight for the main_loss
+      - 0.5  # weight for the secondary_loss
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
@@ -136,7 +137,8 @@ data:
     csv_file_name: pre_post_datasets_all_2023_2025.csv
     #csv_file_name:  pre_post_datasets_all.csv
     #csv_file_name: pre_post_datasets.csv
-    split_ratios: [0.7 ,0.15, 0.15]
+    split_ratios: [0.8 ,0.1, 0.1]
+
     #band_names: [ 'LOCALINCANGLE', 'RL','RR' ] # RCM INPUT (non-polarimetric intensity)
     band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0', 'RL','RR' ] # MCHI-DECOMP ==> 5 bands
     # band_names: null # All Bands
