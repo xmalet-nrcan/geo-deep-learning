@@ -18,7 +18,8 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: &log_dir ./lightning_logs
-      name: &run_name changeformer_soft_bce-focal_fire_id_cosinelr__mchi_rr_rl
+
+      name: &run_name 2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -79,32 +80,37 @@ model:
     num_classes: 1  # binary change detection
 
     main_loss:
-      class_path: segmentation_models_pytorch.losses.SoftBCEWithLogitsLoss
-      init_args:
-        smooth_factor: 0.05
-    secondary_loss:
+      #class_path: segmentation_models_pytorch.losses.SoftBCEWithLogitsLoss
       class_path: segmentation_models_pytorch.losses.FocalLoss
       init_args:
         mode: "binary"
-        gamma: 2.0
-        alpha: 0.25
+        # smooth_factor: 0.05
+    secondary_loss:
+      #class_path: segmentation_models_pytorch.losses.FocalLoss
+      class_path: segmentation_models_pytorch.losses.JaccardLoss
+      init_args:
+        mode: "binary"
+        #smooth: 0.05
+        #gamma: 2.0
+        #normalized: 1
+        #alpha: 0.25
     loss_ratio:
-      - 0.7  # weight for the main_loss
-      - 0.3  # weight for the secondary_loss
+      - 0.8  # weight for the main_loss
+      - 0.5  # weight for the secondary_loss
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
-        lr: 1e-4
+        lr: 1e-5
         weight_decay: 0.01
         betas:
         - 0.9
         - 0.999
     scheduler:
-      class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
       init_args:
-        T_max: 150
-        #T_0: 5
-        #T_mult: 2
+#        T_max: 150
+        T_0: 10
+        T_mult: 2
         eta_min: 1e-6
     scheduler_config:
       interval: "epoch"
@@ -128,9 +134,11 @@ data:
     split_on_columns: db_nbac_fire_id
     csv_root_folder: &data_root /mnt/data_disk/projet_RCM_scanfire
     patches_root_folder: *data_root
-    csv_file_name:  pre_post_datasets_all.csv
+    csv_file_name: pre_post_datasets_all_2023_2025.csv
+    #csv_file_name:  pre_post_datasets_all.csv
     #csv_file_name: pre_post_datasets.csv
-    split_ratios: [0.8,0.1,0.1]
+    split_ratios: [0.8 ,0.1, 0.1]
+
     #band_names: [ 'LOCALINCANGLE', 'RL','RR' ] # RCM INPUT (non-polarimetric intensity)
     band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0', 'RL','RR' ] # MCHI-DECOMP ==> 5 bands
     # band_names: null # All Bands
