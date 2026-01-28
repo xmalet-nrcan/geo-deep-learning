@@ -71,10 +71,23 @@ class Beams(Enum):
 BEAM_BAND_NAME = "BEAM"
 SATTELITE_PASS_BAND_NAME = "SATTELITE_PASS"
 
-bands_stats = {'mean': [1.0088686544882763, 22.678325648034726, 4820.030168929148, -578.1138439754548, 174.35119966169816,
-                      4645.179761547494, 5178.970253993203, 4074.12440505587, 1427.3155618129722, 517.5479435073069,
-                      1945.2480656061873, 514.8092047489475, 425.98675130681056, 8939.542957169055],
-               'std': [0.17514777918322952, 4.602293040200134, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
+bands_stats = {'mean': [1.0088686544882763,
+                        22.678325648034726,
+                        4820.030168929148,
+                        -578.1138439754548,
+                        174.35119966169816,
+                      4645.179761547494,
+                        5178.970253993203,
+                        4074.12440505587,
+                        1427.3155618129722,
+                        517.5479435073069,
+                      1945.2480656061873,
+                        514.8092047489475,
+                        425.98675130681056,
+                        8939.542957169055],
+               'std': [0.17514777918322952,
+                       4.602293040200134,
+                       np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
                      np.nan],
                'min': [1.0, 0.0, 446.0, -9810.0, 0.0, 81.0, 14.0, 93.0, 2.0, 2.0, 5.0, -9340.0, -9584.0, -8947.0],
                'max': [9.0, 112.0, 9985.0, 9969.0, 6358.0, 9971.0, 9553.0, 9979.0, 32766.0, 32766.0, 32766.0, 9484.0,
@@ -363,6 +376,32 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                   "pre_post_name": pre_post_name
                   }
         return sample
+
+    def _load_mask(self, index: int) -> tuple[torch.Tensor, str]:
+        """Load and remap the NBAC change mask to valid class indices [0,1]."""
+        data = self.files[index]
+        mask_path = data["mask"]
+
+        with rio.open(mask_path) as src:
+            # Read first band only, shape (H, W)
+            mask_np = src.read(1)
+
+        # Convert to torch tensor, add channel dim: (1, H, W)
+        mask = torch.from_numpy(mask_np.astype(np.int64)).unsqueeze(0)
+
+        # --- Remap raw values to {0,1} ---
+        # Example policy:
+        #   0 -> 0 (unburned)
+        #   1 -> 1 (burned)
+        #   everything else -> 0 (background / ignore)
+        mask_clean = mask.clone()
+        mask_clean[(mask_clean != 0) & (mask_clean != 1)] = 0
+
+        # Ensure final labels are in [0, 1]
+        mask_clean = mask_clean.clamp(min=0, max=1)
+
+        mask_name = str(mask_path)
+        return mask_clean, mask_name
 
     def _normalize_and_standardize(self, image_post: Tensor, image_pre: Tensor) -> tuple[
         Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
