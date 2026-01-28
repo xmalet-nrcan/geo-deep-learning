@@ -4,7 +4,9 @@ services:
       dockerfile: Dockerfile
     environment:
       - PYTORCH_ALLOC_CONF=expandable_segments:True
-#      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_LAUNCH_BLOCKING=1
+      - TORCH_USE_CUDA_DSA=1
     runtime: nvidia
     user: '9005'
     shm_size: '32gb'
