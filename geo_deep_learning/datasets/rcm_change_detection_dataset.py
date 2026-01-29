@@ -406,18 +406,38 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
     def _normalize_and_standardize(self, image_post: Tensor, image_pre: Tensor) -> tuple[
         Tensor, Tensor, Tensor, Tensor, Tensor, Tensor
     ]:
-        # Normalisation min-max globale par bande basée sur les valeurs du patch
-        for i in range(image_pre.shape[0]):
-            band_min_pre = torch.nanmin(image_pre[i])
-            band_max_pre = torch.nanmax(image_pre[i])
-            band_min_post = torch.nanmin(image_post[i])
-            band_max_post = torch.nanmax(image_post[i])
+        # Per-patch min-max normalization per band, without torch.nanmin / nanmax
+        eps = 1e-6
+        C = image_pre.shape[0]
 
-            rng_pre = max(band_max_pre - band_min_pre, torch.tensor(1e-6, device=image_pre.device))
-            rng_post = max(band_max_post - band_min_post, torch.tensor(1e-6, device=image_post.device))
+        for i in range(C):
+            pre_band = image_pre[i]
+            post_band = image_post[i]
 
-            image_pre[i] = (image_pre[i] - band_min_pre) / rng_pre
-            image_post[i] = (image_post[i] - band_min_post) / rng_post
+            # Mask non-finite values
+            pre_mask = torch.isfinite(pre_band)
+            post_mask = torch.isfinite(post_band)
+
+            # Handle case where all values are non-finite
+            if pre_mask.any():
+                band_min_pre = pre_band[pre_mask].min()
+                band_max_pre = pre_band[pre_mask].max()
+            else:
+                band_min_pre = torch.tensor(0.0, device=image_pre.device, dtype=image_pre.dtype)
+                band_max_pre = torch.tensor(1.0, device=image_pre.device, dtype=image_pre.dtype)
+
+            if post_mask.any():
+                band_min_post = post_band[post_mask].min()
+                band_max_post = post_band[post_mask].max()
+            else:
+                band_min_post = torch.tensor(0.0, device=image_post.device, dtype=image_post.dtype)
+                band_max_post = torch.tensor(1.0, device=image_post.device, dtype=image_post.dtype)
+
+            rng_pre = torch.clamp(band_max_pre - band_min_pre, min=eps)
+            rng_post = torch.clamp(band_max_post - band_min_post, min=eps)
+
+            image_pre[i] = (pre_band - band_min_pre) / rng_pre
+            image_post[i] = (post_band - band_min_post) / rng_post
 
         image_pre = torch.clamp(torch.nan_to_num(image_pre, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
         image_post = torch.clamp(torch.nan_to_num(image_post, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
