@@ -519,19 +519,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         # Vérifier entrées de la loss
         if not torch.isfinite(one_hot).all():
             raise RuntimeError("One-hot targets contain non-finite values (NaN/Inf).")
+
         # --- Losses ---
         ce_loss = self.secondary_loss(logits.contiguous(), one_hot)
         loss = self.main_loss(logits.contiguous(), one_hot)
         main_loss = w_sl * ce_loss + w_ml * loss
 
-<<<<<<< HEAD
-        # --- Losses ---
-        ce_loss = self.secondary_loss(logits.contiguous(), one_hot)
-        loss = self.main_loss(logits.contiguous(), one_hot)
-        main_loss = w_sl * ce_loss + w_ml * loss
-
-=======
->>>>>>> 8314d52 (Minor changes to fit the differents debug...)
         # Dernière vérification
         if not torch.isfinite(main_loss):
             raise RuntimeError(
