@@ -404,25 +404,26 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
     #     return mask_clean, mask_name
 
     def _normalize_and_standardize(self, image_post: Tensor, image_pre: Tensor) -> tuple[
-        Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-        # Convert numpy NaN en torch tensors
-        mean = torch.tensor(self.norm_stats["mean"], dtype=torch.float32).view(-1, 1, 1)
-        std = torch.tensor(self.norm_stats["std"], dtype=torch.float32).view(-1, 1, 1)
-        min_vals = torch.tensor(self.norm_stats["min"], dtype=torch.float32).view(-1, 1, 1)
-        max_vals = torch.tensor(self.norm_stats["max"], dtype=torch.float32).view(-1, 1, 1)
-
-
-        # Boucle bande par bande (car certaines bandes ont des NaN)
+        Tensor, Tensor, Tensor, Tensor, Tensor, Tensor
+    ]:
+        # Normalisation min-max globale par bande basée sur les valeurs du patch
         for i in range(image_pre.shape[0]):
-            image_pre[i] = torch.clamp((image_pre[i] - min_vals[i]) / (max_vals[i] - min_vals[i]), 0, 1)
-            image_post[i] = torch.clamp((image_post[i] - min_vals[i]) / (max_vals[i] - min_vals[i]), 0, 1)
+            band_min_pre = torch.nanmin(image_pre[i])
+            band_max_pre = torch.nanmax(image_pre[i])
+            band_min_post = torch.nanmin(image_post[i])
+            band_max_post = torch.nanmax(image_post[i])
 
+            rng_pre = max(band_max_pre - band_min_pre, torch.tensor(1e-6, device=image_pre.device))
+            rng_post = max(band_max_post - band_min_post, torch.tensor(1e-6, device=image_post.device))
 
-        # Gestion finale des NaN ou valeurs extrêmes
-        image_pre = torch.nan_to_num(image_pre, nan=-1, posinf=-1, neginf=-1)
-        image_post = torch.nan_to_num(image_post, nan=-1, posinf=-1, neginf=-1)
+            image_pre[i] = (image_pre[i] - band_min_pre) / rng_pre
+            image_post[i] = (image_post[i] - band_min_post) / rng_post
 
-        return image_post, image_pre, mean, std, min_vals, max_vals
+        image_pre = torch.clamp(torch.nan_to_num(image_pre, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+        image_post = torch.clamp(torch.nan_to_num(image_post, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+
+        dummy = torch.zeros((image_pre.shape[0], 1, 1), dtype=torch.float32, device=image_pre.device)
+        return image_post, image_pre, dummy, dummy, dummy, dummy
 
     def _load_water_mask(self, index: int) -> tuple[Tensor, str]:
         """Load water mask."""
