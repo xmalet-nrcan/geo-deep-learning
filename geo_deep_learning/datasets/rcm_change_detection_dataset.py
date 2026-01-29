@@ -284,7 +284,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         return super().convert_tif_to_tensor(in_image, in_dtype)
 
     def __getitem__(self, index: int) -> dict:
-        # Uncomment for local tests on data splits
+    # Uncomment for local tests on data splits
     #     data = self.files[index]
     #
     #     match = re.search(r'gid(\d+)',  data['image_pre'])
@@ -367,7 +367,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                   "cell_id": data["cell_id"],
                   "db_nbac_fire_id": data["db_nbac_fire_id"],
                   "profile": image_profile,
-                  "mask-common": common_mask_tensor.long(),
+                  "mask-common": common_mask_tensor,
                   "mean": mean,
                   "std": std,
                   "min" :mins,
