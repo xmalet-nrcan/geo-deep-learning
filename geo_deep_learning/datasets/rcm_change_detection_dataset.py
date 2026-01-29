@@ -377,31 +377,31 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                   }
         return sample
 
-    def _load_mask(self, index: int) -> tuple[torch.Tensor, str]:
-        """Load and remap the NBAC change mask to valid class indices [0,1]."""
-        data = self.files[index]
-        mask_path = data["mask"]
-
-        with rio.open(mask_path) as src:
-            # Read first band only, shape (H, W)
-            mask_np = src.read(1)
-
-        # Convert to torch tensor, add channel dim: (1, H, W)
-        mask = torch.from_numpy(mask_np.astype(np.int64)).unsqueeze(0)
-
-        # --- Remap raw values to {0,1} ---
-        # Example policy:
-        #   0 -> 0 (unburned)
-        #   1 -> 1 (burned)
-        #   everything else -> 0 (background / ignore)
-        mask_clean = mask.clone()
-        mask_clean[(mask_clean != 0) & (mask_clean != 1)] = 0
-
-        # Ensure final labels are in [0, 1]
-        mask_clean = mask_clean.clamp(min=0, max=1)
-
-        mask_name = str(mask_path)
-        return mask_clean, mask_name
+    # def _load_mask(self, index: int) -> tuple[torch.Tensor, str]:
+    #     """Load and remap the NBAC change mask to valid class indices [0,1]."""
+    #     data = self.files[index]
+    #     mask_path = data["mask"]
+    #
+    #     with rio.open(mask_path) as src:
+    #         # Read first band only, shape (H, W)
+    #         mask_np = src.read(1)
+    #
+    #     # Convert to torch tensor, add channel dim: (1, H, W)
+    #     mask = torch.from_numpy(mask_np.astype(np.int64)).unsqueeze(0)
+    #
+    #     # --- Remap raw values to {0,1} ---
+    #     # Example policy:
+    #     #   0 -> 0 (unburned)
+    #     #   1 -> 1 (burned)
+    #     #   everything else -> 0 (background / ignore)
+    #     mask_clean = mask.clone()
+    #     mask_clean[(mask_clean != 0) & (mask_clean != 1)] = 0
+    #
+    #     # Ensure final labels are in [0, 1]
+    #     mask_clean = mask_clean.clamp(min=0, max=1)
+    #
+    #     mask_name = str(mask_path)
+    #     return mask_clean, mask_name
 
     def _normalize_and_standardize(self, image_post: Tensor, image_pre: Tensor) -> tuple[
         Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
