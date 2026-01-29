@@ -440,15 +440,24 @@ class ChangeDetectionChangeFormer(LightningModule):
         common_data_mask = batch["mask-common"]
 
         batch_size = x_post.shape[0]
-
+        with torch.no_grad():
+            y_cpu = y.detach().cpu()
+            print(
+                "mask min:", y_cpu.min().item(),
+                "max:", y_cpu.max().item(),
+                "unique (échantillon):",
+                torch.unique(y_cpu)[:20]
+            )
         logits = self(x_pre, x_post)
         y_float = y.float()
 
         logits = logits * common_data_mask
+        num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
 
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
+        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1)
         one_hot = torch.nn.functional.one_hot(y_one_hot.long(),
-                                              num_classes=self.num_classes + 1 if self.num_classes == 1 else self.num_classes)
+                                              num_classes=num_classes)
         one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
         w_ml, w_sl = self.loss_ratio
 
