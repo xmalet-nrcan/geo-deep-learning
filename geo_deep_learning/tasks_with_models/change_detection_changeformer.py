@@ -434,12 +434,18 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.test_f1.reset()
 
     def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[
-        Any, Any, Any, Tensor, Any, float | Any, Any, Any, Any]:
+        Any, Any, Any, Tensor, Any, float | Any, Any, Any, Any
+    ]:
         x_pre, x_post = batch["image_pre"], batch["image"]
         y = batch["mask"]
         common_data_mask = batch["mask-common"]
 
         batch_size = x_post.shape[0]
+
+        # S'assurer que le masque commun est bien en float et sans NaN
+        common_data_mask = common_data_mask.to(dtype=torch.float32)
+        common_data_mask = torch.nan_to_num(common_data_mask, nan=0.0, posinf=1.0, neginf=0.0)
+
         with torch.no_grad():
             y_cpu = y.detach().cpu()
             print(
@@ -448,25 +454,47 @@ class ChangeDetectionChangeFormer(LightningModule):
                 "unique (échantillon):",
                 torch.unique(y_cpu)[:20]
             )
-        logits = self(x_pre, x_post)
+
+        logits = self(x_pre, x_post)  # [B, C, H, W]
         y_float = y.float()
 
+        # Vérifier les logits avant masquage
+        if not torch.isfinite(logits).all():
+            raise RuntimeError("Logits contain non-finite values (NaN/Inf) before masking.")
+
+        # Appliquer le masque de données communes
+        # On suppose que common_data_mask a la forme [B, 1, H, W] ou [B, H, W]
+        if common_data_mask.dim() == 3:
+            common_data_mask = common_data_mask.unsqueeze(1)  # -> [B, 1, H, W]
         logits = logits * common_data_mask
+
         num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
 
+        # Préparation du one-hot
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
         y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1)
-        one_hot = torch.nn.functional.one_hot(y_one_hot.long(),
-                                              num_classes=num_classes)
+        one_hot = torch.nn.functional.one_hot(y_one_hot.long(), num_classes=num_classes)
         one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
+
+        # Optionnel: appliquer aussi le masque sur le one_hot (pour ignorer les no-data)
+        if common_data_mask.shape[-2:] == one_hot.shape[-2:]:
+            one_hot = one_hot * common_data_mask
+
+        # Vérifier qu'il reste des pixels valides
+        valid_sum = common_data_mask.sum()
+        if valid_sum == 0:
+            # Eviter NaN si la loss divise par le nombre de pixels
+            main_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            ce_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            loss = main_loss
+            return x_pre, x_post, y_float, one_hot, logits, loss, main_loss, ce_loss, batch_size
+
         w_ml, w_sl = self.loss_ratio
 
-        # --- Main loss ---
-        ce_loss = self.secondary_loss(logits.contiguous(), one_hot)
-        loss = self.main_loss(logits.contiguous(), one_hot)
-        main_loss = w_sl * ce_loss + w_ml * loss
+        # Vérifier entrées de la loss
+        if not torch.isfinite(one_hot).all():
+            raise RuntimeError("One-hot targets contain non-finite values (NaN/Inf).")
 
-        return x_pre, x_post, y_float, one_hot, logits, main_loss, loss, ce_loss, batch_size
 
     def _log_visualizations(  # noqa: PLR0913
             self,
