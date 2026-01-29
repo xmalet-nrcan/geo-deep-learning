@@ -441,10 +441,28 @@ class ChangeDetectionChangeFormer(LightningModule):
         common_data_mask = batch["mask-common"]
 
         batch_size = x_post.shape[0]
+        # Vérif entrées images
+        if not torch.isfinite(x_pre).all():
+            raise RuntimeError("x_pre contains NaN/Inf")
+        if not torch.isfinite(x_post).all():
+            raise RuntimeError("x_post contains NaN/Inf")
 
         # S'assurer que le masque commun est bien en float et sans NaN
         common_data_mask = common_data_mask.to(dtype=torch.float32)
         common_data_mask = torch.nan_to_num(common_data_mask, nan=0.0, posinf=1.0, neginf=0.0)
+        with torch.no_grad():
+            print(
+            "[DEBUG] x_pre stats:",
+            "min", x_pre.min().item(),
+            "max", x_pre.max().item(),
+            "mean", x_pre.mean().item(),
+        )
+            print(
+            "[DEBUG] x_post stats:",
+            "min", x_post.min().item(),
+            "max", x_post.max().item(),
+            "mean", x_post.mean().item(),
+        )
 
         with torch.no_grad():
             y_cpu = y.detach().cpu()
@@ -460,13 +478,20 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # Vérifier les logits avant masquage
         if not torch.isfinite(logits).all():
+            with torch.no_grad():
+                print(
+                f"[DEBUG]{batch['image_pre_name']} - {batch['image_name_post']} 'logits non-finis:",
+                "min", torch.nanmin(logits).item() if torch.isfinite(logits).any() else "NaN",
+                "max", torch.nanmax(logits).item() if torch.isfinite(logits).any() else "NaN",
+                "mean", torch.nanmean(logits).item() if torch.isfinite(logits).any() else "NaN",
+            )
             raise RuntimeError("Logits contain non-finite values (NaN/Inf) before masking.")
 
         # Appliquer le masque de données communes
         # On suppose que common_data_mask a la forme [B, 1, H, W] ou [B, H, W]
-        if common_data_mask.dim() == 3:
-            common_data_mask = common_data_mask.unsqueeze(1)  # -> [B, 1, H, W]
-        logits = logits * common_data_mask
+ #       if common_data_mask.dim() == 3:
+ #           common_data_mask = common_data_mask.unsqueeze(1)  # -> [B, 1, H, W]
+  #      logits = logits * common_data_mask
 
         num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
 
@@ -477,8 +502,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
 
         # Optionnel: appliquer aussi le masque sur le one_hot (pour ignorer les no-data)
-        if common_data_mask.shape[-2:] == one_hot.shape[-2:]:
-            one_hot = one_hot * common_data_mask
+#        if common_data_mask.shape[-2:] == one_hot.shape[-2:]:
+#            one_hot = one_hot * common_data_mask
 
         # Vérifier qu'il reste des pixels valides
         valid_sum = common_data_mask.sum()
@@ -494,12 +519,19 @@ class ChangeDetectionChangeFormer(LightningModule):
         # Vérifier entrées de la loss
         if not torch.isfinite(one_hot).all():
             raise RuntimeError("One-hot targets contain non-finite values (NaN/Inf).")
-
         # --- Losses ---
         ce_loss = self.secondary_loss(logits.contiguous(), one_hot)
         loss = self.main_loss(logits.contiguous(), one_hot)
         main_loss = w_sl * ce_loss + w_ml * loss
 
+<<<<<<< HEAD
+        # --- Losses ---
+        ce_loss = self.secondary_loss(logits.contiguous(), one_hot)
+        loss = self.main_loss(logits.contiguous(), one_hot)
+        main_loss = w_sl * ce_loss + w_ml * loss
+
+=======
+>>>>>>> 8314d52 (Minor changes to fit the differents debug...)
         # Dernière vérification
         if not torch.isfinite(main_loss):
             raise RuntimeError(
