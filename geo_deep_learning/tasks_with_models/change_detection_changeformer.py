@@ -489,9 +489,9 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # Appliquer le masque de données communes
         # On suppose que common_data_mask a la forme [B, 1, H, W] ou [B, H, W]
-        if common_data_mask.dim() == 3:
-            common_data_mask = common_data_mask.unsqueeze(1)  # -> [B, 1, H, W]
-        logits = logits * common_data_mask
+        # if common_data_mask.dim() == 3:
+        #     common_data_mask = common_data_mask.unsqueeze(1)  # -> [B, 1, H, W]
+        # logits = logits * common_data_mask
 
         num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
 
@@ -502,8 +502,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
 
         # Optionnel: appliquer aussi le masque sur le one_hot (pour ignorer les no-data)
-        if common_data_mask.shape[-2:] == one_hot.shape[-2:]:
-            one_hot = one_hot * common_data_mask
+        # if common_data_mask.shape[-2:] == one_hot.shape[-2:]:
+        #     one_hot = one_hot * common_data_mask
 
         # Vérifier qu'il reste des pixels valides
         valid_sum = common_data_mask.sum()
