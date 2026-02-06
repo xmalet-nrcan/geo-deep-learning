@@ -15,7 +15,7 @@ services:
       # MOUNT THE DATASET REPO
       - "/mnt/data_disk/projet_RCM_scanfire:/mnt/data_disk/projet_RCM_scanfire:rw"
       # MOUNT THE CONFIG
-      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection.yaml:/app/configs/model_conf.yaml"
+      - "/home/xmalet/projects/geo-deep-learning/configs/change_vit_rcm_change_detection.yaml:/app/configs/model_conf.yaml"
       # MOUNT THE MODEL CHECKPOINTS AND LOGS
       - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/model_checkpoints:rw"
       - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
