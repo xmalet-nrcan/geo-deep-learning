@@ -1,10 +1,11 @@
 from geo_deep_learning.datamodules.rcm_change_detection_datamodule import RcmChangeDetectionDataModule
+from geo_deep_learning.datasets.rcm_change_detection_dataset_merge_pre_post import RCMChangeDetectionDatasetMergePrePost
 from geo_deep_learning.datasets.rcm_change_detection_dataset_one_output import RCMChangeDetectionDatasetOneOutput
 
 
 class RcmChangeDetectionOneOutputDataModule(RcmChangeDetectionDataModule):
     def setup(self, stage: str | None = None) -> None:
-        self.dataset = RCMChangeDetectionDatasetOneOutput(
+        self.dataset = RCMChangeDetectionDatasetMergePrePost(
             split_or_csv_file_name=self.csv_file_name,
             norm_stats=self.norm_stats,
             csv_root_folder=self.csv_root_folder,
