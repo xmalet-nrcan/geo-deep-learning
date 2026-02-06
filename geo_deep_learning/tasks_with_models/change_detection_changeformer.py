@@ -32,34 +32,6 @@ warnings.filterwarnings(
 logger = logging.getLogger(__name__)
 
 
-# class DataAugmentation(nn.Module):
-#
-#     """Data Augmentation Module."""
-#
-#     def __init__(self, image_size: tuple[int, int]) -> None:
-#         """Initialize the augmentation module."""
-#         super().__init__()
-#         self.aug = AugmentationSequential(
-#             krn.augmentation.PadTo(size=image_size,
-#                                    pad_mode='constant',
-#                                    pad_value=0,
-#                                    keepdim=False),
-#             krn.augmentation.RandomHorizontalFlip(p=0.5, keepdim=True),
-#             krn.augmentation.RandomVerticalFlip(p=0.5, keepdim=True),
-#             krn.augmentation.RandomRotation90(
-#                 times=(1, 3),
-#                 p=0.5,
-#                 align_corners=True,
-#                 keepdim=True,
-#             ),
-#             data_keys=None,
-#         )
-#     @torch.no_grad()
-#     def forward(self, x: Tensor) -> Tensor:
-#         """Forward pass."""
-#         return self.aug(x)
-
-
 class ChangeDetectionChangeFormer(LightningModule):
     """Change Detection with ChangeFormer V6 model."""
 
