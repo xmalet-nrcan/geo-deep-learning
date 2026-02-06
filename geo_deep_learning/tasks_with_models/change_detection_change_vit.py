@@ -157,7 +157,8 @@ class ChangeDetectionChangeVIT(LightningModule):
                                                             keepdim=False),
                                      data_keys=None)
 
-        transformed = aug({"image": batch["image"],
+        transformed = aug({"image_pre": batch["image_pre"],
+                           "image": batch["image"],
                            "mask-common": batch["mask-common"].to(torch.float32),
                            "mask": batch["mask"],
                            })
@@ -249,11 +250,13 @@ class ChangeDetectionChangeVIT(LightningModule):
         aug = self._apply_aug()
         device = batch["image"].device
 
-        transformed = aug({"image": batch["image"],
+        transformed = aug({"image_pre": batch["image_pre"],
+                           "image": batch["image"],
                            "mask-common": batch["mask-common"].to(torch.float32),
                            "mask": batch["mask"],
+
                            })
-        for key in ["image_pre", "image", "mask",  "mask-common"]:
+        for key in ["image_pre", "image", "mask", "mask-common"]:
             if key in transformed:
                 batch[key] = transformed[key].to(device, non_blocking=True)
         return batch
@@ -408,7 +411,8 @@ class ChangeDetectionChangeVIT(LightningModule):
     def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[
       Any, Any, Tensor, Any, float | Any, Any, Any, Any
     ]:
-        image = batch["image"]
+        x_pre, x_post = batch["image_pre"], batch["image"]
+        image = torch.stack([x_pre, x_post], dim=1)
         y = batch["mask"]
         common_data_mask = batch["mask-common"]
 
