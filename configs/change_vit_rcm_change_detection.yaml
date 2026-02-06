@@ -50,10 +50,10 @@ trainer:
         logging_interval: "epoch"
 #    - class_path: lightning.pytorch.callbacks.RichProgressBar
 
-    - class_path: lightning.pytorch.callbacks.StochasticWeightAveraging
-      init_args:
-        swa_lrs: 1e-3
-        annealing_epochs: 5
+#    - class_path: lightning.pytorch.callbacks.StochasticWeightAveraging
+#      init_args:
+#        swa_lrs: 1e-3
+#        annealing_epochs: 5
     - class_path: lightning.pytorch.callbacks.GradientAccumulationScheduler
       init_args:
         scheduling:
@@ -96,8 +96,8 @@ model:
         #normalized: 1
         #alpha: 0.25
     loss_ratio:
-      - 0.8  # weight for the main_loss
-      - 0.5  # weight for the secondary_loss
+      - 0.6  # weight for the main_loss
+      - 0.4  # weight for the secondary_loss
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
@@ -116,8 +116,8 @@ model:
     scheduler_config:
       interval: "epoch"
       frequency: 1
-      warmup_epochs: 10
-      warmup_strategy: "linear"
+#      warmup_epochs: 10
+#      warmup_strategy: "linear"
 
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
