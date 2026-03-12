@@ -11,18 +11,19 @@ from torch.utils.data import DataLoader, Subset
 
 from geo_deep_learning.datasets.rcm_change_detection_dataset import RCMChangeDetectionDataset
 
-bands_stats = {
-    'mean': [1.0088686544882763, 22.678325648034726, 4820.030168929148, -578.1138439754548, 174.35119966169816,
-             4645.179761547494, 5178.970253993203, 4074.12440505587, 1427.3155618129722, 517.5479435073069,
-             1945.2480656061873, 514.8092047489475, 425.98675130681056, 8939.542957169055],
-    'std': [0.17514777918322952, 4.602293040200134, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
-            np.nan, np.nan, np.nan,
-            np.nan],
-    'min': [1.0, 0.0, 446.0, -9810.0, 0.0, 81.0, 14.0, 93.0, 2.0, 2.0, 5.0, -9340.0, -9584.0, -8947.0],
-    'max': [9.0, 112.0, 9985.0, 9969.0, 6358.0, 9971.0, 9553.0, 9979.0, 32766.0, 32766.0, 32766.0, 9484.0,
-            9901.0, 9999.0]
-}
+# bands_stats = {
+#     'mean': [1.0088686544882763, 22.678325648034726, 4820.030168929148, -578.1138439754548, 174.35119966169816,
+#              4645.179761547494, 5178.970253993203, 4074.12440505587, 1427.3155618129722, 517.5479435073069,
+#              1945.2480656061873, 514.8092047489475, 425.98675130681056, 8939.542957169055],
+#     'std': [0.17514777918322952, 4.602293040200134, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
+#             np.nan, np.nan, np.nan,
+#             np.nan],
+#     'min': [1.0, 0.0, 446.0, -9810.0, 0.0, 81.0, 14.0, 93.0, 2.0, 2.0, 5.0, -9340.0, -9584.0, -8947.0],
+#     'max': [9.0, 112.0, 9985.0, 9969.0, 6358.0, 9971.0, 9553.0, 9979.0, 32766.0, 32766.0, 32766.0, 9484.0,
+#             9901.0, 9999.0]
+# }
 
+from geo_deep_learning.datasets.rcm_change_detection_dataset import bands_stats
 logger = logging.getLogger(__name__)
 ch = logging.StreamHandler()
 ch.setLevel(logging.DEBUG)
@@ -94,7 +95,8 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             beams=self.beams
         )
 
-        self._set_train_test_val_datasets()
+        if stage != "predict":
+            self._set_train_test_val_datasets()
 
     def _split_by_column(self, column_name, split_ratios=(0.7, 0.15, 0.15), seed=42):
         """
@@ -210,6 +212,18 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         """Dataloader for testing."""
         return DataLoader(
             self.test_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+            shuffle=False,
+        )
+
+    def predict_dataloader(self) -> DataLoader[Any]:
+        """Dataloader for prediction (full dataset)."""
+        return DataLoader(
+            self.dataset,  # tout le dataset sans split
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             pin_memory=True,
