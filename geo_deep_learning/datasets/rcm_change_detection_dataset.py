@@ -69,7 +69,7 @@ class Beams(Enum):
 
 
 BEAM_BAND_NAME = "BEAM"
-SATTELITE_PASS_BAND_NAME = "SATTELITE_PASS"
+SATELLITE_PASS_BAND_NAME = "SATELLITE_PASS"
 
 bands_stats = {'mean': [1.0088686544882763,
                         22.678325648034726,
@@ -165,7 +165,6 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         super().__init__(csv_root_folder=csv_root_folder, patches_root_folder=patches_root_folder,
                          split_or_csv_file_name=split_or_csv_file_name, norm_stats=norm_stats)
 
-
     def _load_files(self) -> list[dict[str, str]]:
         csv_path = self._get_csv_path()
         df_csv = pd.read_csv(csv_path)
@@ -186,14 +185,38 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             if df_csv.empty:
                 raise ValueError(f"No entries found for beams {beams_str}")
 
-        return [
-            {
-                "image_pre": (img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip()),
-                "image": (img.replace("$ROOT_PATH", self.patches_root_folder).strip()),
-                "mask": Path(
-                    self.patches_root_folder) / cell_id / "static_data" / f"{cell_id}_nbac_{int(group_date_post[:4])}_mask_unburn_burn_reject_100m.tif",
-                "water_mask": Path(
-                    self.patches_root_folder) / cell_id / "static_data" / f"{cell_id}_WATER_mask_100m.tif",
+        files = []
+        for (img_pre, img, group_id_pre, group_id_post, db_nbac_fire_id,
+             cell_id, group_date_pre, group_date_post, beam, sat_pass,
+             fire_start_date, fire_end_date) in df_csv[
+            ['pre_path', 'post_path', 'group_id_pre', 'group_id_post',
+             'db_nbac_fire_id', 'cell_id', 'group_date_pre', 'group_date_post',
+             'beam', 'sat_pass', 'fire_start_date', 'fire_end_date']
+        ].itertuples(index=False):
+
+            # --- Masque NBAC (optionnel) ---
+            mask_path = (
+                    Path(self.patches_root_folder) / cell_id / "static_data"
+                    / f"{cell_id}_nbac_{int(group_date_post[:4])}_mask_unburn_burn_reject_100m.tif"
+            )
+            if not mask_path.exists():
+                logger.debug("Mask not found, setting to None: %s", mask_path)
+                mask_path = None
+
+            # --- Masque d'eau (optionnel) ---
+            water_mask_path = (
+                    Path(self.patches_root_folder) / cell_id / "static_data"
+                    / f"{cell_id}_WATER_mask_100m.tif"
+            )
+            if not water_mask_path.exists():
+                logger.debug("Water mask not found, setting to None: %s", water_mask_path)
+                water_mask_path = None
+
+            files.append({
+                "image_pre": img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip(),
+                "image": img.replace("$ROOT_PATH", self.patches_root_folder).strip(),
+                "mask": mask_path,
+                "water_mask": water_mask_path,
                 "cell_id": cell_id,
                 "db_nbac_fire_id": db_nbac_fire_id,
                 "group_date_pre": group_date_pre,
@@ -203,35 +226,17 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                 "group_id_pre": group_id_pre,
                 "group_id_post": group_id_post,
                 "fire_start_date": fire_start_date,
-                "fire_end_date": fire_end_date
-            }
-            for img_pre,
-            img,
-                group_id_pre,
-            group_id_post,
-            db_nbac_fire_id,
-            cell_id,
-            group_date_pre,
-            group_date_post,
-            beam,
-            sat_pass,
-            fire_start_date,
-            fire_end_date in
-            df_csv[
-                ['pre_path',
-                 'post_path',
-                 'group_id_pre',
-                 'group_id_post',
-                 'db_nbac_fire_id',
-                 'cell_id',
-                 'group_date_pre',
-                 'group_date_post',
-                 'beam',
-                 'sat_pass',
-                 'fire_start_date',
-                 'fire_end_date']].itertuples(index=False)
+                "fire_end_date": fire_end_date,
+            })
 
-        ]
+        logger.info(
+            "Loaded %d entries (%d with mask, %d without mask)",
+            len(files),
+            sum(1 for f in files if f["mask"] is not None),
+            sum(1 for f in files if f["mask"] is None),
+        )
+
+        return files
 
     def __len__(self) -> int:
         return super().__len__()
@@ -241,18 +246,18 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         Get the list of bands to load, ensuring BITMASK_CROPPED (band 1) is always included.
         The returned list is 0-based indices for rasterio based on BandName enum numbering.
         """
-        # Always include BITMASK_CROPPED (band 1)
-        bands_to_read = self.bands if self.bands is not None else None
-        if bands_to_read is None:
+        if self.bands is None:
             return None
-        elif bands_to_read is not None and 1 not in bands_to_read:  # Add Bitmask band if not present
-            bands_to_read_with_mask = [1] + bands_to_read
-        else:
-            bands_to_read_with_mask = bands_to_read
-        bands_to_read_with_mask.sort()
-        bands_to_read_with_mask = set(bands_to_read_with_mask)  # to remove duplicates
-        # Convert to 0-based indices for rasterio as 0 = BITMASK_CROPPED band
-        return [i - 1 for i in bands_to_read_with_mask]
+
+        bands = list(self.bands)  # copie
+        if 1 not in bands:
+            bands.append(1)  # toujours inclure BITMASK_CROPPED
+
+        # Dédoublonner et trier
+        bands = sorted(set(bands))
+
+        # Convertir en 0-based pour rasterio
+        return [i - 1 for i in bands]
 
     @staticmethod
     def add_pass_and_beam_in_out_bands(pre_img, post_img, current_sample):
@@ -284,68 +289,51 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         return super().convert_tif_to_tensor(in_image, in_dtype)
 
     def __getitem__(self, index: int) -> dict:
-    # Uncomment for local tests on data splits
-    #     data = self.files[index]
-    #
-    #     match = re.search(r'gid(\d+)',  data['image_pre'])
-    #     group_id_pre, group_id_post = None, None
-    #     if match:
-    #         group_id_pre = match.group(1)
-    #     match = re.search(r'gid(\d+)', data['image'])
-    #     if match:
-    #         group_id_post = match.group(1)
-    #
-    #     return {
-    #         "cell_id": data["cell_id"],
-    #         "db_nbac_fire_id": data["db_nbac_fire_id"],
-    #         "group_id_pre": group_id_pre,
-    #         "group_id_post": group_id_post,
-    #     }
-    #
-    # def __getitem2__(self, index: int) -> dict:
-        """
-                Return the image and mask tensors for the given index.
-
-                Args:
-                    index (int): index of the sample to return
-
-                Returns:
-                    Tuple[Tensor, Tensor]: image and mask tensors
-
-                """
         data = self.files[index]
         image_pre, image_post, common_mask_tensor, image_pre_name, image_post_name = self._load_image(index)
-        water_mask, water_mask_name = self._load_water_mask(index)
-        no_water_mask = (water_mask == 0)  # True where water
+
+        # --- Water mask (optionnel) ---
+        water_mask_path = data.get("water_mask")
+        if water_mask_path is not None:
+            water_mask, _ = self._load_water_mask(index)
+            no_water_mask = (water_mask == 0)  # True = pas d'eau = garder
+        else:
+            H, W = image_pre.shape[1], image_pre.shape[2]
+            water_mask = torch.ones((1, H, W), dtype=torch.float32)
+            no_water_mask = torch.ones((1, H, W), dtype=torch.bool)
+
         image_post, image_pre, mean, std, mins, maxs = self._normalize_and_standardize(image_post, image_pre)
         common_mask_tensor = common_mask_tensor & no_water_mask
-        mask, mask_name = self._load_mask(index)
 
-        # Apply common mask to all and set NO_DATA where mask is False
+        # --- Mask from NBAC (optionnel) ---
+        mask_path = data.get("mask")
+        has_mask = mask_path is not None and Path(str(mask_path)).exists()
+        if has_mask:
+            mask, mask_name = self._load_mask(index)
+            mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, 0)
+        else:
+            H, W = image_pre.shape[1], image_pre.shape[2]
+            mask = torch.zeros((1, H, W), dtype=torch.float32)
+            mask_name = "no_mask"
+
+        # Apply common mask to images
         image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre, 0)
         image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, 0)
 
-        mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, 0)
-
-
-
-        bands_index = self._get_bands_to_load() # 0-based indices for rasterio
+        # Band selection
+        bands_index = self._get_bands_to_load()
         if bands_index is not None:
             image_pre = manage_bands(image_pre, bands_index)
             image_post = manage_bands(image_post, bands_index)
 
-
-
-        # Add common mask as first band
+        # Add common mask as first band + sat_pass/beam bands
         image_pre = torch.cat([common_mask_tensor, image_pre], dim=0)
         image_post = torch.cat([common_mask_tensor, image_post], dim=0)
         image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
 
-        # Prepare band names based on selected bands from _get_bands_to_load()
         band_names = [BandName(i + 1).name for i in bands_index] if bands_index is not None else [i.name for i in
                                                                                                   BandName]
-        # Add common mask, sat_pass and beam band names
-        band_names = ['COMMON_MASK'] + band_names + [SATTELITE_PASS_BAND_NAME, BEAM_BAND_NAME]
+        band_names = ['COMMON_MASK'] + band_names + [SATELLITE_PASS_BAND_NAME, BEAM_BAND_NAME]
 
         image_profile = None
         with rio.open(data['image']) as src:
@@ -353,55 +341,41 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         image_profile['count'] = len(band_names)
         image_profile['crs'] = str(image_profile['crs'])
         image_profile['transform'] = list(image_profile['transform'])
-        pre_post_name = f"{data['cell_id']}|{'ASC' if data['sat_pass'] == SatellitePass.ASCENDING else 'DESC'}-{data['beam'].name}|({data['group_id_pre']}){data['group_date_pre']}_({data['group_id_post']}){data['group_date_post']}|fire_({data['db_nbac_fire_id']})_{data['fire_start_date']}_{data['fire_end_date']}"
 
-        sample = {"image": image_post,
-                  "image_post": image_post,
-                  "image_pre": image_pre,
-                  "mask": mask,
-                  "image_pre_name": image_pre_name,
-                  "image_name_post": image_post_name,
-                  "image_name": image_post_name,
-                  "mask_name": mask_name,
-                  "bands": band_names,
-                  "cell_id": data["cell_id"],
-                  "db_nbac_fire_id": data["db_nbac_fire_id"],
-                  "profile": image_profile,
-                  "mask-common": common_mask_tensor,
-                  "mean": mean,
-                  "std": std,
-                  "min" :mins,
-                  "max": maxs,
-                  "water_mask" : water_mask,
-                  "pre_post_name": pre_post_name
-                  }
+        pre_post_name = (
+            f"{data['cell_id']}|"
+            f"{'ASC' if data['sat_pass'] == SatellitePass.ASCENDING else 'DESC'}-{data['beam'].name}|"
+            f"({data['group_id_pre']}){data['group_date_pre']}_"
+            f"({data['group_id_post']}){data['group_date_post']}|"
+            f"fire_({data['db_nbac_fire_id']})_{data['fire_start_date']}_{data['fire_end_date']}"
+        )
+
+        sample = {
+            "image": image_post,
+            "image_post": image_post,
+            "image_pre": image_pre,
+            "image_pre_name": image_pre_name,
+            "image_name_post": image_post_name,
+            "image_name": image_post_name,
+            "mask": mask,
+            "has_mask": has_mask,  # ← flag booléen pour le downstream
+            "mask_name": mask_name,
+            "bands": band_names,
+            "cell_id": data["cell_id"],
+            "db_nbac_fire_id": data["db_nbac_fire_id"],
+            "profile": image_profile,
+            "mask-common": common_mask_tensor,
+            "mean": mean,
+            "std": std,
+            "min": mins,
+            "max": maxs,
+            "water_mask": water_mask,
+            "pre_post_name": pre_post_name,
+            # For prediction part
+            "original_height": image_post.shape[1],
+            "original_width": image_post.shape[2],
+        }
         return sample
-
-    # def _load_mask(self, index: int) -> tuple[torch.Tensor, str]:
-    #     """Load and remap the NBAC change mask to valid class indices [0,1]."""
-    #     data = self.files[index]
-    #     mask_path = data["mask"]
-    #
-    #     with rio.open(mask_path) as src:
-    #         # Read first band only, shape (H, W)
-    #         mask_np = src.read(1)
-    #
-    #     # Convert to torch tensor, add channel dim: (1, H, W)
-    #     mask = torch.from_numpy(mask_np.astype(np.int64)).unsqueeze(0)
-    #
-    #     # --- Remap raw values to {0,1} ---
-    #     # Example policy:
-    #     #   0 -> 0 (unburned)
-    #     #   1 -> 1 (burned)
-    #     #   everything else -> 0 (background / ignore)
-    #     mask_clean = mask.clone()
-    #     mask_clean[(mask_clean != 0) & (mask_clean != 1)] = 0
-    #
-    #     # Ensure final labels are in [0, 1]
-    #     mask_clean = mask_clean.clamp(min=0, max=1)
-    #
-    #     mask_name = str(mask_path)
-    #     return mask_clean, mask_name
 
     def _normalize_and_standardize(self, image_post: Tensor, image_pre: Tensor) -> tuple[
         Tensor, Tensor, Tensor, Tensor, Tensor, Tensor
@@ -468,8 +442,8 @@ if __name__ == '__main__':
     print(f"BANDS: {sample['bands']}")
     print(f"Cell ID: {sample['cell_id']}")
     print(f"DB NBAC Fire ID: {sample['db_nbac_fire_id']}")
-    print(sample['bands'].index(SATTELITE_PASS_BAND_NAME), sample['bands'].index(BEAM_BAND_NAME))
-    print(sample['image'][sample['bands'].index(SATTELITE_PASS_BAND_NAME), :5, :5])
+    print(sample['bands'].index(SATELLITE_PASS_BAND_NAME), sample['bands'].index(BEAM_BAND_NAME))
+    print(sample['image'][sample['bands'].index(SATELLITE_PASS_BAND_NAME), :5, :5])
     print(sample['image'][sample['bands'].index(BEAM_BAND_NAME), :5, :5])
 
     print(sample['profile'])
