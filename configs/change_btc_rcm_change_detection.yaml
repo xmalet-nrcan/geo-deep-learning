@@ -19,7 +19,7 @@ trainer:
     init_args:
       save_dir: &log_dir ./lightning_logs
 
-      name: &run_name 2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
+      name: &run_name 2026_changevit_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -66,9 +66,10 @@ trainer:
   check_val_every_n_epoch: 1
 
 model:
-  class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
+  class_path: tasks_with_models.change_detection_change_vit.ChangeDetectionChangeVIT
   init_args:
-    change_detection_model: "changeformer"
+    # change_detection_model: "changeformer"
+    backbone: vit_tiny_patch16_224
     image_size: [256,256]
     # set to; it will be set to the number of band_names in the datamodule +
     # 1 for COMMON MASK
@@ -95,8 +96,8 @@ model:
         #normalized: 1
         #alpha: 0.25
     loss_ratio:
-      - 0.6  # weight for the main_loss
-      - 0.4  # weight for the secondary_loss
+      - 0.8  # weight for the main_loss
+      - 0.5  # weight for the secondary_loss
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
@@ -115,8 +116,8 @@ model:
     scheduler_config:
       interval: "epoch"
       frequency: 1
-#      warmup_epochs: 10
-#      warmup_strategy: "linear"
+      warmup_epochs: 10
+      warmup_strategy: "linear"
 
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
@@ -124,6 +125,7 @@ model:
 
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
+  #class_path: datamodules.rcm_change_detection_one_output_datamodule.RcmChangeDetectionOneOutputDataModule
   init_args:
     batch_size: 16
     num_workers: 20
@@ -132,10 +134,10 @@ data:
     - 256
     - 256
     split_on_columns: db_nbac_fire_id
-    csv_root_folder: &data_root /mnt/data_disk/projet_RCM_scanfire/
-    patches_root_folder: /mnt/data_disk/projet_RCM_scanfire/grided_folder
-    csv_file_name: pre_post_datasets_all_2023_2025.csv
-    #csv_file_name:  pre_post_datasets_all.csv
+    csv_root_folder: &data_root /mnt/data_disk/projet_RCM_scanfire/grided_folder
+    patches_root_folder: *data_root
+    #csv_file_name: pre_post_datasets_all_2023_2025.csv
+    csv_file_name: pre_post_datasets_all.csv
     #csv_file_name: pre_post_datasets.csv
     split_ratios: [0.8 ,0.1, 0.1]
 
