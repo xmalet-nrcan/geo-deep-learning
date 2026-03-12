@@ -7,8 +7,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import rasterio as rio
 import kornia as krn
 import torch
+from rasterio.transform import Affine
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
@@ -149,19 +152,25 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch: dict[str, Any],
             dataloader_idx: int,  # noqa: ARG002
     ) -> dict[str, Any]:
+        aug = AugmentationSequential(
+            krn.augmentation.PadTo(size=self.image_size, pad_mode='constant', pad_value=0, keepdim=False),
+            data_keys=None,
+        )
 
-        aug = AugmentationSequential(krn.augmentation.PadTo(size=self.image_size,
-                                                            pad_mode='constant', pad_value=0,
-                                                            keepdim=False),
-                                     data_keys=None)
+        keys_to_pad = {"image_pre": batch["image_pre"],
+                       "image": batch["image"]}
 
-        transformed = aug({"image_pre": batch["image_pre"],
-                           "image": batch["image"],
-                           "mask-common": batch["mask-common"].to(torch.float32),
-                           "mask": batch["mask"],
-                           })
+        # En predict, mask et mask-common sont toujours présents dans votre dataset
+        # car __getitem__ les retourne toujours
+        for mask_names in ['mask','mask-common','water_mask']:
+            if mask_names in batch:
+                if mask_names == 'mask':
+                    keys_to_pad[mask_names] = batch[mask_names]
+                else:
+                    keys_to_pad[mask_names] = batch[mask_names].to(torch.float32)
+
+        transformed = aug(keys_to_pad)
         batch.update(transformed)
-
         return batch
 
     def configure_model(self) -> None:
@@ -247,15 +256,19 @@ class ChangeDetectionChangeFormer(LightningModule):
         aug = self._apply_aug()
         device = batch["image"].device
 
-        transformed = aug({"image_pre": batch["image_pre"],
-                           "image": batch["image"],
-                           "mask-common": batch["mask-common"].to(torch.float32),
-                           "mask": batch["mask"],
+        keys_to_aug = {
+            "image_pre": batch["image_pre"],
+            "image": batch["image"],
+        }
+        if "mask-common" in batch:
+            keys_to_aug["mask-common"] = batch["mask-common"].to(torch.float32)
+        if "mask" in batch:
+            keys_to_aug["mask"] = batch["mask"]
 
-                           })
-        for key in ["image_pre", "image", "mask",  "mask-common"]:
-            if key in transformed:
-                batch[key] = transformed[key].to(device, non_blocking=True)
+        transformed = aug(keys_to_aug)
+        for key in transformed:
+            batch[key] = transformed[key].to(device, non_blocking=True)
+
         return batch
 
     # TODO : Modifier pour avoir image pre/post
@@ -265,7 +278,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> Tensor:
         """Run training step."""
-        x_pre, x_post, y, one_hot, logits, loss, main_loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
+        x_pre, x_post, y, one_hot, logits, main_loss, loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
         # --- Logging ---
         self.log(
             "train_loss",
@@ -278,8 +291,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             sync_dist=True,
         )
 
-        self.log("loss_bce", main_loss, on_epoch=True, sync_dist=True)
-        self.log("loss_focal", ce_loss, on_epoch=True, sync_dist=True)
+        self.log("main_loss", main_loss, on_epoch=True, sync_dist=True)
+        self.log("ce_loss", ce_loss, on_epoch=True, sync_dist=True)
 
         # --- Calcul des métriques différé (pour éviter de casser autograd) ---
         with torch.no_grad():
@@ -305,6 +318,9 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> Tensor:
         """Run validation step."""
+        has_mask = batch.get("has_mask", torch.tensor([True]))
+        if not has_mask.any():
+            return None  # skip ce batch
         x_pre, x_post, y, one_hot, logits, loss, main_loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
 
         self.log(
@@ -350,6 +366,11 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> None:
         """Run test step."""
+
+        has_mask = batch.get("has_mask", torch.tensor([True]))
+        if not has_mask.any():
+            return None
+
         x_pre, x_post, y, one_hot, logits, loss, main_loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
         # Convert logits to class predictions
         y_pred = torch.argmax(logits, dim=1)
@@ -422,48 +443,45 @@ class ChangeDetectionChangeFormer(LightningModule):
         # S'assurer que le masque commun est bien en float et sans NaN
         common_data_mask = common_data_mask.to(dtype=torch.float32)
         common_data_mask = torch.nan_to_num(common_data_mask, nan=0.0, posinf=1.0, neginf=0.0)
-        with torch.no_grad():
-            print(
-            "[DEBUG] x_pre stats:",
-            "min", x_pre.min().item(),
-            "max", x_pre.max().item(),
-            "mean", x_pre.mean().item(),
-        )
-            print(
-            "[DEBUG] x_post stats:",
-            "min", x_post.min().item(),
-            "max", x_post.max().item(),
-            "mean", x_post.mean().item(),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            with torch.no_grad():
+                logger.debug(
+                    "x_pre stats: min=%.4f, max=%.4f, mean=%.4f",
+                    x_pre.min().item(), x_pre.max().item(), x_pre.mean().item(),
+                )
+                logger.debug(
+                    "x_post stats: min=%.4f, max=%.4f, mean=%.4f",
+                    x_post.min().item(), x_post.max().item(), x_post.mean().item(),
+                )
 
-        with torch.no_grad():
-            y_cpu = y.detach().cpu()
-            print(
-                "mask min:", y_cpu.min().item(),
-                "max:", y_cpu.max().item(),
-                "unique (échantillon):",
-                torch.unique(y_cpu)[:20]
-            )
+        if logger.isEnabledFor(logging.DEBUG):
+            with torch.no_grad():
+                y_cpu = y.detach().cpu()
+                logger.debug(
+                    "mask min: %s, max: %s, unique (échantillon): %s",
+                    y_cpu.min().item(),
+                    y_cpu.max().item(),
+                    torch.unique(y_cpu)[:20],
+                )
 
         logits = self(x_pre, x_post)  # [B, C, H, W]
         y_float = y.float()
+        logits_no_nan = torch.nan_to_num(logits, nan=1e15)
 
         # Vérifier les logits avant masquage
         if not torch.isfinite(logits).all():
             with torch.no_grad():
-                print(
-                f"[DEBUG]{batch['image_pre_name']} - {batch['image_name_post']} 'logits non-finis:",
-                "min", torch.nanmin(logits).item() if torch.isfinite(logits).any() else "NaN",
-                "max", torch.nanmax(logits).item() if torch.isfinite(logits).any() else "NaN",
-                "mean", torch.nanmean(logits).item() if torch.isfinite(logits).any() else "NaN",
-            )
+
+                logger.debug(
+                    "[DEBUG] %s - %s logits non-finis: min=%s, max=%s, mean=%s",
+                    batch['image_pre_name'],
+                    batch['image_name_post'],
+                    torch.min(logits_no_nan).item() if torch.isfinite(logits_no_nan).any() else "NaN",
+                    torch.max(logits_no_nan).item() if torch.isfinite(logits_no_nan).any() else "NaN",
+                    torch.nanmean(logits).item() if torch.isfinite(logits).any() else "NaN",
+                )
             raise RuntimeError("Logits contain non-finite values (NaN/Inf) before masking.")
 
-        # Appliquer le masque de données communes
-        # On suppose que common_data_mask a la forme [B, 1, H, W] ou [B, H, W]
-        # if common_data_mask.dim() == 3:
-        #     common_data_mask = common_data_mask.unsqueeze(1)  # -> [B, 1, H, W]
-        # logits = logits * common_data_mask
 
         num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
 
@@ -481,10 +499,10 @@ class ChangeDetectionChangeFormer(LightningModule):
         valid_sum = common_data_mask.sum()
         if valid_sum == 0:
             # Eviter NaN si la loss divise par le nombre de pixels
-            main_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-            ce_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            main_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype)
+            ce_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype)
             loss = main_loss
-            return x_pre, x_post, y_float, one_hot, logits, loss, main_loss, ce_loss, batch_size
+            return x_pre, x_post, y_float, one_hot, logits_no_nan, loss, main_loss, ce_loss, batch_size
 
         w_ml, w_sl = self.loss_ratio
 
@@ -493,8 +511,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             raise RuntimeError("One-hot targets contain non-finite values (NaN/Inf).")
 
         # --- Losses ---
-        ce_loss = self.secondary_loss(logits.contiguous(), one_hot)
-        loss = self.main_loss(logits.contiguous(), one_hot)
+        ce_loss = self.secondary_loss(logits_no_nan.contiguous(), one_hot)
+        loss = self.main_loss(logits_no_nan.contiguous(), one_hot)
         main_loss = w_sl * ce_loss + w_ml * loss
 
         # Dernière vérification
@@ -505,7 +523,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 f"loss={loss.detach().cpu().item()}"
             )
 
-        return x_pre, x_post, y_float, one_hot, logits, main_loss, loss, ce_loss, batch_size
+        return x_pre, x_post, y_float, one_hot, logits_no_nan, main_loss, loss, ce_loss, batch_size
 
     def _log_visualizations(  # noqa: PLR0913
             self,
@@ -541,9 +559,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             pre_image_batch = batch["image_pre"]
             c_batch_size = len(image_batch)
             logger.info("Batch size: %d", c_batch_size)
-            mask_batch = batch["mask"].squeeze(1).long()
             batch_image_name = batch["pre_post_name"]
             num_samples = min(max_samples, c_batch_size)
+            has_mask_flags = batch.get("has_mask", torch.tensor([True] * len(image_batch)))
+            mask_batch = batch["mask"].squeeze(1).long()
             for i in range(num_samples):
                 image = image_batch[i]
                 pre_image = pre_image_batch[i]
@@ -552,10 +571,12 @@ class ChangeDetectionChangeFormer(LightningModule):
                 # mean = mean_batch[i]
                 # std = std_batch[i]
                 # image = denormalization(image, mean=mean, std=std)
-
+                mask_i = mask_batch[i]
+                has_real_mask = has_mask_flags[i] if isinstance(has_mask_flags,
+                                                                (list, torch.Tensor)) else has_mask_flags
                 fig = visualize_prediction(
                     image=image_diff[[2,3,4], :, :],
-                    mask=mask_batch[i],
+                    mask=mask_i if has_real_mask else None,  # None si pas de vrai masque
                     prediction=torch.argmax(outputs[i], dim=0),
                     sample_name=image_name,
                     num_classes=self.num_classes,
@@ -590,6 +611,104 @@ class ChangeDetectionChangeFormer(LightningModule):
         else:
             return num_samples
 
+    def predict_step(
+            self,
+            batch: dict[str, Any],
+            batch_idx: int,
+            dataloader_idx: int = 0,
+    ) -> dict[str, Any]:
+        """Run prediction step (inference only, no loss/metrics)."""
+        x_pre = batch["image_pre"]
+        x_post = batch["image"]
+
+        # Forward pass → logits [B, C, H, W]
+        with torch.no_grad():
+            logits = self(x_pre, x_post)
+
+        # Convertir en probabilités et en classes prédites
+        if self.num_classes == 1:
+            # Binaire : 2 classes (0=no-change, 1=change)
+            probs = torch.softmax(logits, dim=1)  # [B, 2, H, W]
+            y_pred = torch.argmax(probs, dim=1)  # [B, H, W]
+        else:
+            probs = torch.softmax(logits, dim=1)
+            y_pred = torch.argmax(probs, dim=1)
+
+        # Retourner un dict avec tout ce qu'il faut pour sauvegarder après
+        result = {
+            "predictions": y_pred,  # [B, H, W] classes entières
+            "probabilities": probs,  # [B, C, H, W] probabilités par classe
+            "logits": logits,  # [B, C, H, W] logits bruts
+            "pre_post_name": batch["pre_post_name"],
+            "cell_id": batch["cell_id"],
+            "profile": batch["profile"],  # profil rasterio pour écriture GeoTIFF
+            "original_height": batch["original_height"],
+            "original_width": batch["original_width"],
+        }
+
+        # Inclure le masque de vérité-terrain si disponible (pas toujours le cas en predict)
+        if batch.get("has_mask", torch.tensor(False)).any():
+            result["mask"] = batch["mask"]
+
+        return result
 
     def on_predict_end(self) -> None:
-        pass
+        """Appelé après que tous les predict_step soient terminés."""
+        predictions = self.trainer.predict_loop.predictions
+        if not predictions:
+            logger.warning("No predictions to save.")
+            return
+
+        output_dir = Path(self.trainer.default_root_dir) / "predictions"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        for batch_result in predictions:
+            y_pred = batch_result["predictions"]  # [B, H_padded, W_padded]
+            names = batch_result["pre_post_name"]
+            profiles = batch_result["profile"]
+            orig_heights = batch_result["original_height"]  # Tensor [B] ou list
+            orig_widths = batch_result["original_width"]  # Tensor [B] ou list
+            batch_size = y_pred.shape[0]
+
+            for i in range(batch_size):
+                sample_name = names[i].replace('\n', '').replace('|', '_').replace('/', '_')
+
+                # --- Récupérer les dimensions originales ---
+                orig_h = orig_heights[i].item() if isinstance(orig_heights, torch.Tensor) else int(orig_heights[i])
+                orig_w = orig_widths[i].item() if isinstance(orig_widths, torch.Tensor) else int(orig_widths[i])
+
+                # --- Découper le padding (crop au coin supérieur-gauche) ---
+                pred_np = y_pred[i, :orig_h, :orig_w].cpu().numpy().astype(np.uint8)
+
+                # --- Reconstruire le profil rasterio ---
+                crs_val = profiles["crs"][i] if isinstance(profiles["crs"], (list, tuple)) else profiles["crs"]
+
+                transform_raw = profiles["transform"]
+                if isinstance(transform_raw, torch.Tensor):
+                    t_list = transform_raw[i].tolist()
+                elif isinstance(transform_raw, list) and len(transform_raw) > 0 and isinstance(transform_raw[0],
+                                                                                               (list, torch.Tensor)):
+                    t_list = transform_raw[i] if isinstance(transform_raw[i], list) else transform_raw[i].tolist()
+                else:
+                    t_list = transform_raw
+
+                profile_i = {
+                    "driver": "GTiff",
+                    "dtype": "uint8",
+                    "count": 1,
+                    "height": orig_h,  # ← dimensions ORIGINALES, pas paddées
+                    "width": orig_w,  # ← dimensions ORIGINALES, pas paddées
+                    "crs": crs_val,
+                    "transform": Affine(*t_list[:6]),
+                }
+
+                out_path = output_dir / f"{sample_name}_pred.tif"
+                with rio.open(str(out_path), "w", **profile_i) as dst:
+                    dst.write(pred_np[np.newaxis, :, :])  # (1, orig_h, orig_w)
+
+                logger.info("Saved prediction to %s (%dx%d)", out_path, orig_w, orig_h)
+
+        logger.info("All predictions saved to %s", output_dir)
+
+
+
