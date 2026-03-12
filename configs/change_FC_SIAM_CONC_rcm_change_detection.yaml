@@ -19,7 +19,7 @@ trainer:
     init_args:
       save_dir: &log_dir ./lightning_logs
 
-      name: &run_name 2026_change_btc_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
+      name: &run_name 2026_change_FCSiamConc_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -66,20 +66,37 @@ trainer:
   check_val_every_n_epoch: 1
 
 model:
-  class_path: tasks_with_models.change_detection_change_btc.ChangeDetectionChangeBTC
+  class_path: tasks_with_models.change_detection_change_fc_siam.ChangeDetectionChangeFCSiam
   init_args:
     # change_detection_model: "changeformer"
-    backbone: swin_base
+
+
     image_size: [256,256]
     # set to; it will be set to the number of band_names in the datamodule +
     # 1 for COMMON MASK
     # 1 for BITMASK
     # 1 for SAT_PASS encoding
     # 1 for BEAM encoding
-    in_channels: 11 # Should be the length of data.band_names + 4
     max_samples: 10
     num_classes: 1  # binary change detection
-
+    submodel:
+      class_path: torchgeo.models.FCSiamConc
+      #      class_path: torchgeo.models.FCSiamDiff
+      init_args:
+        activation: sigmoid # Available options are “sigmoid”, “softmax”, “logsoftmax”, “tanh”, “identity”, callable and None. Default is None
+        encoder_name: resnet50
+        encoder_depth: 5
+        encoder_weights: imagenet # Random Init
+        decoder_channels: [ 256, 128, 64, 32, 16 ]
+        decoder_attention_type: scse # None or scse
+        decoder_use_batchnorm: True # Specifies normalization between Conv2D and activation. Accepts the following types:
+          #True: Defaults to “batchnorm”.
+          #False: No normalization (nn.Identity).
+          #str: Specifies normalization type using default parameters. Available values: “batchnorm”, “identity”, “layernorm”, “instancenorm”, “inplace”.
+        #dict: Fully customizable normalization settings. Structure: `python {"type": <norm_type>, **kwargs} ` where norm_name corresponds to normalization type (see above), and kwargs are passed directly to the normalization layer as defined in PyTorch documentation.
+        #Example: `python decoder_use_norm={"type": "layernorm", "eps": 1e-2} `
+        in_channels: 11 # Should be the length of data.band_names + 4
+        classes : 2 #Binary => 0/1
     main_loss:
       #class_path: segmentation_models_pytorch.losses.SoftBCEWithLogitsLoss
       class_path: segmentation_models_pytorch.losses.FocalLoss

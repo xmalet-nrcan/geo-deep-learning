@@ -19,7 +19,7 @@ trainer:
     init_args:
       save_dir: &log_dir ./lightning_logs
 
-      name: &run_name 2026_changevit_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
+      name: &run_name 2026_change_btc_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -66,10 +66,10 @@ trainer:
   check_val_every_n_epoch: 1
 
 model:
-  class_path: tasks_with_models.change_detection_change_vit.ChangeDetectionChangeVIT
+  class_path: tasks_with_models.change_detection_change_btc.ChangeDetectionChangeBTC
   init_args:
     # change_detection_model: "changeformer"
-    backbone: vit_tiny_patch16_224
+    backbone: swin_base
     image_size: [256,256]
     # set to; it will be set to the number of band_names in the datamodule +
     # 1 for COMMON MASK

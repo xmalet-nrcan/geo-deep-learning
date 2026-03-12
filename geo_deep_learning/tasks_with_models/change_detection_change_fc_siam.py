@@ -38,9 +38,9 @@ class ChangeDetectionChangeFCSiam(LightningModule):
 
     def __init__(  # noqa: PLR0913
             self,
-            sub_model,
             # Available options are “sigmoid”, “softmax”, “logsoftmax”, “tanh”, “identity”, callable and None. Default is None,
             *,
+            submodel: Callable,
             image_size: tuple[int, int],
             num_classes: int,
             max_samples: int,
@@ -61,9 +61,9 @@ class ChangeDetectionChangeFCSiam(LightningModule):
     ) -> None:
         """Initialize the model."""
         super().__init__()
-        self.model = None
         self.save_hyperparameters()
-        self._sub_model = sub_model
+        self.model = submodel
+        # self._sub_model = submodel
         self.in_channels = in_channels
 
         self.num_classes = num_classes  # Should be 2
@@ -170,10 +170,7 @@ class ChangeDetectionChangeFCSiam(LightningModule):
 
     def configure_model(self) -> None:
         """Configure model."""
-        model = self._sub_model
-        self.model = model(
-            ** self.hparams.get("sub_model", {}).get("init_args", {})
-        )
+        print(self.model)
 
         if self.weights_from_checkpoint_path:
             map_location = self.device
@@ -242,7 +239,7 @@ class ChangeDetectionChangeFCSiam(LightningModule):
 
     def forward(self, image: Tensor) -> Tensor:
         """Forward pass."""
-        return self.model(image)
+        return self.model(x=image)
 
     def on_after_batch_transfer(self, batch, dataloader_idx):
         if not self.trainer.training:
@@ -420,7 +417,7 @@ class ChangeDetectionChangeFCSiam(LightningModule):
             raise RuntimeError("x_pre contains NaN/Inf")
         if not torch.isfinite(x_post).all():
             raise RuntimeError("x_post contains NaN/Inf")
-        image = torch.cat([x_pre, x_post], dim=1)  # [B, t*c, H, W]
+        image = torch.stack([x_pre, x_post], dim=1)
         batch_size = image.shape[0]
 
         # S'assurer que le masque commun est bien en float et sans NaN

@@ -18,7 +18,7 @@ from torchmetrics import JaccardIndex, F1Score
 from torchmetrics.classification import BinaryJaccardIndex
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
-from torchgeo.models import ChangeViT
+from torchgeo.models import ChangeViT, BTC
 
 from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA, BandName  # noqa: F401
 from geo_deep_learning.models.change_detection.change_detection_model import ChangeDetectionModel
@@ -412,16 +412,16 @@ class ChangeDetectionChangeVIT(LightningModule):
       Any, Any, Tensor, Any, float | Any, Any, Any, Any
     ]:
         x_pre, x_post = batch["image_pre"], batch["image"]
-        image = torch.stack([x_pre, x_post], dim=1)
         y = batch["mask"]
         common_data_mask = batch["mask-common"]
 
-        batch_size = image.shape[0]
         # Vérif entrées images
-        if not torch.isfinite(image).all():
+        if not torch.isfinite(x_pre).all():
             raise RuntimeError("x_pre contains NaN/Inf")
-        if not torch.isfinite(image).all():
+        if not torch.isfinite(x_post).all():
             raise RuntimeError("x_post contains NaN/Inf")
+        image = torch.stack([x_pre, x_post], dim=1)
+        batch_size = image.shape[0]
 
         # S'assurer que le masque commun est bien en float et sans NaN
         common_data_mask = common_data_mask.to(dtype=torch.float32)
