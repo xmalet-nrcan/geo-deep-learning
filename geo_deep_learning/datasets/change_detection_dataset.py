@@ -163,11 +163,15 @@ class ChangeDetectionDataset(CSVDataset):
         # Common mask = areas where both masks == 1
         if pre_data_mask is not None and post_data_mask is not None:
             common_mask_tensor = (pre_data_mask == 1) & (post_data_mask == 1)
+            common_mask_tensor = torch.from_numpy(common_mask_tensor).unsqueeze(0)
         else:
-            common_mask_tensor = None
+            # Pas de masque → on considère tous les pixels comme valides
+            H, W = image_pre_tensor.shape[1], image_pre_tensor.shape[2]
+            common_mask_tensor = torch.ones((1, H, W), dtype=torch.bool)  # déjà (1, H, W)
 
 
-        return image_pre_tensor, image_post_tensor, torch.from_numpy(common_mask_tensor), image_pre_name, image_post_name
+
+        return image_pre_tensor, image_post_tensor, common_mask_tensor, image_pre_name, image_post_name
 
     @staticmethod
     def _apply_common_mask_to_tensor(common_mask_tensor: Tensor, in_image_tensor: Tensor, fill_value=np.nan) -> Tensor:
