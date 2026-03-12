@@ -1,4 +1,5 @@
 """Visualization tools."""
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -36,8 +37,11 @@ def visualize_prediction(  # noqa: PLR0913
     """
     num_classes = num_classes + 1 if num_classes == 1 else num_classes
     image = image.cpu().numpy()
-    mask = mask.squeeze(0).long().cpu().numpy()
     prediction = prediction.cpu().numpy()
+
+    # Masque optionnel
+    if mask is not None:
+        mask = mask.squeeze(0).long().cpu().numpy()
 
     image = np.transpose(image, (1, 2, 0))
     num_channels = image.shape[-1]
@@ -54,14 +58,16 @@ def visualize_prediction(  # noqa: PLR0913
     sample_name = "sample" if sample_name is None else sample_name
 
     if save_samples and save_path is not None:
+        save_path = Path(save_path)
         plt.imsave(save_path / f"{sample_name}_image.png", image)
-        plt.imsave(
-            save_path / f"{sample_name}_mask.png",
-            mask,
-            cmap=cmap,
-            vmin=0,
-            vmax=num_classes - 1,
-        )
+        if mask is not None:
+            plt.imsave(
+                save_path / f"{sample_name}_mask.png",
+                mask,
+                cmap=cmap,
+                vmin=0,
+                vmax=num_classes - 1,
+            )
         plt.imsave(
             save_path / f"{sample_name}_prediction.png",
             prediction,
@@ -70,37 +76,39 @@ def visualize_prediction(  # noqa: PLR0913
             vmax=num_classes - 1,
         )
 
-    # Create the visualization
+    # Nombre de colonnes : 3 si masque présent, 2 sinon
+    n_cols = 3 if mask is not None else 2
     plt.close("all")
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    # axes = axes.reshape(num_samples, 3) if num_samples > 1 else axes.reshape(1, 3)
+    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 5))
 
-    # for i in range(num_samples):
-    ax_image, ax_mask, ax_output = axes
+    ax_idx = 0
 
     # Plot original image
-    ax_image.imshow(image)
-    ax_image.set_title("Input Image")
-    ax_image.axis("off")
-    ax_image.text(
+    axes[ax_idx].imshow(image)
+    axes[ax_idx].set_title("Input Image")
+    axes[ax_idx].axis("off")
+    axes[ax_idx].text(
         0.5,
         -0.1,
         f"{sample_name}",
-        transform=ax_image.transAxes,
+        transform=axes[ax_idx].transAxes,
         ha="center",
         va="top",
         wrap=True,
     )
+    ax_idx += 1
 
-    # Plot ground truth mask
-    ax_mask.imshow(mask, cmap=cmap, vmin=0, vmax=num_classes - 1)
-    ax_mask.set_title("Ground Truth Mask")
-    ax_mask.axis("off")
+    # Plot ground truth mask (seulement si disponible)
+    if mask is not None:
+        axes[ax_idx].imshow(mask, cmap=cmap, vmin=0, vmax=num_classes - 1)
+        axes[ax_idx].set_title("Ground Truth Mask")
+        axes[ax_idx].axis("off")
+        ax_idx += 1
 
     # Plot predicted mask
-    ax_output.imshow(prediction, cmap=cmap, vmin=0, vmax=num_classes - 1)
-    ax_output.set_title("Predicted Mask")
-    ax_output.axis("off")
+    axes[ax_idx].imshow(prediction, cmap=cmap, vmin=0, vmax=num_classes - 1)
+    axes[ax_idx].set_title("Predicted Mask")
+    axes[ax_idx].axis("off")
 
     plt.tight_layout()
 
@@ -108,3 +116,4 @@ def visualize_prediction(  # noqa: PLR0913
         plt.savefig(save_path)
     plt.close(fig)
     return fig
+
