@@ -124,7 +124,7 @@ class CSVDataset(NonGeoDataset):
         # TODO : Change this as in branch it's:
         # mask_tensor = torch.from_numpy(mask_array).long()
         #                                            ======
-        return self._load_image_by_name(index, "mask")
+        return self._load_image_by_name(index, "mask", as_type=np.long)
 
     def _load_image_by_name(self, index: int, mask_name: str, as_type=np.int32) -> tuple[Tensor, str]:
         """Load mask."""
