@@ -134,8 +134,8 @@ data:
     split_on_columns: db_nbac_fire_id
     csv_root_folder: &data_root /mnt/data_disk/projet_RCM_scanfire/
     patches_root_folder: /mnt/data_disk/projet_RCM_scanfire/grided_folder
-    csv_file_name: pre_post_datasets_all_2023_2025.csv
-    #csv_file_name:  pre_post_datasets_all.csv
+    #csv_file_name: pre_post_datasets_all_2023_2025.csv
+    csv_file_name:  pre_post_datasets_all.csv
     #csv_file_name: pre_post_datasets.csv
     split_ratios: [0.8 ,0.1, 0.1]
 
