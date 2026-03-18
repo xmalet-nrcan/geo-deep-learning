@@ -11,6 +11,7 @@ import numpy as np
 import rasterio as rio
 import kornia as krn
 import torch
+from datetime import datetime
 from rasterio.transform import Affine
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
@@ -57,6 +58,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             weights_from_checkpoint_path: str | None = None,
             in_channels: int | None = None,
             threshold: float = 0.5,
+            predict_output_dir: str | None = None,  # For Outputs
             **kwargs: object,  # noqa: ARG002
     ) -> None:
         """Initialize the model."""
@@ -132,6 +134,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.train_f1 = F1Score(task=task_type, num_classes=num_classes)
         self.val_f1 = F1Score(task=task_type, num_classes=num_classes)
         self.test_f1 = F1Score(task=task_type, num_classes=num_classes)
+
+        self.predict_output_dir = predict_output_dir
 
     def _apply_aug(self) -> AugmentationSequential:
         """Augmentation pipeline."""
@@ -659,10 +663,22 @@ class ChangeDetectionChangeFormer(LightningModule):
             logger.warning("No predictions to save.")
             return
 
-        output_dir = Path(self.trainer.default_root_dir) / "predictions"
+        # --- Build the output directory ---
+        predict_date = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        if self.predict_output_dir is not None:
+            output_dir = Path(self.predict_output_dir)
+            if output_dir.name != "predictions" :
+                output_dir = output_dir / "predictions"
+
+        else:
+            output_dir = Path(self.trainer.default_root_dir) / "predictions"
+
+        output_dir = output_dir / predict_date
+        logger.info(f"Saving predictions to {output_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
 
         for batch_result in predictions:
+            batch_cell_id = batch_result['cell_id']
             y_pred = batch_result["predictions"]  # [B, H_padded, W_padded]
             names = batch_result["pre_post_name"]
             profiles = batch_result["profile"]
@@ -671,6 +687,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_size = y_pred.shape[0]
 
             for i in range(batch_size):
+                cell_id = batch_cell_id[i]
                 sample_name = names[i].replace('\n', '').replace('|', '_').replace('/', '_')
 
                 # --- Récupérer les dimensions originales ---
@@ -702,7 +719,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "transform": Affine(*t_list[:6]),
                 }
 
-                out_path = output_dir / f"{sample_name}_pred.tif"
+                out_path = output_dir / cell_id / f"{sample_name}.tif"
+                logger.info(f"Saving predictions to {out_path}")
                 with rio.open(str(out_path), "w", **profile_i) as dst:
                     dst.write(pred_np[np.newaxis, :, :])  # (1, orig_h, orig_w)
 
