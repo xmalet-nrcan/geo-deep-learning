@@ -1,0 +1,78 @@
+seed_everything: true
+
+trainer:
+  accelerator: "gpu"
+  devices: 1                  # predict ne supporte qu'un seul device
+  strategy: auto
+  precision: "bf16-mixed"
+  logger:
+    class_path: lightning.pytorch.loggers.TensorBoardLogger
+    init_args:
+      save_dir: &log_dir ./lightning_logs
+      name: &run_name predict_changeformer
+  # Pas de callbacks de training (pas d'EarlyStopping, ModelCheckpoint, etc.)
+  callbacks: []
+
+model:
+  class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
+  init_args:
+    change_detection_model: "changeformer"
+    image_size: [256, 256]
+    in_channels: 11
+    max_samples: 10
+    num_classes: 1
+    # Les losses sont requises par le constructeur, même si elles ne servent pas en predict
+    main_loss:
+      class_path: segmentation_models_pytorch.losses.FocalLoss
+      init_args:
+        mode: "binary"
+    secondary_loss:
+      class_path: segmentation_models_pytorch.losses.JaccardLoss
+      init_args:
+        mode: "binary"
+    loss_ratio:
+      - 0.8
+      - 0.5
+    optimizer:
+      class_path: torch.optim.AdamW
+      init_args:
+        lr: 1e-5
+        weight_decay: 0.01
+        betas: [0.9, 0.999]
+    scheduler:
+      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
+      init_args:
+        T_0: 10
+        T_mult: 2
+        eta_min: 1e-6
+    scheduler_config:
+      interval: "epoch"
+      frequency: 1
+      warmup_epochs: 10
+      warmup_strategy: "linear"
+    class_labels: ["unburn", "burn"]
+    class_colors: ["#000000", "#FF0000"]
+    weights_from_checkpoint_path:  ./model_checkpoints/2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl-epoch=56-val_loss=0.274.ckpt
+    predict_output_dir: /mnt/data_disk/projet_RCM_scanfire/grided_folder/predictions/
+
+data:
+  class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
+  init_args:
+    batch_size: 16
+    num_workers: 20
+    data_type_max: 1
+    patch_size: [256, 256]
+    # IMPORTANT : CSV contenant les données à prédire (peut être le même ou un nouveau)
+    csv_root_folder: &data_root /mnt/data_disk/projet_RCM_scanfire/grided_folder
+    patches_root_folder: *data_root
+    csv_file_name: pre_post_datasets_all_2023_2025.csv
+    # Le split n'est pas utilisé en predict, mais il faut quand même le passer
+    split_on_columns: db_nbac_fire_id
+    split_ratios: [0.8, 0.1, 0.1]
+    band_names: ['LOCALINCANGLE', 'PDN', 'PSN', 'PVN', 'S0', 'RL', 'RR']
+    beams:
+      - 'A'
+    satellite_pass:  # null = pas de filtre
+
+# Chemin du checkpoint à charger pour la prédiction
+ckpt_path: ./model_checkpoints/2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl-epoch=56-val_loss=0.274.ckpt
