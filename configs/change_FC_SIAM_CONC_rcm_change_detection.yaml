@@ -19,7 +19,7 @@ trainer:
     init_args:
       save_dir: &log_dir ./lightning_logs
 
-      name: &run_name 2026_change_FCSiamConc_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
+      name: &run_name 2026_change_btc_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -96,7 +96,6 @@ model:
         #dict: Fully customizable normalization settings. Structure: `python {"type": <norm_type>, **kwargs} ` where norm_name corresponds to normalization type (see above), and kwargs are passed directly to the normalization layer as defined in PyTorch documentation.
         #Example: `python decoder_use_norm={"type": "layernorm", "eps": 1e-2} `
         in_channels: 11 # Should be the length of data.band_names + 4
-        classes : 2 #Binary => 0/1
     main_loss:
       #class_path: segmentation_models_pytorch.losses.SoftBCEWithLogitsLoss
       class_path: segmentation_models_pytorch.losses.FocalLoss
