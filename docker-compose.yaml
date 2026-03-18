@@ -9,10 +9,6 @@ services:
       - TORCH_USE_CUDA_DSA=1
       # --- Sous-commande Lightning CLI : fit | validate | test | predict ---
       - CLI_COMMAND=${CLI_COMMAND:-fit}
-      # --- Chemin du checkpoint (utile pour predict/test) ---
-      - CKPT_PATH=${CKPT_PATH:-}
-      # --- Fichier de configuration ---
-      - CONFIG_FILE=${CONFIG_FILE:-configs/model_conf.yaml}
     runtime: nvidia
     user: '9005'
     shm_size: '32gb'
@@ -22,19 +18,18 @@ services:
       - "/mnt/data_disk/projet_RCM_scanfire:/mnt/data_disk/projet_RCM_scanfire:rw"
       # MOUNT THE CONFIG
       #- "/home/xmalet/projects/geo-deep-learning/configs/change_vit_rcm_change_detection.yaml:/app/configs/model_conf.yaml"
-      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection.yaml:/app/configs/model_conf.yaml"
+      #- "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection.yaml:/app/configs/model_conf.yaml"
+      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection_predict.yaml:/app/configs/model_conf.yaml"
       # MOUNT THE MODEL CHECKPOINTS AND LOGS
       - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/model_checkpoints:rw"
       - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
     #entrypoint: ["python",  "geo_deep_learning/train.py","fit", "--config", "configs/model_conf.yaml"]
     entrypoint: >
       sh -c '
-        CMD="python geo_deep_learning/train.py $CLI_COMMAND --config $CONFIG_FILE";
-        if [ -n "$CKPT_PATH" ]; then
-          CMD="$CMD --ckpt_path=$CKPT_PATH";
-        fi;
+        echo "Running in mode $CLI_COMMAND";
+        export CMD="python geo_deep_learning/train.py $CLI_COMMAND --config /app/configs/model_conf.yaml";
         echo "Running: $CMD";
-        exec $CMD
+        exec $CMD;
       '
     deploy:
       resources:
