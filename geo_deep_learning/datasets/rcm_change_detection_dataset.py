@@ -177,23 +177,25 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
              'db_nbac_fire_id', 'cell_id', 'group_date_pre', 'group_date_post',
              'beam', 'sat_pass', 'fire_start_date', 'fire_end_date']
         ].itertuples(index=False):
-
-            files.append({
-                "image_pre": img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip(),
-                "image": img.replace("$ROOT_PATH", self.patches_root_folder).strip(),
-                "mask": self._get_mask_path(cell_id, group_date_post),
-                "water_mask": self._get_water_mask_path(cell_id),
-                "cell_id": cell_id,
-                "db_nbac_fire_id": db_nbac_fire_id,
-                "group_date_pre": group_date_pre,
-                "group_date_post": group_date_post,
-                "beam": beam,
-                "sat_pass": sat_pass,
-                "group_id_pre": group_id_pre,
-                "group_id_post": group_id_post,
-                "fire_start_date": fire_start_date,
-                "fire_end_date": fire_end_date,
-            })
+            img_pre_path = img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip()
+            img_post_path = img.replace("$ROOT_PATH", self.patches_root_folder).strip()
+            if Path(img_pre_path).exists() and Path(img_post_path).exists():
+                files.append({
+                    "image_pre": img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip(),
+                    "image": img.replace("$ROOT_PATH", self.patches_root_folder).strip(),
+                    "mask": self._get_mask_path(cell_id, group_date_post),
+                    "water_mask": self._get_water_mask_path(cell_id),
+                    "cell_id": cell_id,
+                    "db_nbac_fire_id": db_nbac_fire_id,
+                    "group_date_pre": group_date_pre,
+                    "group_date_post": group_date_post,
+                    "beam": beam,
+                    "sat_pass": sat_pass,
+                    "group_id_pre": group_id_pre,
+                    "group_id_post": group_id_post,
+                    "fire_start_date": fire_start_date,
+                    "fire_end_date": fire_end_date,
+                })
 
         logger.info(
             "Loaded %d entries (%d with mask, %d without mask)",

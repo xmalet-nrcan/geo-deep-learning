@@ -48,8 +48,10 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
              'sat_pass',
              'event_start_date']
         ].itertuples(index=False):
-
-            files.append({
+            img_pre_path = img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip()
+            img_post_path = img.replace("$ROOT_PATH", self.patches_root_folder).strip()
+            if Path(img_pre_path).exists() and Path(img_post_path).exists():
+                files.append({
                 "image_pre": img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip(),
                 "image": img.replace("$ROOT_PATH", self.patches_root_folder).strip(),
                 # "mask": self._get_mask_path(cell_id, group_date_post),
