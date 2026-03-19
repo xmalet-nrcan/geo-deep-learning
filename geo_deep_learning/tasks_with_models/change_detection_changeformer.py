@@ -684,7 +684,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_profiles = batch_result["profile"]
             orig_heights = batch_result["original_height"]  # Tensor [B] ou list
             orig_widths = batch_result["original_width"]  # Tensor [B] ou list
-            batch_size = len(predictions)
+            batch_size = y_pred.shape[0]
 
             for i in range(batch_size):
                 cell_id = batch_cell_id[i]
@@ -701,6 +701,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 crs_val = batch_profiles["crs"][i] if isinstance(batch_profiles["crs"], (list, tuple)) else batch_profiles["crs"]
 
                 transform_raw = batch_profiles["transform"]
+                print(transform_raw)
                 if isinstance(transform_raw, torch.Tensor):
                     t_list = transform_raw[i].tolist()
                 elif isinstance(transform_raw, list) and len(transform_raw) > 0 and isinstance(transform_raw[0],
@@ -708,6 +709,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     t_list = transform_raw[i] if isinstance(transform_raw[i], list) else transform_raw[i].tolist()
                 else:
                     t_list = transform_raw
+                t_list = [transform_raw[k][i].item() for k in range(6)]
 
                 print(t_list)
 
@@ -718,7 +720,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "height": orig_h,  # ← dimensions ORIGINALES, pas paddées
                     "width": orig_w,  # ← dimensions ORIGINALES, pas paddées
                     "crs": crs_val,
-                    "transform": t_list,
+                    "transform": Affine(*t_list),
                 }
                 (output_dir / cell_id ).mkdir(parents=True, exist_ok=True)
                 out_path = output_dir / cell_id / f"{sample_name}.tif"
