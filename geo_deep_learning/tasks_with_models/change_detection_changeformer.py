@@ -709,6 +709,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                 else:
                     t_list = transform_raw
 
+                print(t_list)
+
                 profile_i = {
                     "driver": "GTiff",
                     "dtype": "uint8",
