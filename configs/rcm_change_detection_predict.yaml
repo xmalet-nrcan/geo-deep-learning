@@ -58,10 +58,7 @@ model:
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
   init_args:
-    dataset_class:
-        class_path: datasets.rcm_change_detection_predict_dataset.RCMChangeDetectionOnPredictDataset
-
-
+    dataset_class: datasets.rcm_change_detection_predict_dataset.RCMChangeDetectionOnPredictDataset
     batch_size: 16
     num_workers: 20
     data_type_max: 1
