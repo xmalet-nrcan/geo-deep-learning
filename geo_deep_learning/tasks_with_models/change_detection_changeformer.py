@@ -664,7 +664,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             return
 
         # --- Build the output directory ---
-        predict_date = datetime.now().strftime("%Y-%m-%d_%H%M")
+        predict_date = datetime.now().strftime("%Y%m%d_%H%M")
         if self.predict_output_dir is not None:
             output_dir = Path(self.predict_output_dir)
             if output_dir.name != "predictions" :
@@ -701,14 +701,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 crs_val = batch_profiles["crs"][i] if isinstance(batch_profiles["crs"], (list, tuple)) else batch_profiles["crs"]
 
                 transform_raw = batch_profiles["transform"]
-                print(transform_raw)
-                if isinstance(transform_raw, torch.Tensor):
-                    t_list = transform_raw[i].tolist()
-                elif isinstance(transform_raw, list) and len(transform_raw) > 0 and isinstance(transform_raw[0],
-                                                                                               (list, torch.Tensor)):
-                    t_list = transform_raw[i] if isinstance(transform_raw[i], list) else transform_raw[i].tolist()
-                else:
-                    t_list = transform_raw
+
                 t_list = [transform_raw[k][i].item() for k in range(6)]
 
                 print(t_list)
