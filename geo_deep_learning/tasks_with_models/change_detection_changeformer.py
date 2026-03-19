@@ -698,10 +698,16 @@ class ChangeDetectionChangeFormer(LightningModule):
                 pred_np = y_pred[i, :orig_h, :orig_w].cpu().numpy().astype(np.uint8)
 
                 # --- Reconstruire le profil rasterio ---
-                profile = batch_profiles[i]
-                crs_val = profile["crs"]
+                crs_val = batch_profiles["crs"][i] if isinstance(batch_profiles["crs"], (list, tuple)) else batch_profiles["crs"]
 
-                transform_raw = profile["transform"]
+                transform_raw = batch_profiles["transform"]
+                if isinstance(transform_raw, torch.Tensor):
+                    t_list = transform_raw[i].tolist()
+                elif isinstance(transform_raw, list) and len(transform_raw) > 0 and isinstance(transform_raw[0],
+                                                                                               (list, torch.Tensor)):
+                    t_list = transform_raw[i] if isinstance(transform_raw[i], list) else transform_raw[i].tolist()
+                else:
+                    t_list = transform_raw
 
                 profile_i = {
                     "driver": "GTiff",
@@ -710,7 +716,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "height": orig_h,  # ← dimensions ORIGINALES, pas paddées
                     "width": orig_w,  # ← dimensions ORIGINALES, pas paddées
                     "crs": crs_val,
-                    "transform": transform_raw,
+                    "transform": t_list,
                 }
                 (output_dir / cell_id ).mkdir(parents=True, exist_ok=True)
                 out_path = output_dir / cell_id / f"{sample_name}.tif"
