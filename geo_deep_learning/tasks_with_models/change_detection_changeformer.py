@@ -718,7 +718,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "crs": crs_val,
                     "transform": Affine(*t_list[:6]),
                 }
-
+                (output_dir / cell_id ).mkdir(parents=True, exist_ok=True)
                 out_path = output_dir / cell_id / f"{sample_name}.tif"
                 logger.info(f"Saving predictions to {out_path}")
                 with rio.open(str(out_path), "w", **profile_i) as dst:
