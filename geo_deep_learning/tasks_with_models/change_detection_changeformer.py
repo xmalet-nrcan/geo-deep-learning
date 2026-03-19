@@ -664,7 +664,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             return
 
         # --- Build the output directory ---
-        predict_date = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        predict_date = datetime.now().strftime("%Y-%m-%d_%H%M")
         if self.predict_output_dir is not None:
             output_dir = Path(self.predict_output_dir)
             if output_dir.name != "predictions" :
@@ -681,10 +681,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_cell_id = batch_result['cell_id']
             y_pred = batch_result["predictions"]  # [B, H_padded, W_padded]
             names = batch_result["pre_post_name"]
-            profiles = batch_result["profile"]
+            batch_profiles = batch_result["profile"]
             orig_heights = batch_result["original_height"]  # Tensor [B] ou list
             orig_widths = batch_result["original_width"]  # Tensor [B] ou list
-            batch_size = y_pred.shape[0]
+            batch_size = len(predictions)
 
             for i in range(batch_size):
                 cell_id = batch_cell_id[i]
@@ -698,17 +698,12 @@ class ChangeDetectionChangeFormer(LightningModule):
                 pred_np = y_pred[i, :orig_h, :orig_w].cpu().numpy().astype(np.uint8)
 
                 # --- Reconstruire le profil rasterio ---
-                crs_val = profiles["crs"][i] if isinstance(profiles["crs"], (list, tuple)) else profiles["crs"]
+                profile = batch_profiles[i]
+                crs_val = profile["crs"]
 
-                transform_raw = profiles["transform"]
-                if isinstance(transform_raw, torch.Tensor):
-                    t_list = transform_raw[i].tolist()
-                elif isinstance(transform_raw, list) and len(transform_raw) > 0 and isinstance(transform_raw[0],
-                                                                                               (list, torch.Tensor)):
-                    t_list = transform_raw[i] if isinstance(transform_raw[i], list) else transform_raw[i].tolist()
-                else:
-                    t_list = transform_raw
+                transform_raw = profile["transform"]
 
+                offset = profile['offsets']
                 profile_i = {
                     "driver": "GTiff",
                     "dtype": "uint8",
@@ -716,7 +711,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "height": orig_h,  # ← dimensions ORIGINALES, pas paddées
                     "width": orig_w,  # ← dimensions ORIGINALES, pas paddées
                     "crs": crs_val,
-                    "transform": Affine(*t_list[:6]),
+                    "transform": transform_raw,
+                    "offsets" : offset,
                 }
                 (output_dir / cell_id ).mkdir(parents=True, exist_ok=True)
                 out_path = output_dir / cell_id / f"{sample_name}.tif"

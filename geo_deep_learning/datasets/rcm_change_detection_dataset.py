@@ -351,7 +351,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         image_profile['count'] = len(band_names)
         image_profile['crs'] = str(image_profile['crs'])
         image_profile['transform'] = list(image_profile['transform'])
-
+        image_profile['offsets'] = list(image_profile['offsets'])
         pre_post_name = self._get_pre_post_name(data)
 
         sample = {
