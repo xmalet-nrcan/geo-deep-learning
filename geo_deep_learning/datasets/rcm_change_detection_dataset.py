@@ -360,11 +360,10 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             "image_name_post": image_post_name,
             "image_name": image_post_name,
             "mask": mask,
-            "has_mask": has_mask,  # ← flag booléen pour le downstream
+            "has_mask": has_mask,
             "mask_name": mask_name,
             "bands": band_names,
             "cell_id": data["cell_id"],
-            "db_nbac_fire_id": data["db_nbac_fire_id"],
             "profile": image_profile,
             "mask-common": common_mask_tensor,
             "mean": mean,
@@ -373,11 +372,20 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             "max": maxs,
             "water_mask": water_mask,
             "pre_post_name": pre_post_name,
-            # For prediction part
             "original_height": image_post.shape[1],
             "original_width": image_post.shape[2],
         }
+
+        sample.update(self._get_metadata(data))
+
         return sample
+
+    def _get_metadata(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Return dataset-specific metadata to include in the sample dict.
+        Override in subclasses for different CSV schemas."""
+        return {
+            "db_nbac_fire_id": data["db_nbac_fire_id"],
+        }
 
     def _get_pre_post_name(self, data: dict[str, str]) -> str:
         pre_post_name = (
