@@ -703,7 +703,6 @@ class ChangeDetectionChangeFormer(LightningModule):
 
                 transform_raw = profile["transform"]
 
-                offset = profile['offsets']
                 profile_i = {
                     "driver": "GTiff",
                     "dtype": "uint8",
@@ -712,7 +711,6 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "width": orig_w,  # ← dimensions ORIGINALES, pas paddées
                     "crs": crs_val,
                     "transform": transform_raw,
-                    "offsets" : offset,
                 }
                 (output_dir / cell_id ).mkdir(parents=True, exist_ok=True)
                 out_path = output_dir / cell_id / f"{sample_name}.tif"
