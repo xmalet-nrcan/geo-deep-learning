@@ -1,7 +1,7 @@
 """RcmChangeDetectionDataModule."""
 import logging
 from collections import defaultdict
-from typing import Any, Optional, List, Iterable
+from typing import Any, Optional, List, Iterable, Type
 
 import numpy as np
 import torch
@@ -53,6 +53,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             split_ratios=(0.70, 0.15, 0.15),
             split_on_columns: Optional[str | list] = None,
             data_type_max: Optional[int] = None,
+            dataset_class: Type[RCMChangeDetectionDataset] = RCMChangeDetectionDataset,
 
     ) -> None:
         """Initialize CSVDataModule."""
@@ -74,6 +75,8 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self.satellite_pass = satellite_pass
         self.beams = beams
         self.split_ratios = split_ratios
+        self.dataset_class = dataset_class
+
         self.dataset: RCMChangeDetectionDataset = None
         if split_on_columns is None:
             self._split_on_columns = None
@@ -84,7 +87,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
 
     def setup(self, stage: str | None = None) -> None:  # noqa: ARG002
         """Create dataset."""
-        self.dataset = RCMChangeDetectionDataset(
+        self.dataset = self.dataset_class(
             split_or_csv_file_name=self.csv_file_name,
             norm_stats=self.norm_stats,
             csv_root_folder=self.csv_root_folder,
