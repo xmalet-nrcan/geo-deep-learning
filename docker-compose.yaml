@@ -26,10 +26,10 @@ services:
     #entrypoint: ["python",  "geo_deep_learning/train.py","fit", "--config", "configs/model_conf.yaml"]
     entrypoint: >
       sh -c '
-        echo "Running in mode $CLI_COMMAND";
-        export CMD="python geo_deep_learning/train.py $CLI_COMMAND --config /app/configs/model_conf.yaml";
-        echo "Running: $CMD";
-        exec $CMD;
+        echo "Running in mode $$CLI_COMMAND";
+        export CMD="python /app/geo_deep_learning/train.py $$CLI_COMMAND --config /app/configs/model_conf.yaml";
+        echo "Running: $$CMD";
+        exec $$CMD;
       '
     deploy:
       resources:
