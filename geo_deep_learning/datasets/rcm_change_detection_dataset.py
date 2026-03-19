@@ -9,6 +9,7 @@ import pandas as pd
 import rasterio as rio
 import torch
 from numpy import ndarray, dtype
+from pandas import DataFrame
 from torch import Tensor
 
 from geo_deep_learning.datasets.change_detection_dataset import ChangeDetectionDataset
@@ -166,24 +167,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                          split_or_csv_file_name=split_or_csv_file_name, norm_stats=norm_stats)
 
     def _load_files(self) -> list[dict[str, str]]:
-        csv_path = self._get_csv_path()
-        df_csv = pd.read_csv(csv_path)
-
-        logger.info("BEAM FILTER: {}".format(self.beams))
-        logger.info("SATELLITE PASS FILTER: {}".format(self.satellite_pass))
-        df_csv['sat_pass'] = df_csv['sat_pass'].apply(lambda x: SatellitePass.from_str(x))
-        df_csv['beam'] = df_csv['beam'].apply(lambda x: Beams[str(x).upper()])
-
-        if self.satellite_pass is not None:
-            df_csv = df_csv[df_csv['sat_pass'] == self.satellite_pass]
-            if df_csv.empty:
-                raise ValueError(f"No entries found for satellite pass {self.satellite_pass}")
-
-        if len(self.beams) > 0:
-            beams_str = [Beams[str(b).upper()] for b in self.beams]
-            df_csv = df_csv[df_csv['beam'].isin(beams_str)]
-            if df_csv.empty:
-                raise ValueError(f"No entries found for beams {beams_str}")
+        df_csv = self._get_input_dataset_as_dataframe()
 
         files = []
         for (img_pre, img, group_id_pre, group_id_post, db_nbac_fire_id,
@@ -194,29 +178,11 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
              'beam', 'sat_pass', 'fire_start_date', 'fire_end_date']
         ].itertuples(index=False):
 
-            # --- Masque NBAC (optionnel) ---
-            mask_path = (
-                    Path(self.patches_root_folder) / cell_id / "static_data"
-                    / f"{cell_id}_nbac_{int(group_date_post[:4])}_mask_unburn_burn_reject_100m.tif"
-            )
-            if not mask_path.exists():
-                logger.debug("Mask not found, setting to None: %s", mask_path)
-                mask_path = None
-
-            # --- Masque d'eau (optionnel) ---
-            water_mask_path = (
-                    Path(self.patches_root_folder) / cell_id / "static_data"
-                    / f"{cell_id}_WATER_mask_100m.tif"
-            )
-            if not water_mask_path.exists():
-                logger.debug("Water mask not found, setting to None: %s", water_mask_path)
-                water_mask_path = None
-
             files.append({
                 "image_pre": img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip(),
                 "image": img.replace("$ROOT_PATH", self.patches_root_folder).strip(),
-                "mask": mask_path,
-                "water_mask": water_mask_path,
+                "mask": self._get_mask_path(cell_id, group_date_post),
+                "water_mask": self._get_water_mask_path(cell_id),
                 "cell_id": cell_id,
                 "db_nbac_fire_id": db_nbac_fire_id,
                 "group_date_pre": group_date_pre,
@@ -237,6 +203,48 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         )
 
         return files
+
+    def _get_water_mask_path(self, cell_id) -> Path | Any:
+        # --- Masque d'eau (optionnel) ---
+        water_mask_path = (
+                Path(self.patches_root_folder) / cell_id / "static_data"
+                / f"{cell_id}_WATER_mask_100m.tif"
+        )
+        if not water_mask_path.exists():
+            logger.debug("Water mask not found, setting to None: %s", water_mask_path)
+            water_mask_path = None
+        return water_mask_path
+
+    def _get_mask_path(self, cell_id, group_date_post) -> Path | Any:
+        mask_path = (
+                Path(self.patches_root_folder) / cell_id / "static_data"
+                / f"{cell_id}_nbac_{int(group_date_post[:4])}_mask_unburn_burn_reject_100m.tif"
+        )
+        if not mask_path.exists():
+            logger.debug("Mask not found, setting to None: %s", mask_path)
+            mask_path = None
+        return mask_path
+
+    def _get_input_dataset_as_dataframe(self) -> DataFrame:
+        csv_path = self._get_csv_path()
+        df_csv = pd.read_csv(csv_path)
+
+        logger.info("BEAM FILTER: {}".format(self.beams))
+        logger.info("SATELLITE PASS FILTER: {}".format(self.satellite_pass))
+        df_csv['sat_pass'] = df_csv['sat_pass'].apply(lambda x: SatellitePass.from_str(x))
+        df_csv['beam'] = df_csv['beam'].apply(lambda x: Beams[str(x).upper()])
+
+        if self.satellite_pass is not None:
+            df_csv = df_csv[df_csv['sat_pass'] == self.satellite_pass]
+            if df_csv.empty:
+                raise ValueError(f"No entries found for satellite pass {self.satellite_pass}")
+
+        if len(self.beams) > 0:
+            beams_str = [Beams[str(b).upper()] for b in self.beams]
+            df_csv = df_csv[df_csv['beam'].isin(beams_str)]
+            if df_csv.empty:
+                raise ValueError(f"No entries found for beams {beams_str}")
+        return df_csv
 
     def __len__(self) -> int:
         return super().__len__()
@@ -342,13 +350,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         image_profile['crs'] = str(image_profile['crs'])
         image_profile['transform'] = list(image_profile['transform'])
 
-        pre_post_name = (
-            f"{data['cell_id']}|"
-            f"{'ASC' if data['sat_pass'] == SatellitePass.ASCENDING else 'DESC'}-{data['beam'].name}|"
-            f"({data['group_id_pre']}){data['group_date_pre']}_"
-            f"({data['group_id_post']}){data['group_date_post']}|"
-            f"fire_({data['db_nbac_fire_id']})_{data['fire_start_date']}_{data['fire_end_date']}"
-        )
+        pre_post_name = self._get_pre_post_name(data)
 
         sample = {
             "image": image_post,
@@ -376,6 +378,16 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             "original_width": image_post.shape[2],
         }
         return sample
+
+    def _get_pre_post_name(self, data: dict[str, str]) -> str:
+        pre_post_name = (
+            f"{data['cell_id']}|"
+            f"{'ASC' if data['sat_pass'] == SatellitePass.ASCENDING else 'DESC'}-{data['beam'].name}|"
+            f"({data['group_id_pre']}){data['group_date_pre']}_"
+            f"({data['group_id_post']}){data['group_date_post']}|"
+            f"fire_({data['db_nbac_fire_id']})_{data['fire_start_date']}_{data['fire_end_date']}"
+        )
+        return pre_post_name
 
     def _normalize_and_standardize(self, image_post: Tensor, image_pre: Tensor) -> tuple[
         Tensor, Tensor, Tensor, Tensor, Tensor, Tensor
