@@ -403,42 +403,34 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
     ]:
         # Per-patch min-max normalization per band, without torch.nanmin / nanmax
         eps = 1e-6
-        C = image_pre.shape[0]
 
-        for i in range(C):
-            pre_band = image_pre[i]
-            post_band = image_post[i]
-
-            # Mask non-finite values
-            pre_mask = torch.isfinite(pre_band)
-            post_mask = torch.isfinite(post_band)
-
-            # Handle case where all values are non-finite
-            if pre_mask.any():
-                band_min_pre = pre_band[pre_mask].min()
-                band_max_pre = pre_band[pre_mask].max()
-            else:
-                band_min_pre = torch.tensor(0.0, device=image_pre.device, dtype=image_pre.dtype)
-                band_max_pre = torch.tensor(1.0, device=image_pre.device, dtype=image_pre.dtype)
-
-            if post_mask.any():
-                band_min_post = post_band[post_mask].min()
-                band_max_post = post_band[post_mask].max()
-            else:
-                band_min_post = torch.tensor(0.0, device=image_post.device, dtype=image_post.dtype)
-                band_max_post = torch.tensor(1.0, device=image_post.device, dtype=image_post.dtype)
-
-            rng_pre = torch.clamp(band_max_pre - band_min_pre, min=eps)
-            rng_post = torch.clamp(band_max_post - band_min_post, min=eps)
-
-            image_pre[i] = (pre_band - band_min_pre) / rng_pre
-            image_post[i] = (post_band - band_min_post) / rng_post
+        self._norm_image(image_pre, eps )
+        self._norm_image(image_post, eps )
 
         image_pre = torch.clamp(torch.nan_to_num(image_pre, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
         image_post = torch.clamp(torch.nan_to_num(image_post, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
 
         dummy = torch.zeros((image_pre.shape[0], 1, 1), dtype=torch.float32, device=image_pre.device)
         return image_post, image_pre, dummy, dummy, dummy, dummy
+
+    @staticmethod
+    def _norm_image( input_image: Tensor, eps: float,):
+        for i in range(input_image.shape[0]):
+            curr_band = input_image[i]
+
+            # Mask non-finite values
+            infinte_mask = torch.isfinite(curr_band)
+            # Handle case where all values are non-finite
+            if infinte_mask.any():
+                band_min_post = curr_band[infinte_mask].min()
+                band_max_post = curr_band[infinte_mask].max()
+            else:
+                band_min_post = torch.tensor(0.0, device=input_image.device, dtype=input_image.dtype)
+                band_max_post = torch.tensor(1.0, device=input_image.device, dtype=input_image.dtype)
+
+            clamped_images = torch.clamp(band_max_post - band_min_post, min=eps)
+
+            input_image[i] = (curr_band - band_min_post) / clamped_images
 
     def _load_water_mask(self, index: int) -> tuple[Tensor, str]:
         """Load water mask."""
