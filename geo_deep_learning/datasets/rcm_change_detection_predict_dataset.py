@@ -77,12 +77,16 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
         return {
             "event_id": data["event_id"],
             "event_start_date": data["event_start_date"],
+            "group_id_pre" : data["group_id_pre"],
+            "group_id_post" : data["group_id_post"],
+            "group_date_pre" : data["group_date_pre"],
+            "group_date_post" : data["group_date_post"],
         }
 
     def _get_pre_post_name(self, data: dict[str, str]) -> str:
         """Build identifier adapted to predict CSV columns."""
         return (
-            f"{data['cell_id']}|"
+            f"{data['cell_id']}_event_{data['event_id']}|"
             f"{'ASC' if data['sat_pass'] == SatellitePass.ASCENDING else 'DESC'}-{data['beam'].name}|"
             f"({data['group_id_pre']}){data['group_date_pre']}_"
             f"({data['group_id_post']}){data['group_date_post']}|"

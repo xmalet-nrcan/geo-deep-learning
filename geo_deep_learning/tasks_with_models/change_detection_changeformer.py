@@ -651,7 +651,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         }
 
         # --- Propager les métadonnées optionnelles (event_id, db_nbac_fire_id, etc.) ---
-        for key in ("event_id", "db_nbac_fire_id",'group_date_pre','group_date_post','group_id_pre','group_id_post'):
+        for key in ("event_id",
+                    "db_nbac_fire_id",
+                    'group_date_pre',
+                    'group_date_post',
+                    'group_id_pre',
+                    'group_id_post'):
             if key in batch:
                 result[key] = batch[key]
 
