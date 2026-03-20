@@ -651,7 +651,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         }
 
         # --- Propager les métadonnées optionnelles (event_id, db_nbac_fire_id, etc.) ---
-        for key in ("event_id", "db_nbac_fire_id"):
+        for key in ("event_id", "db_nbac_fire_id",'group_date_pre','group_date_post','group_id_pre','group_id_post'):
             if key in batch:
                 result[key] = batch[key]
 
@@ -685,7 +685,8 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # --- Phase 1 : écrire chaque tuile individuelle ---
         # On collecte les chemins par (event_id, predict_date) pour le merge
-        event_tile_paths: dict[str, list[Path]] = defaultdict(list)
+        group_tile_paths: dict[tuple[str, str, str], list[Path]] = defaultdict(list)
+        event_all_tile_paths: dict[str, list[Path]] = defaultdict(list)
 
         logger.info(f"Saving predictions to {base_dir}")
         base_dir.mkdir(parents=True, exist_ok=True)
@@ -704,21 +705,20 @@ class ChangeDetectionChangeFormer(LightningModule):
             if batch_event_ids is None:
                 batch_event_ids = batch_result.get("db_nbac_fire_id")
 
+            batch_group_id_pre = batch_result.get("group_id_pre")
+            batch_group_id_post = batch_result.get("group_id_post")
+            batch_group_date_pre = batch_result.get("group_date_pre")
+            batch_group_date_post = batch_result.get("group_date_post")
+
             for i in range(batch_size):
                 cell_id = batch_cell_id[i]
                 sample_name = names[i].replace('\n', '').replace('|', '_').replace('/', '_')
 
-
-                # --- Event ID ---
-                if batch_event_ids is not None:
-                    if isinstance(batch_event_ids, torch.Tensor):
-                        event_id = str(batch_event_ids[i].item())
-                    elif isinstance(batch_event_ids, (list, tuple)):
-                        event_id = str(batch_event_ids[i])
-                    else:
-                        event_id = str(batch_event_ids)
-                else:
-                    event_id = "unknown_event"
+                event_id = self._extract_scalar(batch_event_ids, i, default="unknown_event")
+                group_id_pre = self._extract_scalar(batch_group_id_pre, i, default="all")
+                group_id_post = self._extract_scalar(batch_group_id_post, i, default="all")
+                group_date_pre = self._extract_scalar(batch_group_date_pre, i, default="all")
+                group_date_post = self._extract_scalar(batch_group_date_post, i, default="all")
 
                 # --- Récupérer les dimensions originales ---
                 orig_h = orig_heights[i].item() if isinstance(orig_heights, torch.Tensor) else int(orig_heights[i])
@@ -753,32 +753,54 @@ class ChangeDetectionChangeFormer(LightningModule):
                 with rio.open(str(out_path), "w", **profile_i) as dst:
                     dst.write(pred_np[np.newaxis, :, :])
                 # Collecter pour le merge
-                event_tile_paths[str(event_date_dir)].append(out_path)
+                    # Collecter pour les merges
 
+                    event_date_key = str(event_date_dir)
+                    group_tile_paths[(event_date_key, str(group_date_pre), str(group_date_post))].append(out_path)
+                    event_all_tile_paths[event_date_key].append(out_path)
                 logger.info("Saved prediction to %s (%dx%d)", out_path, orig_w, orig_h)
-        self._merge_prediction_for_event(event_tile_paths)
+        self._merge_predictions(group_tile_paths, event_all_tile_paths)
         logger.info("All predictions saved to %s", base_dir)
 
     @staticmethod
-    def _merge_prediction_for_event(event_tile_paths):
+    def _extract_scalar(batch_field, index: int, default: str = "unknown") -> str:
+        """Extract a scalar string value from a batched field at position index."""
+        if batch_field is None:
+            return default
+        if isinstance(batch_field, torch.Tensor):
+            return str(batch_field[index].item())
+        if isinstance(batch_field, (list, tuple)):
+            return str(batch_field[index])
+        return str(batch_field)
+
+    @staticmethod
+    def _merge_predictions(
+            group_tile_paths: dict[tuple[str, str, str], list[Path]],
+            event_all_tile_paths: dict[str, list[Path]],
+    ) -> None:
+        """Merge tiles in two passes:
+        1. Per group_id_pre/group_id_post pair → merged_group_{pre}_{post}.tif
+        2. All tiles in the event/date dir    → merged_all.tif
+        """
         from rasterio.merge import merge as rio_merge
 
-        # --- Phase 2 : merge par sous-dossier EVENT_ID / PREDICTION_DATE ---
-        for event_date_dir_str, tile_paths in event_tile_paths.items():
+        # --- Pass 1 : merge par paire (group_id_pre, group_id_post) ---
+        for (event_date_dir_str, group_pre, group_post), tile_paths in group_tile_paths.items():
             event_date_dir = Path(event_date_dir_str)
-            if len(tile_paths) == 0:
+            if len(tile_paths) < 2:
+                # Rien à merger s'il n'y a qu'une seule tuile
+                logger.info("Skipping merge for group %s/%s (only %d tile)",
+                            group_pre, group_post, len(tile_paths))
                 continue
 
-            logger.info(
-                "Merging %d tiles into %s/merged.tif",
-                len(tile_paths), event_date_dir,
-            )
+            merged_name = f"merged_group_{group_pre}_{group_post}.tif"
+            logger.info("Merging %d tiles → %s/%s", len(tile_paths), event_date_dir, merged_name)
 
+            datasets_to_merge = []
             try:
                 datasets_to_merge = [rio.open(str(p)) for p in tile_paths]
                 mosaic, mosaic_transform = rio_merge(datasets_to_merge)
 
-                # Profil du merge basé sur le premier fichier
                 merge_profile = datasets_to_merge[0].profile.copy()
                 merge_profile.update({
                     "height": mosaic.shape[1],
@@ -786,20 +808,57 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "transform": mosaic_transform,
                 })
 
-                merged_path = event_date_dir / "merged.tif"
+                merged_path = event_date_dir / merged_name
                 with rio.open(str(merged_path), "w", **merge_profile) as dst:
                     dst.write(mosaic)
 
-                logger.info("Saved merged prediction to %s (%dx%d)",
+                logger.info("Saved merged group to %s (%dx%d)",
                             merged_path, mosaic.shape[2], mosaic.shape[1])
 
             except Exception:
-                logger.exception("Failed to merge tiles in %s", event_date_dir)
-
+                logger.exception("Failed to merge group %s/%s in %s",
+                                 group_pre, group_post, event_date_dir)
             finally:
                 for ds in datasets_to_merge:
                     try:
                         ds.close()
                     except Exception:
-                        logger.warning("Failed to close dataset %s", ds.name)
+                        pass
 
+        # --- Pass 2 : merge global par EVENT_ID / PREDICTION_DATE ---
+        for event_date_dir_str, tile_paths in event_all_tile_paths.items():
+            event_date_dir = Path(event_date_dir_str)
+            if len(tile_paths) < 2:
+                logger.info("Skipping global merge for %s (only %d tile)",
+                            event_date_dir, len(tile_paths))
+                continue
+
+            logger.info("Merging all %d tiles → %s/merged_all.tif", len(tile_paths), event_date_dir)
+
+            datasets_to_merge = []
+            try:
+                datasets_to_merge = [rio.open(str(p)) for p in tile_paths]
+                mosaic, mosaic_transform = rio_merge(datasets_to_merge)
+
+                merge_profile = datasets_to_merge[0].profile.copy()
+                merge_profile.update({
+                    "height": mosaic.shape[1],
+                    "width": mosaic.shape[2],
+                    "transform": mosaic_transform,
+                })
+
+                merged_path = event_date_dir / "merged_all.tif"
+                with rio.open(str(merged_path), "w", **merge_profile) as dst:
+                    dst.write(mosaic)
+
+                logger.info("Saved global merge to %s (%dx%d)",
+                            merged_path, mosaic.shape[2], mosaic.shape[1])
+
+            except Exception:
+                logger.exception("Failed to create global merge in %s", event_date_dir)
+            finally:
+                for ds in datasets_to_merge:
+                    try:
+                        ds.close()
+                    except Exception:
+                        pass
