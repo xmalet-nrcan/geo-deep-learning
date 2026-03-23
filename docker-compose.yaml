@@ -42,18 +42,20 @@ services:
   event_detection_orchestrator:
     build:
       context: .
-      dockerfile: Dockerfile  # basé sur le Dockerfile geo-deep-learning (GPU)
+      dockerfile: orchestrator.Dockerfile    # ← [3] Dockerfile dédié avec deps firescan
     runtime: nvidia
     shm_size: '32gb'
     container_name: event_detection_orchestrator
-    restart: unless-stopped    # ← redémarrage automatique si crash
+    restart: unless-stopped
     user: '9005'
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - PYTORCH_ALLOC_CONF=expandable_segments:True
-      - POLL_INTERVAL_SECONDS=300        # 5 min entre chaque vérification
+      # ← [1] DATABASE_URL MANQUANT — AJOUTÉ
+      - POLL_INTERVAL_SECONDS=300
       - LOGGER_LEVEL=INFO
       - CSV_OUTPUT_DIR=/mnt/data_disk/projet_RCM_scanfire/grided_folder
+      # ← [6] PREDICTIONS_DIR doit matcher predict_output_dir du YAML (sans trailing slash)
       - PREDICTIONS_DIR=/mnt/data_disk/projet_RCM_scanfire/grided_folder/predictions
       - PREDICT_CONFIG=/app/configs/model_conf.yaml
     volumes:
@@ -64,8 +66,8 @@ services:
       # Checkpoints
       - "./models_checkpoints:/app/model_checkpoints:rw"
       - "./lightning_logs:/app/lightning_logs:rw"
-      # L'orchestrateur lui-même
-      - "./orchestrator.py:/app/orchestrator.py:ro"
+      # ← [2] L'orchestrateur — chemin corrigé
+      - "../firescan/firescan_modules/module_specific/orchestrator/orchestrator.py:/app/orchestrator.py:ro"
       # Module d'ingestion firescan (Phase 2)
       - "../firescan/firescan_modules:/app/firescan_modules:ro"
     entrypoint: [ "python", "/app/orchestrator.py" ]
