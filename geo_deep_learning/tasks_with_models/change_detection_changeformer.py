@@ -185,6 +185,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             out_channels=self.num_classes + 1 if self.num_classes == 1 else self.num_classes,
         )
 
+        for module in self.model.modules():
+            if isinstance(module, torch.nn.LayerNorm):
+                module.eps = 1e-5  # défaut PyTorch, mais vérifions
+
         if self.weights_from_checkpoint_path:
             map_location = self.device
             load_parts = self.hparams.get("load_parts")
@@ -503,26 +507,29 @@ class ChangeDetectionChangeFormer(LightningModule):
         # S'assurer que le masque commun est bien en float et sans NaN
         common_data_mask = common_data_mask.to(dtype=torch.float32)
         common_data_mask = torch.nan_to_num(common_data_mask, nan=0.0, posinf=1.0, neginf=0.0)
-        if logger.isEnabledFor(logging.DEBUG):
-            with torch.no_grad():
-                logger.debug(
-                    "x_pre stats: min=%.4f, max=%.4f, mean=%.4f",
-                    x_pre.min().item(), x_pre.max().item(), x_pre.mean().item(),
-                )
-                logger.debug(
-                    "x_post stats: min=%.4f, max=%.4f, mean=%.4f",
-                    x_post.min().item(), x_post.max().item(), x_post.mean().item(),
-                )
 
-        if logger.isEnabledFor(logging.DEBUG):
-            with torch.no_grad():
-                y_cpu = y.detach().cpu()
-                logger.debug(
-                    "mask min: %s, max: %s, unique (échantillon): %s",
-                    y_cpu.min().item(),
-                    y_cpu.max().item(),
-                    torch.unique(y_cpu)[:20],
-                )
+        # Vérifier la proportion de pixels valides par sample
+        valid_ratio = common_data_mask.flatten(1).mean(dim=1)  # [B]
+        min_valid_ratio = 0.1  # au moins 10% de pixels valides
+        if (valid_ratio < min_valid_ratio).any():
+            bad_samples = (valid_ratio < min_valid_ratio).sum().item()
+            logger.warning(
+                "Skipping batch: %d/%d samples have <%.0f%% valid pixels. "
+                "Valid ratios: %s",
+                bad_samples, batch_size, min_valid_ratio * 100,
+                valid_ratio.tolist(),
+            )
+            num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
+            dummy_one_hot = torch.zeros(
+                (batch_size, num_classes, x_post.shape[2], x_post.shape[3]),
+                device=x_post.device, dtype=x_post.dtype,
+            )
+            zero_loss = torch.tensor(0.0, device=x_post.device, dtype=x_post.dtype, requires_grad=True)
+            logits_safe = torch.zeros(
+                (batch_size, num_classes, x_post.shape[2], x_post.shape[3]),
+                device=x_post.device, dtype=x_post.dtype,
+            )
+            return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, batch_size
 
         logits = self(x_pre, x_post)  # [B, C, H, W]
         y_float = y.float()
