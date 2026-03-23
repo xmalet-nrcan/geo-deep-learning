@@ -1,0 +1,8 @@
+SQLAlchemy
+GeoAlchemy2
+sqlmodel
+psycopg2-binary
+shapely
+geoalchemy2
+nrcan-etl-toolbox
+python-dotenv
