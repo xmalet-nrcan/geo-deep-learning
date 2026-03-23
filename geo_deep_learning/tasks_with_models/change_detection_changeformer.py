@@ -508,27 +508,48 @@ class ChangeDetectionChangeFormer(LightningModule):
         common_data_mask = common_data_mask.to(dtype=torch.float32)
         common_data_mask = torch.nan_to_num(common_data_mask, nan=0.0, posinf=1.0, neginf=0.0)
 
-        # Vérifier la proportion de pixels valides par sample
+        # --- Remplacer les images quasi-vides par du bruit faible ---
+        # pour éviter NaN dans LayerNorm (variance ~ 0 → gradient explose)
         valid_ratio = common_data_mask.flatten(1).mean(dim=1)  # [B]
         min_valid_ratio = 0.1  # au moins 10% de pixels valides
-        if (valid_ratio < min_valid_ratio).any():
-            bad_samples = (valid_ratio < min_valid_ratio).sum().item()
+        bad_mask = valid_ratio < min_valid_ratio  # [B] booléen
+        if bad_mask.any():
+            n_bad = bad_mask.sum().item()
             logger.warning(
-                "Skipping batch: %d/%d samples have <%.0f%% valid pixels. "
-                "Valid ratios: %s",
-                bad_samples, batch_size, min_valid_ratio * 100,
-                valid_ratio.tolist(),
+                "Patching %d/%d samples with <%.0f%% valid pixels (ratios: %s)",
+                n_bad, batch_size, min_valid_ratio * 100,
+                [f"{r:.3f}" for r, b in zip(valid_ratio.tolist(), bad_mask.tolist()) if b],
             )
-            num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
+            # Remplir les samples quasi-vides avec du bruit uniforme [0, 0.01]
+            # pour que LayerNorm ait une variance > 0
+            noise = torch.rand_like(x_pre[0:1]) * 0.01
+            for idx in bad_mask.nonzero(as_tuple=True)[0]:
+                x_pre[idx] = noise[0]
+                x_post[idx] = noise[0]
+                # Mettre le masque à 0 pour exclure ces samples de la loss
+                common_data_mask[idx] = 0.0
+                y[idx] = 0
+
+        logits = self(x_pre, x_post)  # [B, C, H, W]
+        y_float = y.float()
+        logits_no_nan = torch.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=0.0)
+        num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
+
+        # Vérifier les logits (NaN résiduel)
+        if not torch.isfinite(logits).all():
+            with torch.no_grad():
+                logger.warning(
+                    "Logits contain non-finite values — skipping batch. "
+                    "pre_names=%s, post_names=%s",
+                    batch.get('image_pre_name', 'N/A'),
+                    batch.get('image_name_post', 'N/A'),
+                )
+            zero_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype, requires_grad=True)
+            logits_safe = torch.zeros_like(logits)
             dummy_one_hot = torch.zeros(
                 (batch_size, num_classes, x_post.shape[2], x_post.shape[3]),
-                device=x_post.device, dtype=x_post.dtype,
-            )
-            zero_loss = torch.tensor(0.0, device=x_post.device, dtype=x_post.dtype, requires_grad=True)
-            logits_safe = torch.zeros(
-                (batch_size, num_classes, x_post.shape[2], x_post.shape[3]),
-                device=x_post.device, dtype=x_post.dtype,
-            )
+                device=logits.device, dtype=logits.dtype, )
+
             return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, batch_size
 
         logits = self(x_pre, x_post)  # [B, C, H, W]
