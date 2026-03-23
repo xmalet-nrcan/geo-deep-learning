@@ -48,6 +48,8 @@ services:
     container_name: event_detection_orchestrator
     restart: unless-stopped
     user: '9005'
+    env_file:
+      - .env
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - PYTORCH_ALLOC_CONF=expandable_segments:True
@@ -66,11 +68,11 @@ services:
       # Checkpoints
       - "./models_checkpoints:/app/model_checkpoints:rw"
       - "./lightning_logs:/app/lightning_logs:rw"
-      # ← [2] L'orchestrateur — chemin corrigé
-      - "../firescan/firescan_modules/module_specific/orchestrator/orchestrator.py:/app/orchestrator.py:ro"
+      # L'orchestrateur lui-même
+      # - "../firescan/firescan_modules/module_specific/orchestrator/orchestrator.py:/app/orchestrator.py:ro"
       # Module d'ingestion firescan (Phase 2)
       - "../firescan/firescan_modules:/app/firescan_modules:ro"
-    entrypoint: [ "python", "/app/orchestrator.py" ]
+    entrypoint: [ "python", "/app/firescan_modules/module_specific/orchestrator/orchestrator.py" ]
     deploy:
       resources:
         reservations:
