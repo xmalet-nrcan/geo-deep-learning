@@ -2,12 +2,13 @@ seed_everything: true
 
 
 trainer:
+#  detect_anomaly: true
   accelerator: "gpu"
   devices: -1
   strategy: auto
 
   gradient_clip_val: 1.0
-  precision: "32-mixed"
+  precision: "32-true"
   sync_batchnorm: true
   gradient_clip_algorithm: "norm"
   logger:
@@ -58,7 +59,7 @@ trainer:
           60: 4    # to epoch 40, accumule 4 batchs 16*4 = 64 effective batch size
           80: 2    # to epoch 50, accumule 2 batchs 16*2 = 32 effective batch size
           100: 1    # then normal training with 16 batch size
-  max_epochs: 150
+  max_epochs: 200
   check_val_every_n_epoch: 1
 
 model:
@@ -101,19 +102,28 @@ model:
         betas:
         - 0.9
         - 0.999
+    #    scheduler:
+#      class_path: torch.optim.lr_scheduler.OneCycleLR
+#      init_args:
+#        max_lr: 1e-4
+#        total_steps: 53100    # fallback si estimated_stepping_batches == -1
+#        pct_start: 0.1
+#        anneal_strategy: "cos"
+#        div_factor: 10
+#        final_div_factor: 100
+#    scheduler_config:
+#      interval: "step"
+#      frequency: 1
     scheduler:
-      class_path: torch.optim.lr_scheduler.OneCycleLR
+      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
       init_args:
-        max_lr: 1e-4
-        total_steps: 53100    # fallback si estimated_stepping_batches == -1
-        pct_start: 0.1
-        anneal_strategy: "cos"
-        div_factor: 10
-        final_div_factor: 100
+        #        T_max: 150
+        T_0: 10
+        T_mult: 2
+        eta_min: 1e-6
     scheduler_config:
-      interval: "step"
+      interval: "epoch"
       frequency: 1
-
 
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
@@ -131,8 +141,8 @@ data:
     split_on_columns: db_nbac_fire_id
     csv_root_folder: &data_root /mnt/data_disk/projet_RCM_scanfire/
     patches_root_folder: /mnt/data_disk/projet_RCM_scanfire/grided_folder
-    #csv_file_name: pre_post_datasets_all_2023_2025.csv
-    csv_file_name:  pre_post_datasets_all.csv
+    csv_file_name: pre_post_datasets_all_2023_2025.csv
+    #csv_file_name:  pre_post_datasets_all.csv
     #csv_file_name: pre_post_datasets.csv
     split_ratios: [0.8 ,0.1, 0.1]
 
