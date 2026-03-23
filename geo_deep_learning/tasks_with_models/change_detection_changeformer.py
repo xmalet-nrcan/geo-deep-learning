@@ -738,7 +738,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         }
 
         # --- Propager les métadonnées optionnelles (event_id, db_nbac_fire_id, etc.) ---
-        for key in ("event_id",
+        for key in ("pair_id",
+                    "event_id",
                     "db_nbac_fire_id",
                     'group_date_pre',
                     'group_date_post',
@@ -793,6 +794,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         }
 
         for batch_result in predictions:
+            batch_pair_ids = batch_result.get("pair_id")
             batch_cell_id = batch_result['cell_id']
             y_pred = batch_result["predictions"]  # [B, H_padded, W_padded]
             names = batch_result["pre_post_name"]
@@ -814,7 +816,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             for i in range(batch_size):
                 cell_id = batch_cell_id[i]
                 sample_name = names[i].replace('\n', '').replace('|', '_').replace('/', '_')
-
+                pair_id = self._extract_scalar(batch_pair_ids, i, default=None)
                 event_id = self._extract_scalar(batch_event_ids, i, default="unknown_event")
                 group_id_pre = self._extract_scalar(batch_group_id_pre, i, default="all")
                 group_id_post = self._extract_scalar(batch_group_id_post, i, default="all")
@@ -850,7 +852,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 event_date_dir = base_dir / event_id / predict_date
                 tile_dir = event_date_dir / cell_id
                 tile_dir.mkdir(parents=True, exist_ok=True)
-                out_path = tile_dir / f"{sample_name}.tif"
+                out_path = tile_dir / f"{pair_id}-{sample_name}.tif"
 
 
                 with rio.open(str(out_path), "w", **profile_i) as dst:
@@ -859,12 +861,13 @@ class ChangeDetectionChangeFormer(LightningModule):
                     # Collecter pour les merges
 
                     event_date_key = str(event_date_dir)
-                    group_tile_paths[(event_date_key, str(group_date_pre), str(group_date_post))].append(out_path)
+                    group_tile_paths[(event_date_key, str(group_id_pre), str(group_id_post))].append(out_path)
                     event_all_tile_paths[event_date_key].append(out_path)
 
                 logger.info("Saved prediction to %s (%dx%d)", out_path, orig_w, orig_h)
 
                 manifest["predictions"].append({
+                    "pair_id": pair_id,
                     "event_id": event_id,
                     "cell_id": cell_id,
                     "group_id_pre": group_id_pre,
