@@ -527,23 +527,26 @@ class ChangeDetectionChangeFormer(LightningModule):
         logits = self(x_pre, x_post)  # [B, C, H, W]
         y_float = y.float()
         logits_no_nan = torch.nan_to_num(logits, nan=1e15)
+        num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
 
         # Vérifier les logits avant masquage
         if not torch.isfinite(logits).all():
             with torch.no_grad():
-
-                logger.debug(
-                    "[DEBUG] %s - %s logits non-finis: min=%s, max=%s, mean=%s",
-                    batch['image_pre_name'],
-                    batch['image_name_post'],
-                    torch.min(logits_no_nan).item() if torch.isfinite(logits_no_nan).any() else "NaN",
-                    torch.max(logits_no_nan).item() if torch.isfinite(logits_no_nan).any() else "NaN",
-                    torch.nanmean(logits).item() if torch.isfinite(logits).any() else "NaN",
+                logger.warning(
+                    "Logits contain non-finite values — skipping batch. "
+                    "pre_names=%s, post_names=%s",
+                    batch.get('image_pre_name', 'N/A'),
+                    batch.get('image_name_post', 'N/A'),
                 )
-            raise RuntimeError("Logits contain non-finite values (NaN/Inf) before masking.")
+            # Retourner une loss nulle pour ne pas contaminer les gradients
+            zero_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype, requires_grad=True)
+            logits_safe = torch.zeros_like(logits)
+            dummy_one_hot = torch.zeros(
+                (batch_size, num_classes, x_post.shape[2], x_post.shape[3]),
+                device=logits.device, dtype=logits.dtype,
+            )
+            return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, batch_size
 
-
-        num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
 
         # Préparation du one-hot
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
