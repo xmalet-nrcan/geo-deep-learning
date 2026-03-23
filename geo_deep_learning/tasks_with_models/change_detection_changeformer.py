@@ -206,15 +206,22 @@ class ChangeDetectionChangeFormer(LightningModule):
                 self.hparams["scheduler"]["class_path"]
                 == "torch.optim.lr_scheduler.OneCycleLR"
         ):
-            max_lr = (
-                self.hparams.get("scheduler", {}).get("init_args", {}).get("max_lr")
-            )
+            init_args = self.hparams.get("scheduler", {}).get("init_args", {})
+            max_lr = init_args.get("max_lr")
+            # Récupérer les paramètres optionnels du YAML
+            extra_kwargs = {}
+            for key in ("pct_start", "anneal_strategy", "div_factor", "final_div_factor",
+                        "three_phase", "cycle_momentum"):
+                if key in init_args:
+                    extra_kwargs[key] = init_args[key]
+
             stepping_batches = self.trainer.estimated_stepping_batches
             if stepping_batches > -1:
                 scheduler = torch.optim.lr_scheduler.OneCycleLR(
                     optimizer,
                     max_lr=max_lr,
                     total_steps=stepping_batches,
+                    **extra_kwargs,
                 )
             elif (
                     stepping_batches == -1
@@ -233,22 +240,71 @@ class ChangeDetectionChangeFormer(LightningModule):
                     max_lr=max_lr,
                     steps_per_epoch=steps_per_epoch + buffer_steps,
                     epochs=max_epochs,
+                    **extra_kwargs,
                 )
             else:
-                stepping_batches = (
-                    self.hparams.get("scheduler", {})
-                    .get("init_args", {})
-                    .get("total_steps")
-                )
+                total_steps = init_args.get("total_steps")
                 scheduler = torch.optim.lr_scheduler.OneCycleLR(
                     optimizer,
                     max_lr=max_lr,
-                    total_steps=stepping_batches,
+                    total_steps=total_steps,
+                    **extra_kwargs,
                 )
         else:
             scheduler = self.scheduler(optimizer)
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
+
+    # def configure_optimizers(self) -> list[list[dict[str, Any]]]:
+    #     """Configure optimizers."""
+    #     optimizer = self.optimizer(self.parameters())
+    #     if (
+    #             self.hparams["scheduler"]["class_path"]
+    #             == "torch.optim.lr_scheduler.OneCycleLR"
+    #     ):
+    #         max_lr = (
+    #             self.hparams.get("scheduler", {}).get("init_args", {}).get("max_lr")
+    #         )
+    #         stepping_batches = self.trainer.estimated_stepping_batches
+    #         if stepping_batches > -1:
+    #             scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #                 optimizer,
+    #                 max_lr=max_lr,
+    #                 total_steps=stepping_batches,
+    #             )
+    #         elif (
+    #                 stepping_batches == -1
+    #                 and getattr(self.trainer.datamodule, "epoch_size", None) is not None
+    #         ):
+    #             batch_size = self.trainer.datamodule.batch_size
+    #             epoch_size = self.trainer.datamodule.epoch_size
+    #             accumulate_grad_batches = self.trainer.accumulate_grad_batches
+    #             max_epochs = self.trainer.max_epochs
+    #             steps_per_epoch = math.ceil(
+    #                 epoch_size / (batch_size * accumulate_grad_batches),
+    #             )
+    #             buffer_steps = int(steps_per_epoch * accumulate_grad_batches)
+    #             scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #                 optimizer,
+    #                 max_lr=max_lr,
+    #                 steps_per_epoch=steps_per_epoch + buffer_steps,
+    #                 epochs=max_epochs,
+    #             )
+    #         else:
+    #             stepping_batches = (
+    #                 self.hparams.get("scheduler", {})
+    #                 .get("init_args", {})
+    #                 .get("total_steps")
+    #             )
+    #             scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #                 optimizer,
+    #                 max_lr=max_lr,
+    #                 total_steps=stepping_batches,
+    #             )
+    #     else:
+    #         scheduler = self.scheduler(optimizer)
+    #
+    #     return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
 
     def forward(self, image_pre: Tensor, image_post: Tensor) -> Tensor:
         """Forward pass."""
@@ -622,6 +678,9 @@ class ChangeDetectionChangeFormer(LightningModule):
             dataloader_idx: int = 0,
     ) -> dict[str, Any]:
         """Run prediction step (inference only, no loss/metrics)."""
+
+        # TODO : Masquer l'eau
+
         x_pre = batch["image_pre"]
         x_post = batch["image"]
 

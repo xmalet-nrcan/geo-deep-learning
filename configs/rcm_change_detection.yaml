@@ -5,13 +5,9 @@ trainer:
   accelerator: "gpu"
   devices: -1
   strategy: auto
-#    class_path: lightning.pytorch.strategies.DDPStrategy
-#    init_args:
-#      find_unused_parameters: false
-#      gradient_as_bucket_view: true
-#      static_graph: true
+
   gradient_clip_val: 1.0
-  precision: "bf16-mixed"
+  precision: "32-mixed"
   sync_batchnorm: true
   gradient_clip_algorithm: "norm"
   logger:
@@ -106,17 +102,18 @@ model:
         - 0.9
         - 0.999
     scheduler:
-      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
+      class_path: torch.optim.lr_scheduler.OneCycleLR
       init_args:
-#        T_max: 150
-        T_0: 10
-        T_mult: 2
-        eta_min: 1e-6
+        max_lr: 1e-4
+        total_steps: 53100    # fallback si estimated_stepping_batches == -1
+        pct_start: 0.1
+        anneal_strategy: "cos"
+        div_factor: 10
+        final_div_factor: 100
     scheduler_config:
-      interval: "epoch"
+      interval: "step"
       frequency: 1
-#      warmup_epochs: 10
-#      warmup_strategy: "linear"
+
 
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
