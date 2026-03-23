@@ -553,9 +553,6 @@ class ChangeDetectionChangeFormer(LightningModule):
             return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, batch_size
 
         logits = self(x_pre, x_post)  # [B, C, H, W]
-        y_float = y.float()
-        logits_no_nan = torch.nan_to_num(logits, nan=1e15)
-        num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
 
         # Vérifier les logits avant masquage
         if not torch.isfinite(logits).all():
@@ -786,6 +783,15 @@ class ChangeDetectionChangeFormer(LightningModule):
         logger.info(f"Saving predictions to {base_dir}")
         base_dir.mkdir(parents=True, exist_ok=True)
 
+        # --- Écrire le manifeste JSON pour l'ingestion DB ---
+        manifest = {
+            "prediction_date": predict_date,
+            "model_name": self.change_detection_model,
+            "checkpoint": str(self.weights_from_checkpoint_path or ""),
+            "base_dir": str(base_dir),
+            "predictions": [],
+        }
+
         for batch_result in predictions:
             batch_cell_id = batch_result['cell_id']
             y_pred = batch_result["predictions"]  # [B, H_padded, W_padded]
@@ -845,6 +851,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                 tile_dir = event_date_dir / cell_id
                 tile_dir.mkdir(parents=True, exist_ok=True)
                 out_path = tile_dir / f"{sample_name}.tif"
+
+
                 with rio.open(str(out_path), "w", **profile_i) as dst:
                     dst.write(pred_np[np.newaxis, :, :])
                 # Collecter pour le merge
@@ -853,7 +861,25 @@ class ChangeDetectionChangeFormer(LightningModule):
                     event_date_key = str(event_date_dir)
                     group_tile_paths[(event_date_key, str(group_date_pre), str(group_date_post))].append(out_path)
                     event_all_tile_paths[event_date_key].append(out_path)
+
                 logger.info("Saved prediction to %s (%dx%d)", out_path, orig_w, orig_h)
+
+                manifest["predictions"].append({
+                    "event_id": event_id,
+                    "cell_id": cell_id,
+                    "group_id_pre": group_id_pre,
+                    "group_id_post": group_id_post,
+                    "group_date_pre": group_date_pre,
+                    "group_date_post": group_date_post,
+                    "tif_path": str(out_path),
+                })
+
+                manifest_path = base_dir / "manifest.json"
+                import json
+                with open(manifest_path, "w") as f:
+                    json.dump(manifest, f, indent=2, default=str)
+                logger.info("Saved prediction manifest to %s", manifest_path)
+
         self._merge_predictions(group_tile_paths, event_all_tile_paths)
         logger.info("All predictions saved to %s", base_dir)
 
