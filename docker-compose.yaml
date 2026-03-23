@@ -38,3 +38,41 @@ services:
           - driver: nvidia
             count: 1
             capabilities: [gpu]
+
+  event_detection_orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile  # basé sur le Dockerfile geo-deep-learning (GPU)
+    runtime: nvidia
+    shm_size: '32gb'
+    container_name: event_detection_orchestrator
+    restart: unless-stopped    # ← redémarrage automatique si crash
+    user: '9005'
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTORCH_ALLOC_CONF=expandable_segments:True
+      - POLL_INTERVAL_SECONDS=300        # 5 min entre chaque vérification
+      - LOGGER_LEVEL=INFO
+      - CSV_OUTPUT_DIR=/mnt/data_disk/projet_RCM_scanfire/grided_folder
+      - PREDICTIONS_DIR=/mnt/data_disk/projet_RCM_scanfire/grided_folder/predictions
+      - PREDICT_CONFIG=/app/configs/model_conf.yaml
+    volumes:
+      # Données RCM
+      - "/mnt/data_disk/projet_RCM_scanfire:/mnt/data_disk/projet_RCM_scanfire:rw"
+      # Config du modèle
+      - "./configs/rcm_change_detection_predict.yaml:/app/configs/model_conf.yaml:ro"
+      # Checkpoints
+      - "./models_checkpoints:/app/model_checkpoints:rw"
+      - "./lightning_logs:/app/lightning_logs:rw"
+      # L'orchestrateur lui-même
+      - "./orchestrator.py:/app/orchestrator.py:ro"
+      # Module d'ingestion firescan (Phase 2)
+      - "../firescan/firescan_modules:/app/firescan_modules:ro"
+    entrypoint: [ "python", "/app/orchestrator.py" ]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
