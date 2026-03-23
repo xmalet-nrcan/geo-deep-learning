@@ -27,6 +27,7 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
         files = []
         for (img_pre,
              img,
+             pair_id,
              group_id_pre,
              group_id_post,
              event_id,
@@ -38,6 +39,7 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
              event_start_date) in df_csv[
             ['pre_input_file',
              'post_input_file',
+             "pair_id",
              'group_id_pre',
              'group_id_post',
              'event_id',
@@ -52,41 +54,43 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
             img_post_path = img.replace("$ROOT_PATH", self.patches_root_folder).strip()
             if Path(img_pre_path).exists() and Path(img_post_path).exists():
                 files.append({
-                "image_pre": img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip(),
-                "image": img.replace("$ROOT_PATH", self.patches_root_folder).strip(),
-                # "mask": self._get_mask_path(cell_id, group_date_post),
-                "water_mask": self._get_water_mask_path(cell_id),
-                "cell_id": cell_id,
-                "event_id": event_id,
-                "group_date_pre": group_date_pre,
-                "group_date_post": group_date_post,
-                "beam": beam,
-                "sat_pass": sat_pass,
-                "group_id_pre": group_id_pre,
-                "group_id_post": group_id_post,
-                "event_start_date": event_start_date,
-            })
+                    "image_pre": img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip(),
+                    "image": img.replace("$ROOT_PATH", self.patches_root_folder).strip(),
+                    # "mask": self._get_mask_path(cell_id, group_date_post),
+                    "water_mask": self._get_water_mask_path(cell_id),
+                    "pair_id": pair_id,
+                    "cell_id": cell_id,
+                    "event_id": event_id,
+                    "group_date_pre": group_date_pre,
+                    "group_date_post": group_date_post,
+                    "beam": beam,
+                    "sat_pass": sat_pass,
+                    "group_id_pre": group_id_pre,
+                    "group_id_post": group_id_post,
+                    "event_start_date": event_start_date,
+                })
 
-        logger.info(f"Loaded {len(files)} files for {len(df_csv)} rows. Nb of event : {len(df_csv['event_id'].unique())}")
-
+        logger.info(
+            f"Loaded {len(files)} files for {len(df_csv)} rows. Nb of event : {len(df_csv['event_id'].unique())}")
 
         return files
 
     def _get_metadata(self, data: dict[str, Any]) -> dict[str, Any]:
         """Metadata specific to the predict CSV schema."""
         return {
+            "pair_id": data["pair_id"],
             "event_id": data["event_id"],
             "event_start_date": data["event_start_date"],
-            "group_id_pre" : data["group_id_pre"],
-            "group_id_post" : data["group_id_post"],
-            "group_date_pre" : data["group_date_pre"],
-            "group_date_post" : data["group_date_post"],
+            "group_id_pre": data["group_id_pre"],
+            "group_id_post": data["group_id_post"],
+            "group_date_pre": data["group_date_pre"],
+            "group_date_post": data["group_date_post"],
         }
 
     def _get_pre_post_name(self, data: dict[str, str]) -> str:
         """Build identifier adapted to predict CSV columns."""
         return (
-            f"{data['cell_id']}_event_{data['event_id']}|"
+            f"{data['cell_id']}_event_{data['event_id']}_pair_{data['pair_id']}|"
             f"{'ASC' if data['sat_pass'] == SatellitePass.ASCENDING else 'DESC'}-{data['beam'].name}|"
             f"({data['group_id_pre']}){data['group_date_pre']}_"
             f"({data['group_id_post']}){data['group_date_post']}|"
