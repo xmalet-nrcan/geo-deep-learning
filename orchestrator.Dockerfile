@@ -12,6 +12,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Dépendances firescan_modules (Phase 2)
+COPY requirements-orchestrator.txt .
 RUN pip install --no-cache-dir -r requirements-orchestrator.txt
 
 ENV UID=9005 \

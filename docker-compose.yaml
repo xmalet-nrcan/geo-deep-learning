@@ -54,7 +54,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - PYTORCH_ALLOC_CONF=expandable_segments:True
       # ← [1] DATABASE_URL MANQUANT — AJOUTÉ
-      - POLL_INTERVAL_SECONDS=300
+      - POLL_INTERVAL_SECONDS=30
       - LOGGER_LEVEL=INFO
       - CSV_OUTPUT_DIR=/mnt/data_disk/projet_RCM_scanfire/grided_folder
       # ← [6] PREDICTIONS_DIR doit matcher predict_output_dir du YAML (sans trailing slash)
