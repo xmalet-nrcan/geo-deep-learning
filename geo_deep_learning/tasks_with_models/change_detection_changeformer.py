@@ -769,7 +769,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # --- Base output directory ---
         predict_date = datetime.now().strftime("%Y%m%d_%H%M")
-        logger.debug(f"Saving predictions to -- {self.predict_output_dir}")
+        logger.info(f"Saving predictions to -- {self.predict_output_dir}")
         if self.predict_output_dir is not None:
             base_dir = Path(self.predict_output_dir)
             if base_dir.name != "predictions":

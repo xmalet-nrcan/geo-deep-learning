@@ -239,13 +239,13 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         if self.satellite_pass is not None:
             df_csv = df_csv[df_csv['sat_pass'] == self.satellite_pass]
             if df_csv.empty:
-                raise ValueError(f"No entries found for satellite pass {self.satellite_pass}")
+                logger.warning(f"No entries found for satellite pass {self.satellite_pass}")
 
         if len(self.beams) > 0:
             beams_str = [Beams[str(b).upper()] for b in self.beams]
             df_csv = df_csv[df_csv['beam'].isin(beams_str)]
             if df_csv.empty:
-                raise ValueError(f"No entries found for beams {beams_str}")
+                logger.warning(f"No entries found for beams {beams_str}")
         return df_csv
 
     def __len__(self) -> int:
