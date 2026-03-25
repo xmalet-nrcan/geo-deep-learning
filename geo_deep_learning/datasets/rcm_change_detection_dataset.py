@@ -119,6 +119,7 @@ def band_names_to_indices(band_names: Optional[List[Any]]) -> Optional[List[int]
 
 
 NO_DATA = 32767
+IGNORE_INDEX = 255
 
 
 class RCMChangeDetectionDataset(ChangeDetectionDataset):
@@ -320,15 +321,15 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         has_mask = mask_path is not None and Path(str(mask_path)).exists()
         if has_mask:
             mask, mask_name = self._load_mask(index)
-            mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, 0)
+            mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, IGNORE_INDEX)
         else:
             H, W = image_pre.shape[1], image_pre.shape[2]
             mask = torch.zeros((1, H, W), dtype=torch.float32)
             mask_name = "no_mask"
 
         # Apply common mask to images
-        image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre, 0)
-        image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, 0)
+        image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre, IGNORE_INDEX)
+        image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, IGNORE_INDEX)
 
         # Band selection
         bands_index = self._get_bands_to_load()
