@@ -13,6 +13,7 @@ import kornia as krn
 import torch
 from datetime import datetime
 from rasterio.transform import Affine
+from matplotlib import pyplot as plt
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
@@ -603,69 +604,102 @@ class ChangeDetectionChangeFormer(LightningModule):
             *,
             epoch_suffix: bool = True,
     ) -> int:
-        """
-        SegFormer-specific log visualizations.
+        """Log visualization figures comparing input diff, ground truth, and prediction.
+
+        Generates side-by-side images of:
+          - Absolute difference between post and pre images (3 selected bands)
+          - Ground truth mask (if available)
+          - Model prediction (with water/no-data pixels shown distinctly)
 
         Args:
-            trainer: Lightning trainer
-            batch: Batch data containing image, mask, image_name, mean, std
-            outputs: Model predictions
-            max_samples: Maximum number of samples to visualize
+            trainer: Lightning trainer (used for logger access)
+            batch: Batch dict with keys: image, image_pre, pre_post_name, mask,
+                   has_mask, mask-common
+            outputs: Model logits [B, C, H, W]
+            max_samples: Max number of samples to visualize
             artifact_prefix: Prefix for artifact path ("test" or "val")
             epoch_suffix: Whether to add epoch info to artifact filename
 
         Returns:
             Number of samples actually visualized
-
         """
         if batch is None or outputs is None:
             return 0
 
         try:
-            logger.info("Logging visualizations")
             image_batch = batch["image"]
             pre_image_batch = batch["image_pre"]
-            c_batch_size = len(image_batch)
-            logger.info("Batch size: %d", c_batch_size)
             batch_image_name = batch["pre_post_name"]
-            num_samples = min(max_samples, c_batch_size)
             has_mask_flags = batch.get("has_mask", torch.tensor([True] * len(image_batch)))
             mask_batch = batch["mask"].squeeze(1).long()
+            common_mask = batch.get("mask-common")  # [B, 1, H, W] or None
+
+            num_samples = min(max_samples, len(image_batch))
+            num_logged = 0
+
+            # Determine which bands to use for RGB visualization.
+            # Skip band 0 (COMMON_MASK) and last 2 (SAT_PASS, BEAM).
+            # Pick up to 3 data bands from the middle for a meaningful composite.
+            num_bands = image_batch.shape[1]
+            data_band_start = 1  # skip COMMON_MASK
+            data_band_end = max(num_bands - 2, data_band_start + 1)  # skip SAT_PASS, BEAM
+            available = list(range(data_band_start, data_band_end))
+            # Take 3 evenly spaced bands (or fewer if not enough)
+            if len(available) >= 3:
+                step = max(1, len(available) // 3)
+                rgb_indices = [available[0], available[len(available) // 2], available[-1]]
+            else:
+                rgb_indices = available[:3]
+
             for i in range(num_samples):
-                image = image_batch[i]
-                pre_image = pre_image_batch[i]
-                image_name = batch_image_name[i].replace('\n','')
-                image_diff = torch.abs(image - pre_image)
-                # mean = mean_batch[i]
-                # std = std_batch[i]
-                # image = denormalization(image, mean=mean, std=std)
-                mask_i = mask_batch[i]
-                has_real_mask = has_mask_flags[i] if isinstance(has_mask_flags,
-                                                                (list, torch.Tensor)) else has_mask_flags
+                image_post = image_batch[i]
+                image_pre = pre_image_batch[i]
+                image_name = batch_image_name[i].replace('\n', '')
+
+                # Compute absolute difference on selected bands
+                image_diff = torch.abs(image_post - image_pre)
+                vis_image = image_diff[rgb_indices, :, :]  # [3, H, W] or fewer
+
+                # Prediction with water/no-data masking
+                pred = torch.argmax(outputs[i], dim=0)  # [H, W]
+                if common_mask is not None:
+                    invalid = (common_mask[i].squeeze(0) < 0.5)  # [H, W]
+                    # Use a distinct value (255) for visualization of masked pixels
+                    pred = pred.clone()
+                    pred[invalid] = 255
+
+                # Ground truth mask
+                has_real_mask = has_mask_flags[i] if isinstance(
+                    has_mask_flags, (list, torch.Tensor)) else has_mask_flags
+                mask_i = mask_batch[i] if has_real_mask else None
+
                 fig = visualize_prediction(
-                    image=image_diff[[2,3,4], :, :],
-                    mask=mask_i if has_real_mask else None,  # None si pas de vrai masque
-                    prediction=torch.argmax(outputs[i], dim=0),
-                    sample_name=image_name,
+                    image=vis_image,
+                    mask=mask_i,
+                    prediction=pred,
+                    sample_name=image_name[:80],  # truncate long names
                     num_classes=self.num_classes,
                     class_colors=self.class_colors,
                 )
-                base_path = f"{artifact_prefix}/{Path(image_name).stem}"
+
+                # Build artifact path
+                # Use a short, filesystem-safe name
+                safe_name = Path(image_name[:60].replace('|', '_').replace('/', '_')).stem
+                base_path = f"{artifact_prefix}/{safe_name}"
                 if epoch_suffix and trainer is not None:
-                    artifact_file = (
-                        f"{base_path}/idx_{i}_epoch_{trainer.current_epoch}.png"
-                    )
+                    artifact_file = f"{base_path}/idx_{i}_epoch_{trainer.current_epoch}.png"
                 else:
                     artifact_file = f"{base_path}/idx_{i}.png"
-                if hasattr(trainer.logger, "experiment") and hasattr(trainer.logger.experiment, "log_figure"):
-                    # MLflowLogger
+
+                # Log to appropriate logger
+                if hasattr(trainer.logger, "experiment") and hasattr(
+                        trainer.logger.experiment, "log_figure"):
                     trainer.logger.experiment.log_figure(
                         figure=fig,
                         artifact_file=artifact_file,
                         run_id=getattr(trainer.logger, "run_id", None),
                     )
                 elif isinstance(trainer.logger, TensorBoardLogger):
-                    # TensorBoardLogger
                     trainer.logger.experiment.add_figure(
                         tag=artifact_file,
                         figure=fig,
@@ -673,11 +707,16 @@ class ChangeDetectionChangeFormer(LightningModule):
                     )
                 else:
                     logger.warning("Logger does not support figure logging.")
+
+                # Explicitly close figure to prevent memory leak
+                plt.close(fig)
+                num_logged += 1
+
         except Exception:
-            logger.exception("Error in SegFormer visualization")
+            logger.exception("Error in visualization logging")
             return 0
-        else:
-            return num_samples
+
+        return num_logged
 
     def predict_step(
             self,
