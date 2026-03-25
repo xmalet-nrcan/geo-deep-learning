@@ -52,7 +52,7 @@ model:
       warmup_strategy: "linear"
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    weights_from_checkpoint_path:  /app/model_checkpoints/2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl-epoch=56-val_loss=0.274.ckpt
+    weights_from_checkpoint_path: /app/model_checkpoints/2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl-epoch=56-val_loss=0.273.ckpt
     predict_output_dir: /mnt/data_disk/projet_RCM_scanfire/grided_folder/predictions
 
 data:
@@ -76,4 +76,4 @@ data:
     satellite_pass:  # null = pas de filtre
 
 # Chemin du checkpoint à charger pour la prédiction
-ckpt_path: /app/model_checkpoints/2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl-epoch=56-val_loss=0.274.ckpt
+#ckpt_path: /app/model_checkpoints/2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl-epoch=56-val_loss=0.273.ckpt
