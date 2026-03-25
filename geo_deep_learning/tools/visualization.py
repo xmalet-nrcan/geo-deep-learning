@@ -50,10 +50,17 @@ def visualize_prediction(  # noqa: PLR0913
         image = image[..., :rgb_channels]
 
     # Create a color map for the masks
+    # On ajoute une couleur grise en position num_classes pour les pixels invalides
     if class_colors is None:
         cmap = plt.cm.get_cmap("tab20")
+        vmax = num_classes - 1
     else:
-        cmap = ListedColormap(class_colors)
+        # class_colors contient les couleurs des classes [0, num_classes-1]
+        # On ajoute "#808080" (gris) pour l'index num_classes = pixels invalides
+        colors_with_nodata = class_colors + ["#808080"]
+        cmap = ListedColormap(colors_with_nodata)
+        vmax = len(colors_with_nodata) - 1  # = num_classes (inclut le gris)
+
 
     sample_name = "sample" if sample_name is None else sample_name
 
@@ -66,14 +73,14 @@ def visualize_prediction(  # noqa: PLR0913
                 mask,
                 cmap=cmap,
                 vmin=0,
-                vmax=num_classes - 1,
+                vmax=vmax,
             )
         plt.imsave(
             save_path / f"{sample_name}_prediction.png",
             prediction,
             cmap=cmap,
             vmin=0,
-            vmax=num_classes - 1,
+            vmax=vmax,
         )
 
     # Nombre de colonnes : 3 si masque présent, 2 sinon
@@ -100,13 +107,13 @@ def visualize_prediction(  # noqa: PLR0913
 
     # Plot ground truth mask (seulement si disponible)
     if mask is not None:
-        axes[ax_idx].imshow(mask, cmap=cmap, vmin=0, vmax=num_classes - 1)
+        axes[ax_idx].imshow(mask, cmap=cmap, vmin=0, vmax=vmax)
         axes[ax_idx].set_title("Ground Truth Mask")
         axes[ax_idx].axis("off")
         ax_idx += 1
 
     # Plot predicted mask
-    axes[ax_idx].imshow(prediction, cmap=cmap, vmin=0, vmax=num_classes - 1)
+    axes[ax_idx].imshow(prediction, cmap=cmap, vmin=0, vmax=vmax)
     axes[ax_idx].set_title("Predicted Mask")
     axes[ax_idx].axis("off")
 

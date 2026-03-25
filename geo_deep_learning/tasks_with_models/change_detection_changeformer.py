@@ -666,7 +666,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                     invalid = (common_mask[i].squeeze(0) < 0.5)  # [H, W]
                     # Use a distinct value (255) for visualization of masked pixels
                     pred = pred.clone()
-                    pred[invalid] = 255
+                    effective_num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
+                    pred[invalid] = effective_num_classes  # = 2 → index du gris dans la colormap
 
                 # Ground truth mask
                 has_real_mask = has_mask_flags[i] if isinstance(
