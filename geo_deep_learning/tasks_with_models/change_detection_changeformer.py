@@ -259,57 +259,6 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
 
-    # def configure_optimizers(self) -> list[list[dict[str, Any]]]:
-    #     """Configure optimizers."""
-    #     optimizer = self.optimizer(self.parameters())
-    #     if (
-    #             self.hparams["scheduler"]["class_path"]
-    #             == "torch.optim.lr_scheduler.OneCycleLR"
-    #     ):
-    #         max_lr = (
-    #             self.hparams.get("scheduler", {}).get("init_args", {}).get("max_lr")
-    #         )
-    #         stepping_batches = self.trainer.estimated_stepping_batches
-    #         if stepping_batches > -1:
-    #             scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #                 optimizer,
-    #                 max_lr=max_lr,
-    #                 total_steps=stepping_batches,
-    #             )
-    #         elif (
-    #                 stepping_batches == -1
-    #                 and getattr(self.trainer.datamodule, "epoch_size", None) is not None
-    #         ):
-    #             batch_size = self.trainer.datamodule.batch_size
-    #             epoch_size = self.trainer.datamodule.epoch_size
-    #             accumulate_grad_batches = self.trainer.accumulate_grad_batches
-    #             max_epochs = self.trainer.max_epochs
-    #             steps_per_epoch = math.ceil(
-    #                 epoch_size / (batch_size * accumulate_grad_batches),
-    #             )
-    #             buffer_steps = int(steps_per_epoch * accumulate_grad_batches)
-    #             scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #                 optimizer,
-    #                 max_lr=max_lr,
-    #                 steps_per_epoch=steps_per_epoch + buffer_steps,
-    #                 epochs=max_epochs,
-    #             )
-    #         else:
-    #             stepping_batches = (
-    #                 self.hparams.get("scheduler", {})
-    #                 .get("init_args", {})
-    #                 .get("total_steps")
-    #             )
-    #             scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #                 optimizer,
-    #                 max_lr=max_lr,
-    #                 total_steps=stepping_batches,
-    #             )
-    #     else:
-    #         scheduler = self.scheduler(optimizer)
-    #
-    #     return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
-
     def forward(self, image_pre: Tensor, image_post: Tensor) -> Tensor:
         """Forward pass."""
         return self.model(image_pre, image_post)[-1]  # Because ChangeFormer output a list in its forward pass.
@@ -360,11 +309,44 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # --- Calcul des métriques différé (pour éviter de casser autograd) ---
         with torch.no_grad():
+            common_mask = batch["mask-common"]  # [B, 1, H, W]
+            valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
+
             # On accumule les prédictions pour calculer les métriques à la fin
-            self.train_iou.update(logits, one_hot)
-            self.train_f1.update(logits, one_hot)
+            self.train_iou.update(valid_preds, valid_targets)
+            self.train_f1.update(valid_preds, valid_targets)
 
         return loss
+
+    @staticmethod
+    def _extract_valid_pixels(
+            logits: Tensor,
+            one_hot: Tensor,
+            common_mask: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Extract only valid pixels (non-water, non-nodata) for metric computation.
+
+        Args:
+            logits: [B, C, H, W] model output logits
+            one_hot: [B, C, H, W] one-hot encoded targets
+            common_mask: [B, 1, H, W] validity mask (1=valid, 0=invalid)
+
+        Returns:
+            valid_preds: [N] predicted class indices for valid pixels only
+            valid_targets: [N] target class indices for valid pixels only
+        """
+        # valid_pixels : [B, H, W] booléen
+        valid_pixels = (common_mask.squeeze(1) > 0.5)  # robust to float imprecision
+
+        # Prédictions et targets en indices de classe : [B, H, W]
+        preds = torch.argmax(logits, dim=1)  # [B, H, W]
+        targets = torch.argmax(one_hot, dim=1)  # [B, H, W]
+
+        # Extraire uniquement les pixels valides (aplati en 1D)
+        valid_preds = preds[valid_pixels]  # [N]
+        valid_targets = targets[valid_pixels]  # [N]
+
+        return valid_preds, valid_targets
 
     def on_train_epoch_end(self):
         self.log("train_iou", self.train_iou.compute(), prog_bar=True, sync_dist=True)
@@ -399,9 +381,14 @@ class ChangeDetectionChangeFormer(LightningModule):
             rank_zero_only=True,
         )
         with torch.no_grad():
-            y_pred = torch.argmax(logits, dim=1)
-            y_true = torch.argmax(one_hot, dim=1)
-            self.val_iou_classwise.update(y_pred, y_true)
+            # Masquer les pixels invalides avant de mettre à jour les métriques
+            common_mask = batch["mask-common"]  # [B, 1, H, W]
+            valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
+
+            if valid_preds.numel() > 0:
+                self.val_iou_classwise.update(valid_preds, valid_targets)
+                self.val_iou(valid_preds, valid_targets)
+                self.val_f1(valid_preds, valid_targets)
 
         self.val_iou(logits, one_hot)
         self.val_f1(logits, one_hot)
@@ -442,9 +429,13 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # --- Update metrics ---
         with torch.no_grad():
-            self.test_iou_classwise.update(y_pred, y_true)
-            self.test_iou.update(logits, one_hot)
-            self.test_f1.update(logits, one_hot)
+            common_mask = batch["mask-common"]  # [B, 1, H, W]
+            valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
+
+            if valid_preds.numel() > 0:
+                self.test_iou_classwise.update(valid_preds, valid_targets)
+                self.test_iou.update(valid_preds, valid_targets)
+                self.test_f1.update(valid_preds, valid_targets)
 
         # --- Log test loss (epoch-aggregated) ---
         self.log(
@@ -552,36 +543,25 @@ class ChangeDetectionChangeFormer(LightningModule):
 
             return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, batch_size
 
-        logits = self(x_pre, x_post)  # [B, C, H, W]
-
-        # Vérifier les logits avant masquage
-        if not torch.isfinite(logits).all():
-            with torch.no_grad():
-                logger.warning(
-                    "Logits contain non-finite values — skipping batch. "
-                    "pre_names=%s, post_names=%s",
-                    batch.get('image_pre_name', 'N/A'),
-                    batch.get('image_name_post', 'N/A'),
-                )
-            # Retourner une loss nulle pour ne pas contaminer les gradients
-            zero_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype, requires_grad=True)
-            logits_safe = torch.zeros_like(logits)
-            dummy_one_hot = torch.zeros(
-                (batch_size, num_classes, x_post.shape[2], x_post.shape[3]),
-                device=logits.device, dtype=logits.dtype,
-            )
-            return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, batch_size
-
 
         # Préparation du one-hot
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
-        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1)
+        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1) # clamp aussi les 255 → num_classes-1
         one_hot = torch.nn.functional.one_hot(y_one_hot.long(), num_classes=num_classes)
         one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
 
-        # Optionnel: appliquer aussi le masque sur le one_hot (pour ignorer les no-data)
-        # if common_data_mask.shape[-2:] == one_hot.shape[-2:]:
-        #     one_hot = one_hot * common_data_mask
+        # common_data_mask : [B, 1, H, W], 1=valide, 0=invalide (eau, no-data, padding)
+        # Expand le masque pour matcher les dimensions des logits et du one-hot
+        loss_mask = common_data_mask.to(dtype=torch.float32)
+        if loss_mask.dim() == 4 and loss_mask.shape[1] == 1:
+            loss_mask_expanded = loss_mask.expand_as(logits_no_nan)  # [B, C, H, W]
+        else:
+            loss_mask_expanded = loss_mask.unsqueeze(1).expand_as(logits_no_nan)
+
+        # Appliquer le masque : mettre à 0 les logits et targets pour les pixels invalides
+        # afin qu'ils ne contribuent pas à la loss
+        masked_logits = logits_no_nan * loss_mask_expanded
+        masked_one_hot = one_hot * loss_mask_expanded
 
         # Vérifier qu'il reste des pixels valides
         valid_sum = common_data_mask.sum()
@@ -599,8 +579,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             raise RuntimeError("One-hot targets contain non-finite values (NaN/Inf).")
 
         # --- Losses ---
-        ce_loss = self.secondary_loss(logits_no_nan.contiguous(), one_hot)
-        loss = self.main_loss(logits_no_nan.contiguous(), one_hot)
+        ce_loss = self.secondary_loss(masked_logits.contiguous(), masked_one_hot)
+        loss = self.main_loss(masked_logits.contiguous(), masked_one_hot)
         main_loss = w_sl * ce_loss + w_ml * loss
 
         # Dernière vérification
@@ -725,6 +705,19 @@ class ChangeDetectionChangeFormer(LightningModule):
             probs = torch.softmax(logits, dim=1)
             y_pred = torch.argmax(probs, dim=1)
 
+        # --- Masquer l'eau avec NO_DATA (32767) ---
+        # mask-common inclut déjà le masque d'eau (combiné dans le dataset)
+        # On peut aussi utiliser water_mask directement pour être explicite
+        if "mask-common" in batch:
+            common_mask = batch["mask-common"]  # [B, 1, H, W] bool ou float
+            # common_mask == 1 → pixel valide, == 0 → pixel à masquer (eau, no-data, etc.)
+            invalid_mask = (common_mask.squeeze(1) == 0)  # [B, H, W]
+            y_pred = y_pred.masked_fill(invalid_mask, NO_DATA)
+        elif "water_mask" in batch:
+            water_mask = batch["water_mask"]  # [B, 1, H, W]
+            is_water = (water_mask.squeeze(1) > 0)  # eau = valeur > 0
+            y_pred = y_pred.masked_fill(is_water, NO_DATA)
+
         # Retourner un dict avec tout ce qu'il faut pour sauvegarder après
         result = {
             "predictions": y_pred,  # [B, H, W] classes entières
@@ -829,7 +822,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 orig_w = orig_widths[i].item() if isinstance(orig_widths, torch.Tensor) else int(orig_widths[i])
 
                 # --- Découper le padding (crop au coin supérieur-gauche) ---
-                pred_np = y_pred[i, :orig_h, :orig_w].cpu().numpy().astype(np.uint8)
+                pred_np = y_pred[i, :orig_h, :orig_w].cpu().numpy().astype(np.uint16)
 
                 # --- Reconstruire le profil rasterio ---
                 crs_val = batch_profiles["crs"][i] if isinstance(batch_profiles["crs"], (list, tuple)) else batch_profiles["crs"]
@@ -842,8 +835,9 @@ class ChangeDetectionChangeFormer(LightningModule):
 
                 profile_i = {
                     "driver": "GTiff",
-                    "dtype": "uint8",
+                    "dtype": "uint16",
                     "count": 1,
+                    "nodata" : 32767,
                     "height": orig_h,  # ← dimensions ORIGINALES, pas paddées
                     "width": orig_w,  # ← dimensions ORIGINALES, pas paddées
                     "crs": crs_val,
