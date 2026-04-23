@@ -53,7 +53,7 @@ model:
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
     weights_from_checkpoint_path: /app/model_checkpoints/2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl-epoch=56-val_loss=0.273.ckpt
-    predict_output_dir: /mnt/data_disk/projet_RCM_scanfire/grided_folder/predictions
+    predict_output_dir: /mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
 
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
@@ -64,8 +64,8 @@ data:
     data_type_max: 1
     patch_size: [256, 256]
     # IMPORTANT : CSV contenant les données à prédire (peut être le même ou un nouveau)
-    csv_root_folder:  &data_root /mnt/data_disk/projet_RCM_scanfire/grided_folder
-    patches_root_folder: *data_root
+    csv_root_folder:  &data_root /mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
+    patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
     csv_file_name: vw_input_files_for_change_detection.csv
     # Le split n'est pas utilisé en predict, mais il faut quand même le passer
     #split_on_columns: db_nbac_fire_id

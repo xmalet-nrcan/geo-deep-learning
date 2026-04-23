@@ -16,7 +16,7 @@ trainer:
     init_args:
       save_dir: &log_dir ./lightning_logs
 
-      name: &run_name 2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
+      name: &run_name 2026_2_A_mask_water_10pct_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -30,7 +30,7 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         verbose: True
-        patience: 15
+        patience: 30
         min_delta: 1e-3
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
@@ -50,16 +50,17 @@ trainer:
     - class_path: lightning.pytorch.callbacks.StochasticWeightAveraging
       init_args:
         swa_lrs: 1e-3
-        annealing_epochs: 5
+        annealing_epochs: 10
+        swa_epoch_start: 0.75
     - class_path: lightning.pytorch.callbacks.GradientAccumulationScheduler
       init_args:
         scheduling:
           0: 16    # 16*8 = 128 effective batch size at start
-          30: 8    # to epoch 20, accumule 8 batchs 16*8 = 128 effective batch size
-          60: 4    # to epoch 40, accumule 4 batchs 16*4 = 64 effective batch size
-          80: 2    # to epoch 50, accumule 2 batchs 16*2 = 32 effective batch size
-          100: 1    # then normal training with 16 batch size
-  max_epochs: 200
+          50: 8    # to epoch 20, accumule 8 batchs 16*8 = 128 effective batch size
+          100: 4    # to epoch 40, accumule 4 batchs 16*4 = 64 effective batch size
+          150: 2    # to epoch 50, accumule 2 batchs 16*2 = 32 effective batch size
+          175: 1    # then normal training with 16 batch size
+  max_epochs: 240
   check_val_every_n_epoch: 1
 
 model:
@@ -73,7 +74,7 @@ model:
     # 1 for SAT_PASS encoding
     # 1 for BEAM encoding
     in_channels: 11 # Should be the length of data.band_names + 4
-    max_samples: 10
+    max_samples: 20
     num_classes: 1  # binary change detection
 
     main_loss:
@@ -81,6 +82,8 @@ model:
       class_path: segmentation_models_pytorch.losses.FocalLoss
       init_args:
         mode: "binary"
+        alpha: 0.75
+        gamma: 2.0
         # smooth_factor: 0.05
     secondary_loss:
       #class_path: segmentation_models_pytorch.losses.FocalLoss
@@ -118,7 +121,7 @@ model:
       class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
       init_args:
         #        T_max: 150
-        T_0: 10
+        T_0: 20
         T_mult: 2
         eta_min: 1e-6
     scheduler_config:
@@ -127,21 +130,22 @@ model:
 
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
-    weights_from_checkpoint_path: # /app/model_checkpoints/changeformer_tversky_bce_fire-id-epoch=02-val_loss=0.550.ckpt
+    #weights_from_checkpoint_path: /app/model_checkpoints/2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl-epoch=56-val_loss=0.273.ckpt
 
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
   init_args:
-    batch_size: 16
-    num_workers: 20
+    batch_size: 8
+    num_workers: 10
     data_type_max: 1
     patch_size:
     - 256
     - 256
     split_on_columns: db_nbac_fire_id
-    csv_root_folder: &data_root /mnt/data_disk/projet_RCM_scanfire/
-    patches_root_folder: /mnt/data_disk/projet_RCM_scanfire/grided_folder
-    csv_file_name: pre_post_datasets_all_2023_2025.csv
+    csv_root_folder: &data_root /mnt/geospatial/projet_RCM_scanfire/
+    patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
+    #csv_file_name: pre_post_datasets_all_2023_2025.csv
+    csv_file_name: tbl_input_pre_post_data.csv
     #csv_file_name:  pre_post_datasets_all.csv
     #csv_file_name: pre_post_datasets.csv
     split_ratios: [0.8 ,0.1, 0.1]
