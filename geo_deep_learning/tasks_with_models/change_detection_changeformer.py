@@ -154,9 +154,9 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         self.predict_output_dir = predict_output_dir
 
-    def _apply_aug(self) -> AugmentationSequential:
-        """Augmentation pipeline."""
 
+    def _apply_geo_aug(self) -> AugmentationSequential:
+        """Geometric augmentations (applied to images + masks)."""
         return AugmentationSequential(
             krn.augmentation.RandomHorizontalFlip(p=0.5, keepdim=True),
             krn.augmentation.RandomVerticalFlip(p=0.5, keepdim=True),
@@ -166,7 +166,21 @@ class ChangeDetectionChangeFormer(LightningModule):
                 align_corners=True,
                 keepdim=True,
             ),
-            data_keys=None, )
+            data_keys=None,
+        )
+
+    def _apply_intensity_aug(self) -> AugmentationSequential:
+        """Intensity augmentations (applied to images only)."""
+        return AugmentationSequential(
+            krn.augmentation.RandomGaussianNoise(mean=0.0, std=0.05, p=0.3, keepdim=True),
+            krn.augmentation.RandomGaussianBlur(
+                kernel_size=(3, 3), sigma=(0.1, 2.0), p=0.3, keepdim=True
+            ),
+            krn.augmentation.RandomErasing(
+                scale=(0.02, 0.1), ratio=(0.3, 3.3), p=0.3, keepdim=True
+            ),
+            data_keys=None,
+        )
 
     def on_before_batch_transfer(
             self,
@@ -283,9 +297,10 @@ class ChangeDetectionChangeFormer(LightningModule):
     def on_after_batch_transfer(self, batch, dataloader_idx):
         if not self.trainer.training:
             return batch
-        aug = self._apply_aug()
         device = batch["image"].device
 
+        # 1. Geometric augmentations on images + masks together
+        geo_aug = self._apply_geo_aug()
         keys_to_aug = {
             "image_pre": batch["image_pre"],
             "image": batch["image"],
@@ -295,10 +310,14 @@ class ChangeDetectionChangeFormer(LightningModule):
         if "mask" in batch:
             keys_to_aug["mask"] = batch["mask"]
 
-        transformed = aug(keys_to_aug)
+        transformed = geo_aug(keys_to_aug)
         for key in transformed:
             batch[key] = transformed[key].to(device, non_blocking=True)
 
+        # 2. Intensity augmentations on images only
+        intensity_aug = self._apply_intensity_aug()
+        for img_key in ["image_pre", "image"]:
+            batch[img_key] = intensity_aug({img_key: batch[img_key]})[img_key]
         return batch
 
     # TODO : Modifier pour avoir image pre/post
