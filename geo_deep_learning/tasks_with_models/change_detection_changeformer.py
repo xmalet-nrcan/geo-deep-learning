@@ -321,8 +321,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             sync_dist=True,
         )
 
-        self.log("main_loss", main_loss, on_epoch=True, sync_dist=True)
-        self.log("ce_loss", ce_loss, on_epoch=True, sync_dist=True)
+        self.log("main_loss", main_loss, on_epoch=True, sync_dist=True, batch_size=batch_size)
+        self.log("ce_loss", ce_loss, on_epoch=True, sync_dist=True, batch_size=batch_size)
 
         # --- Calcul des métriques différé (pour éviter de casser autograd) ---
         with torch.no_grad():
@@ -415,29 +415,26 @@ class ChangeDetectionChangeFormer(LightningModule):
                 self.val_precision(valid_preds, valid_targets)
                 self.val_recall(valid_preds, valid_targets)
 
-        self.val_iou(logits, one_hot)
-        self.val_f1(logits, one_hot)
-
-        self.log("val_iou", self.val_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("val_f1", self.val_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("val_precision", self.val_precision, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True,
-                 batch_size=batch_size)
-        self.log("val_recall", self.val_recall, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True,
-                 batch_size=batch_size)
         return logits
 
     def on_validation_epoch_end(self):
+        # Classwise IoU
         classwise_iou = self.val_iou_classwise.compute()
-
         for class_name, value in classwise_iou.items():
-            self.log(
-                f"val_iou_{class_name}",
-                value,
-                prog_bar=False,
-                sync_dist=True,
-            )
+            self.log(f"val_iou_{class_name}", value, prog_bar=False, sync_dist=True)
 
+        # Global metrics
+        self.log("val_iou", self.val_iou.compute(), prog_bar=True, sync_dist=True)
+        self.log("val_f1", self.val_f1.compute(), prog_bar=True, sync_dist=True)
+        self.log("val_precision", self.val_precision.compute(), prog_bar=True, sync_dist=True)
+        self.log("val_recall", self.val_recall.compute(), prog_bar=True, sync_dist=True)
+
+        # Reset all
         self.val_iou_classwise.reset()
+        self.val_iou.reset()
+        self.val_f1.reset()
+        self.val_precision.reset()
+        self.val_recall.reset()
 
     def test_step(
             self,
@@ -924,12 +921,11 @@ class ChangeDetectionChangeFormer(LightningModule):
 
                 with rio.open(str(out_path), "w", **profile_i) as dst:
                     dst.write(pred_np[np.newaxis, :, :])
-                # Collecter pour le merge
-                    # Collecter pour les merges
 
-                    event_date_key = str(event_date_dir)
-                    group_tile_paths[(event_date_key, str(group_id_pre), str(group_id_post))].append(out_path)
-                    event_all_tile_paths[event_date_key].append(out_path)
+                # Collecter pour les merges (APRÈS le with)
+                event_date_key = str(event_date_dir)
+                group_tile_paths[(event_date_key, str(group_id_pre), str(group_id_post))].append(out_path)
+                event_all_tile_paths[event_date_key].append(out_path)
 
                 logger.info("Saved prediction to %s (%dx%d)", out_path, orig_w, orig_h)
 

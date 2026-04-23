@@ -16,7 +16,7 @@ trainer:
     init_args:
       save_dir: &log_dir ./lightning_logs
 
-      name: &run_name 2026_2_A_mask_water_10pct_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl
+      name: &run_name 2026_2_A_mask_water_10pct_changeformer_focal-lovasz_fire_id_cosinewarm_mchi_rr_rl
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -87,7 +87,7 @@ model:
         # smooth_factor: 0.05
     secondary_loss:
       #class_path: segmentation_models_pytorch.losses.FocalLoss
-      class_path: segmentation_models_pytorch.losses.JaccardLoss
+      class_path: segmentation_models_pytorch.losses.LovaszLoss
       init_args:
         mode: "binary"
         #smooth: 0.05
