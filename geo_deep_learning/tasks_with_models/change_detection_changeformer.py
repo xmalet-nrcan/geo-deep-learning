@@ -23,7 +23,7 @@ from torchmetrics import JaccardIndex, F1Score
 from torchmetrics.classification import BinaryJaccardIndex
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
-
+from torchmetrics.classification import BinaryPrecision, BinaryRecall
 from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA, BandName  # noqa: F401
 from geo_deep_learning.models.change_detection.change_detection_model import ChangeDetectionModel
 from geo_deep_learning.tools.visualization import visualize_prediction
@@ -135,6 +135,22 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.train_f1 = F1Score(task=task_type, num_classes=num_classes)
         self.val_f1 = F1Score(task=task_type, num_classes=num_classes)
         self.test_f1 = F1Score(task=task_type, num_classes=num_classes)
+
+        if num_classes == 2:
+            self.train_precision = BinaryPrecision(threshold=self.threshold)
+            self.val_precision = BinaryPrecision(threshold=self.threshold)
+            self.test_precision = BinaryPrecision(threshold=self.threshold)
+            self.train_recall = BinaryRecall(threshold=self.threshold)
+            self.val_recall = BinaryRecall(threshold=self.threshold)
+            self.test_recall = BinaryRecall(threshold=self.threshold)
+        else:
+            from torchmetrics import Precision, Recall
+            self.train_precision = Precision(task=task_type, num_classes=num_classes)
+            self.val_precision = Precision(task=task_type, num_classes=num_classes)
+            self.test_precision = Precision(task=task_type, num_classes=num_classes)
+            self.train_recall = Recall(task=task_type, num_classes=num_classes)
+            self.val_recall = Recall(task=task_type, num_classes=num_classes)
+            self.test_recall = Recall(task=task_type, num_classes=num_classes)
 
         self.predict_output_dir = predict_output_dir
 
@@ -316,6 +332,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             # On accumule les prédictions pour calculer les métriques à la fin
             self.train_iou.update(valid_preds, valid_targets)
             self.train_f1.update(valid_preds, valid_targets)
+            self.train_precision.update(valid_preds, valid_targets)
+            self.train_recall.update(valid_preds, valid_targets)
 
         return loss
 
@@ -352,12 +370,16 @@ class ChangeDetectionChangeFormer(LightningModule):
     def on_train_epoch_end(self):
         self.log("train_iou", self.train_iou.compute(), prog_bar=True, sync_dist=True)
         self.log("train_f1", self.train_f1.compute(), prog_bar=True, sync_dist=True)
+        self.log("train_precision", self.train_precision.compute(), prog_bar=True, sync_dist=True)
+        self.log("train_recall", self.train_recall.compute(), prog_bar=True, sync_dist=True)
 
         lr = self.trainer.optimizers[0].param_groups[0]["lr"]
         self.log("lr", lr, prog_bar=True)
 
         self.train_iou.reset()
         self.train_f1.reset()
+        self.train_precision.reset()
+        self.train_recall.reset()
 
     def validation_step(
             self,
@@ -390,13 +412,18 @@ class ChangeDetectionChangeFormer(LightningModule):
                 self.val_iou_classwise.update(valid_preds, valid_targets)
                 self.val_iou(valid_preds, valid_targets)
                 self.val_f1(valid_preds, valid_targets)
+                self.val_precision(valid_preds, valid_targets)
+                self.val_recall(valid_preds, valid_targets)
 
         self.val_iou(logits, one_hot)
         self.val_f1(logits, one_hot)
 
         self.log("val_iou", self.val_iou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("val_f1", self.val_f1, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-
+        self.log("val_precision", self.val_precision, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True,
+                 batch_size=batch_size)
+        self.log("val_recall", self.val_recall, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True,
+                 batch_size=batch_size)
         return logits
 
     def on_validation_epoch_end(self):
@@ -437,6 +464,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                 self.test_iou_classwise.update(valid_preds, valid_targets)
                 self.test_iou.update(valid_preds, valid_targets)
                 self.test_f1.update(valid_preds, valid_targets)
+                self.test_precision.update(valid_preds, valid_targets)
+                self.test_recall.update(valid_preds, valid_targets)
 
         # --- Log test loss (epoch-aggregated) ---
         self.log(
@@ -476,11 +505,14 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Global metrics ---
         self.log("test_iou", self.test_iou.compute(), prog_bar=True, sync_dist=True)
         self.log("test_f1", self.test_f1.compute(), prog_bar=True, sync_dist=True)
-
+        self.log("test_precision", self.test_precision.compute(), prog_bar=True, sync_dist=True)
+        self.log("test_recall", self.test_recall.compute(), prog_bar=True, sync_dist=True)
         # --- Reset metrics ---
         self.test_iou_classwise.reset()
         self.test_iou.reset()
         self.test_f1.reset()
+        self.test_precision.reset()
+        self.test_recall.reset()
 
     def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[
         Any, Any, Any, Tensor, Any, float | Any, Any, Any, Any
@@ -568,8 +600,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         valid_sum = common_data_mask.sum()
         if valid_sum == 0:
             # Eviter NaN si la loss divise par le nombre de pixels
-            main_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype)
-            ce_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype)
+            main_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
+            ce_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
             loss = main_loss
             return x_pre, x_post, y_float, one_hot, logits_no_nan, loss, main_loss, ce_loss, batch_size
 
