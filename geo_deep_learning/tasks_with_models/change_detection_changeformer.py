@@ -532,7 +532,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Remplacer les images quasi-vides par du bruit faible ---
         # pour éviter NaN dans LayerNorm (variance ~ 0 → gradient explose)
         valid_ratio = common_data_mask.flatten(1).mean(dim=1)  # [B]
-        min_valid_ratio = 0.0  # au moins 10% de pixels valides
+        min_valid_ratio = 0.05  # au moins 10% de pixels valides
         bad_mask = valid_ratio < min_valid_ratio  # [B] booléen
         if bad_mask.any():
             n_bad = bad_mask.sum().item()
