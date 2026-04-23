@@ -187,29 +187,13 @@ class ChangeDetectionChangeFormer(LightningModule):
             data_keys=None,
         )
 
-    def _apply_sar_aware_aug(self, image: Tensor) -> Tensor:
-        """Apply lightweight SAR-specific augmentations (speckle + radiometric jitter)."""
-        out = image
-
-        if torch.rand(1, device=out.device).item() < self.sar_speckle_p:
-            # Multiplicative speckle factor around 1.0.
-            speckle = torch.randn_like(out) * self.sar_speckle_std + 1.0
-            out = out * speckle.clamp_min(0.0)
-
-        if torch.rand(1, device=out.device).item() < self.sar_jitter_p:
-            # Per-sample gain jitter to mimic mild radiometric calibration drift.
-            b = out.shape[0]
-            gain = 1.0 + (torch.rand((b, 1, 1, 1), device=out.device) * 2 - 1) * self.sar_jitter_max
-            out = out * gain
-
-        return out
-
-    # ------------------------------------------------------------------
-    # Hooks
-    # ------------------------------------------------------------------
-    def on_before_batch_transfer(self, batch: dict[str, Any], dataloader_idx: int) -> dict[str, Any]:
-        pad = AugmentationSequential(
-            krn.augmentation.PadTo(size=self.image_size, pad_mode="constant", pad_value=0, keepdim=False),
+    def on_before_batch_transfer(
+            self,
+            batch: dict[str, Any],
+            dataloader_idx: int,  # noqa: ARG002
+    ) -> dict[str, Any]:
+        aug = AugmentationSequential(
+            krn.augmentation.PadTo(size=self.image_size, pad_mode='constant', pad_value=0, keepdim=False),
             data_keys=None,
         )
 
@@ -225,7 +209,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 else:
                     keys_to_pad[mask_names] = batch[mask_names].to(torch.float32)
 
-        transformed = pad(keys_to_pad)
+        transformed = aug(keys_to_pad)
         batch.update(transformed)
         return batch
 
@@ -488,7 +472,9 @@ class ChangeDetectionChangeFormer(LightningModule):
             return None
 
         x_pre, x_post, y, one_hot, logits, loss, main_loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
-
+        # Convert logits to class predictions
+        y_pred = torch.argmax(logits, dim=1)
+        y_true = torch.argmax(one_hot, dim=1)
 
         # --- Update metrics ---
         with torch.no_grad():
@@ -612,13 +598,14 @@ class ChangeDetectionChangeFormer(LightningModule):
             return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, batch_size
 
 
-        # Préparation du one-hot (pour les métriques)
+        # Préparation du one-hot
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
-        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1)
+        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1) # clamp aussi les 255 → num_classes-1
         one_hot = torch.nn.functional.one_hot(y_one_hot.long(), num_classes=num_classes)
         one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
 
         # common_data_mask : [B, 1, H, W], 1=valide, 0=invalide (eau, no-data, padding)
+        # Expand le masque pour matcher les dimensions des logits et du one-hot
         loss_mask = common_data_mask.to(dtype=torch.float32)
         if loss_mask.dim() == 4 and loss_mask.shape[1] == 1:
             loss_mask_expanded = loss_mask.expand_as(logits_no_nan)  # [B, C, H, W]
