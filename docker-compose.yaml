@@ -68,8 +68,8 @@ services:
       # L'orchestrateur lui-même
       # - "../firescan/firescan_modules/module_specific/orchestrator/orchestrator.py:/app/orchestrator.py:ro"
       # Module d'ingestion firescan (Phase 2)
-      - "../firescan/firescan_modules:/app/firescan_modules:ro"
-    entrypoint: [ "python", "/app/firescan_modules/module_specific/orchestrator/orchestrator.py" ]
+      - "../scanfire/scanfire_modules:/app/scanfire_modules:ro"
+    entrypoint: [ "python", "/app/scanfire_modules/module_specific/orchestrator/segmentation_orchestrator.py" ]
     deploy:
       resources:
         reservations:

@@ -26,13 +26,15 @@ model:
       class_path: segmentation_models_pytorch.losses.FocalLoss
       init_args:
         mode: "binary"
+        alpha: 0.75
+        gamma: 2.0
     secondary_loss:
-      class_path: segmentation_models_pytorch.losses.JaccardLoss
+      class_path: segmentation_models_pytorch.losses.LovaszLoss
       init_args:
         mode: "binary"
     loss_ratio:
-      - 0.8
-      - 0.5
+      - 0.6
+      - 0.4
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
@@ -52,7 +54,8 @@ model:
       warmup_strategy: "linear"
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    weights_from_checkpoint_path: /app/model_checkpoints/2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl-epoch=56-val_loss=0.273.ckpt
+    #weights_from_checkpoint_path: /app/model_checkpoints/2026_3_A_mask_water_10pct_changeformer_focal-lovasz_fire_id_cosinewarm_mchi_rr_rl-epoch=78-val_loss=0.361.ckpt
+    weights_from_checkpoint_path: /app/model_checkpoints/2026_3_A_mask_water_10pct_changeformer_focal-lovasz_fire_id_cosinewarm_mchi_rr_rl-epoch=78-val_loss=0.361.ckpt
     predict_output_dir: /mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
 
 data:
