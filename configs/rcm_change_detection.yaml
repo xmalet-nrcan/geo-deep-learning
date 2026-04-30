@@ -76,6 +76,7 @@ model:
     in_channels: 11 # Should be the length of data.band_names + 4
     max_samples: 20
     num_classes: 1  # binary change detection
+    burned_class_weight: 3.0  # >1 penalizes false negatives on class burn (1)
 
     main_loss:
       #class_path: segmentation_models_pytorch.losses.SoftBCEWithLogitsLoss
