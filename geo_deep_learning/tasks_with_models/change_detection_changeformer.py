@@ -1,31 +1,38 @@
-"""Segmentation SegFormer model."""
+"""Change Detection with ChangeFormer model."""
 
+import json
 import logging
 import math
 import warnings
+from collections import defaultdict
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import rasterio as rio
-import kornia as krn
 import torch
 import torch.nn.functional as F
-from datetime import datetime
-from rasterio.transform import Affine
-from matplotlib import pyplot as plt
 from kornia.augmentation import AugmentationSequential
+import kornia as krn
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.loggers import TensorBoardLogger
+from matplotlib import pyplot as plt
+from rasterio.merge import merge as rio_merge
+from rasterio.transform import Affine
 from torch import Tensor
 from torchmetrics import JaccardIndex, F1Score
-from torchmetrics.classification import BinaryJaccardIndex
+from torchmetrics.classification import (
+    BinaryJaccardIndex,
+    BinaryPrecision,
+    BinaryRecall,
+)
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
-from torchmetrics.classification import BinaryPrecision, BinaryRecall
-from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA, BandName  # noqa: F401
+
+from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA
 from geo_deep_learning.models.change_detection.change_detection_model import ChangeDetectionModel
 from geo_deep_learning.tools.visualization import visualize_prediction
 from geo_deep_learning.utils.models import load_weights_from_checkpoint
@@ -38,257 +45,236 @@ warnings.filterwarnings(
 logger = logging.getLogger(__name__)
 
 
+def _is_integer_dtype(dtype_name: str) -> bool:
+    return "int" in dtype_name.lower() or "uint" in dtype_name.lower()
+
+
 class ChangeDetectionChangeFormer(LightningModule):
     """Change Detection with ChangeFormer V6 model."""
 
-    def __init__(  # noqa: PLR0913
-            self,
-            change_detection_model: str,
-            *,
-            image_size: tuple[int, int],
-            num_classes: int,
-            max_samples: int,
-            main_loss: Callable,
-            secondary_loss: Callable,
-            loss_ratio=(1.0, 1.0),
-            optimizer: OptimizerCallable = torch.optim.Adam,
-            scheduler: LRSchedulerCallable = torch.optim.lr_scheduler.ConstantLR,
-            scheduler_config: dict[str, Any] | None = None,
-            weights: str | None = None,
-            burned_class_weight: float = 1.0,
-            class_labels: list[str] | None = None,
-            class_colors: list[str] | None = None,
-            weights_from_checkpoint_path: str | None = None,
-            in_channels: int | None = None,
-            threshold: float = 0.5,
-            predict_output_dir: str | None = None,  # For Outputs
-            **kwargs: object,  # noqa: ARG002
+    def __init__(
+        self,
+        change_detection_model: str,
+        *,
+        image_size: tuple[int, int],
+        num_classes: int,
+        max_samples: int,
+        main_loss: Callable,
+        secondary_loss: Callable,
+        loss_ratio: tuple[float, float] = (1.0, 1.0),
+        optimizer: OptimizerCallable = torch.optim.Adam,
+        scheduler: LRSchedulerCallable = torch.optim.lr_scheduler.ConstantLR,
+        scheduler_config: dict[str, Any] | None = None,
+        weights: str | None = None,
+        burned_class_weight: float = 1.0,
+        class_labels: list[str] | None = None,
+        class_colors: list[str] | None = None,
+        weights_from_checkpoint_path: str | None = None,
+        in_channels: int | None = None,
+        threshold: float = 0.5,
+        predict_output_dir: str | None = None,
+        **kwargs: object,
     ) -> None:
-        """Initialize the model."""
         super().__init__()
         self.save_hyperparameters()
+
+        if burned_class_weight < 1.0:
+            msg = "burned_class_weight must be >= 1.0"
+            raise ValueError(msg)
+
         self.change_detection_model = change_detection_model
         self.in_channels = in_channels
         self.burned_class_weight = float(burned_class_weight)
-        if self.burned_class_weight < 1.0:
-            msg = "burned_class_weight must be >= 1.0"
-            raise ValueError(msg)
-        self.num_classes = num_classes  # Should be 2
+        self.num_classes = num_classes
         self.image_size = image_size
         self.max_samples = max_samples
-
         self.main_loss = main_loss
         self.secondary_loss = secondary_loss
         self.loss_ratio = loss_ratio
-
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.scheduler_config = scheduler_config or {"interval": "epoch"}
-
         self.weights = weights
         self.weights_from_checkpoint_path = weights_from_checkpoint_path
-
         self.class_colors = class_colors
         self.threshold = threshold
+        self.predict_output_dir = predict_output_dir
+        self.enable_amp = bool(kwargs.get("enable_amp", True))
+        self.sar_speckle_p = float(kwargs.get("sar_speckle_p", 0.35))
+        self.sar_speckle_std = float(kwargs.get("sar_speckle_std", 0.08))
+        self.sar_jitter_p = float(kwargs.get("sar_jitter_p", 0.35))
+        self.sar_jitter_max = float(kwargs.get("sar_jitter_max", 0.08))
 
-        self.changed_num_classes = num_classes + 1 if num_classes == 1 else num_classes
-        self.labels = (
-            [str(i) for i in range(self.changed_num_classes)]
-            if class_labels is None
-            else class_labels
-        )
-        # ----- Validation -----
-        self.val_iou_metric = MeanIoU(
-            num_classes=self.changed_num_classes,
-            per_class=True,
-            input_format="index",
-            include_background=True,
-        )
+        # Improve GEMM performance on Ampere+ while keeping numerics stable.
+        torch.set_float32_matmul_precision("high")
 
-        self.val_iou_classwise = ClasswiseWrapper(
-            self.val_iou_metric,
-            labels=self.labels,
-        )
-
-        # ----- Test -----
-        self.test_iou_metric = MeanIoU(
-            num_classes=self.changed_num_classes,
-            per_class=True,
-            input_format="index",
-            include_background=True,
-        )
-
-        self.test_iou_classwise = ClasswiseWrapper(
-            self.test_iou_metric,
-            labels=self.labels,
-        )
-
+        self._effective_num_classes = num_classes + 1 if num_classes == 1 else num_classes
+        self.labels = class_labels or [str(i) for i in range(self._effective_num_classes)]
         self._total_samples_visualized = 0
 
-        num_classes = self.num_classes if self.num_classes > 1 else 2
-        task_type = "multiclass" if num_classes > 2 else "binary"
+        # --- Metrics (train / val / test) ---
+        for prefix in ("train", "val", "test"):
+            iou, f1, precision, recall = self._create_metrics()
+            setattr(self, f"{prefix}_iou", iou)
+            setattr(self, f"{prefix}_f1", f1)
+            setattr(self, f"{prefix}_precision", precision)
+            setattr(self, f"{prefix}_recall", recall)
 
-        if num_classes == 2:
-            self.train_iou = BinaryJaccardIndex(threshold=self.threshold)
-            self.val_iou = BinaryJaccardIndex(threshold=self.threshold)
-            self.test_iou = BinaryJaccardIndex(threshold=self.threshold)
+        # Classwise IoU for val & test
+        for prefix in ("val", "test"):
+            mean_iou = MeanIoU(
+                num_classes=self._effective_num_classes,
+                per_class=True,
+                input_format="index",
+                include_background=True,
+            )
+            setattr(
+                self,
+                f"{prefix}_iou_classwise",
+                ClasswiseWrapper(mean_iou, labels=self.labels),
+            )
+
+    # ------------------------------------------------------------------
+    # Metric factory
+    # ------------------------------------------------------------------
+    def _create_metrics(self):
+        nc = self._effective_num_classes
+        if nc == 2:
+            iou = BinaryJaccardIndex(threshold=self.threshold)
+            f1 = F1Score(task="binary", num_classes=nc)
+            precision = BinaryPrecision(threshold=self.threshold)
+            recall = BinaryRecall(threshold=self.threshold)
         else:
-            self.train_iou = JaccardIndex(task=task_type, num_classes=num_classes)
-            self.val_iou = JaccardIndex(task=task_type, num_classes=num_classes)
-            self.test_iou = JaccardIndex(task=task_type, num_classes=num_classes)
-
-        self.train_f1 = F1Score(task=task_type, num_classes=num_classes)
-        self.val_f1 = F1Score(task=task_type, num_classes=num_classes)
-        self.test_f1 = F1Score(task=task_type, num_classes=num_classes)
-
-        if num_classes == 2:
-            self.train_precision = BinaryPrecision(threshold=self.threshold)
-            self.val_precision = BinaryPrecision(threshold=self.threshold)
-            self.test_precision = BinaryPrecision(threshold=self.threshold)
-            self.train_recall = BinaryRecall(threshold=self.threshold)
-            self.val_recall = BinaryRecall(threshold=self.threshold)
-            self.test_recall = BinaryRecall(threshold=self.threshold)
-        else:
+            iou = JaccardIndex(task="multiclass", num_classes=nc)
+            f1 = F1Score(task="multiclass", num_classes=nc)
             from torchmetrics import Precision, Recall
-            self.train_precision = Precision(task=task_type, num_classes=num_classes)
-            self.val_precision = Precision(task=task_type, num_classes=num_classes)
-            self.test_precision = Precision(task=task_type, num_classes=num_classes)
-            self.train_recall = Recall(task=task_type, num_classes=num_classes)
-            self.val_recall = Recall(task=task_type, num_classes=num_classes)
-            self.test_recall = Recall(task=task_type, num_classes=num_classes)
+            precision = Precision(task="multiclass", num_classes=nc)
+            recall = Recall(task="multiclass", num_classes=nc)
+        return iou, f1, precision, recall
 
-        self.predict_output_dir = predict_output_dir
-
-
-    def _apply_geo_aug(self) -> AugmentationSequential:
-        """Geometric augmentations (applied to images + masks)."""
+    # ------------------------------------------------------------------
+    # Augmentations
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _geo_aug() -> AugmentationSequential:
         return AugmentationSequential(
             krn.augmentation.RandomHorizontalFlip(p=0.5, keepdim=True),
             krn.augmentation.RandomVerticalFlip(p=0.5, keepdim=True),
-            krn.augmentation.RandomRotation90(
-                times=(1, 3),
-                p=0.5,
-                align_corners=True,
-                keepdim=True,
-            ),
+            krn.augmentation.RandomRotation90(times=(1, 3), p=0.5, align_corners=True, keepdim=True),
             data_keys=None,
         )
 
-    def _apply_intensity_aug(self) -> AugmentationSequential:
-        """Intensity augmentations (applied to images only)."""
+    @staticmethod
+    def _intensity_aug() -> AugmentationSequential:
         return AugmentationSequential(
             krn.augmentation.RandomGaussianNoise(mean=0.0, std=0.05, p=0.3, keepdim=True),
-            krn.augmentation.RandomGaussianBlur(
-                kernel_size=(3, 3), sigma=(0.1, 2.0), p=0.3, keepdim=True
-            ),
-            krn.augmentation.RandomErasing(
-                scale=(0.02, 0.1), ratio=(0.3, 3.3), p=0.3, keepdim=True
-            ),
+            # Keep mild blur/erase to avoid distorting SAR texture statistics too much.
+            krn.augmentation.RandomGaussianBlur(kernel_size=(3, 3), sigma=(0.1, 0.8), p=0.1, keepdim=True),
+            krn.augmentation.RandomErasing(scale=(0.01, 0.03), ratio=(0.5, 2.0), p=0.05, keepdim=True),
             data_keys=None,
         )
 
-    def on_before_batch_transfer(
-            self,
-            batch: dict[str, Any],
-            dataloader_idx: int,  # noqa: ARG002
-    ) -> dict[str, Any]:
-        aug = AugmentationSequential(
-            krn.augmentation.PadTo(size=self.image_size, pad_mode='constant', pad_value=0, keepdim=False),
+    def _apply_sar_aware_aug(self, image: Tensor) -> Tensor:
+        """Apply lightweight SAR-specific augmentations (speckle + radiometric jitter)."""
+        out = image
+
+        if torch.rand(1, device=out.device).item() < self.sar_speckle_p:
+            # Multiplicative speckle factor around 1.0.
+            speckle = torch.randn_like(out) * self.sar_speckle_std + 1.0
+            out = out * speckle.clamp_min(0.0)
+
+        if torch.rand(1, device=out.device).item() < self.sar_jitter_p:
+            # Per-sample gain jitter to mimic mild radiometric calibration drift.
+            b = out.shape[0]
+            gain = 1.0 + (torch.rand((b, 1, 1, 1), device=out.device) * 2 - 1) * self.sar_jitter_max
+            out = out * gain
+
+        return out
+
+    # ------------------------------------------------------------------
+    # Hooks
+    # ------------------------------------------------------------------
+    def on_before_batch_transfer(self, batch: dict[str, Any], dataloader_idx: int) -> dict[str, Any]:
+        pad = AugmentationSequential(
+            krn.augmentation.PadTo(size=self.image_size, pad_mode="constant", pad_value=0, keepdim=False),
             data_keys=None,
         )
-
-        keys_to_pad = {"image_pre": batch["image_pre"],
-                       "image": batch["image"]}
-
-        # En predict, mask et mask-common sont toujours présents dans votre dataset
-        # car __getitem__ les retourne toujours
-        for mask_names in ['mask','mask-common','water_mask']:
-            if mask_names in batch:
-                if mask_names == 'mask':
-                    keys_to_pad[mask_names] = batch[mask_names]
-                else:
-                    keys_to_pad[mask_names] = batch[mask_names].to(torch.float32)
-
-        transformed = aug(keys_to_pad)
-        batch.update(transformed)
+        keys_to_pad = {"image_pre": batch["image_pre"], "image": batch["image"]}
+        for k in ("mask", "mask-common", "water_mask"):
+            if k in batch:
+                keys_to_pad[k] = batch[k] if k == "mask" else batch[k].to(torch.float32)
+        batch.update(pad(keys_to_pad))
         return batch
 
+    def on_after_batch_transfer(self, batch, dataloader_idx):
+        if not self.trainer.training:
+            return batch
+        device = batch["image"].device
+
+        # Geometric (images + masks)
+        keys = {"image_pre": batch["image_pre"], "image": batch["image"]}
+        for k in ("mask-common", "mask"):
+            if k in batch:
+                keys[k] = batch[k].to(torch.float32) if k == "mask-common" else batch[k]
+        transformed = self._geo_aug()(keys)
+        for k, v in transformed.items():
+            batch[k] = v.to(device, non_blocking=True)
+
+        # Intensity (images only)
+        aug = self._intensity_aug()
+        for k in ("image_pre", "image"):
+            batch[k] = aug({k: batch[k]})[k]
+            batch[k] = self._apply_sar_aware_aug(batch[k])
+        return batch
+
+    # ------------------------------------------------------------------
+    # Model / optimizers
+    # ------------------------------------------------------------------
     def configure_model(self) -> None:
-        """Configure model."""
         self.model = ChangeDetectionModel(
             change_detection_model=self.change_detection_model,
             in_channels=self.in_channels,
-            out_channels=self.num_classes + 1 if self.num_classes == 1 else self.num_classes,
+            out_channels=self._effective_num_classes,
         )
-
-        for module in self.model.modules():
-            if isinstance(module, torch.nn.LayerNorm):
-                module.eps = 1e-5  # défaut PyTorch, mais vérifions
+        for m in self.model.modules():
+            if isinstance(m, torch.nn.LayerNorm):
+                m.eps = 1e-5
 
         if self.weights_from_checkpoint_path:
-            map_location = self.device
-            load_parts = self.hparams.get("load_parts")
-            logger.info(
-                "Loading weights from checkpoint: %s",
-                self.weights_from_checkpoint_path,
-            )
+            logger.info("Loading weights from checkpoint: %s", self.weights_from_checkpoint_path)
             load_weights_from_checkpoint(
                 self.model,
                 self.weights_from_checkpoint_path,
-                load_parts=load_parts,
-                map_location=map_location,
+                load_parts=self.hparams.get("load_parts"),
+                map_location=self.device,
             )
 
-    def configure_optimizers(self) -> list[list[dict[str, Any]]]:
-        """Configure optimizers."""
+    def configure_optimizers(self):
         optimizer = self.optimizer(self.parameters())
-        if (
-                self.hparams["scheduler"]["class_path"]
-                == "torch.optim.lr_scheduler.OneCycleLR"
-        ):
-            init_args = self.hparams.get("scheduler", {}).get("init_args", {})
-            max_lr = init_args.get("max_lr")
-            # Récupérer les paramètres optionnels du YAML
-            extra_kwargs = {}
-            for key in ("pct_start", "anneal_strategy", "div_factor", "final_div_factor",
-                        "three_phase", "cycle_momentum"):
-                if key in init_args:
-                    extra_kwargs[key] = init_args[key]
+        sched_cfg = self.hparams.get("scheduler", {})
+        class_path = sched_cfg.get("class_path", "")
+        init_args = sched_cfg.get("init_args", {})
 
-            stepping_batches = self.trainer.estimated_stepping_batches
-            if stepping_batches > -1:
+        if class_path == "torch.optim.lr_scheduler.OneCycleLR":
+            max_lr = init_args["max_lr"]
+            extra = {
+                k: init_args[k]
+                for k in ("pct_start", "anneal_strategy", "div_factor", "final_div_factor", "three_phase", "cycle_momentum")
+                if k in init_args
+            }
+            stepping = self.trainer.estimated_stepping_batches
+            if stepping > 0:
+                scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, total_steps=stepping, **extra)
+            elif hasattr(self.trainer.datamodule, "epoch_size"):
+                dm = self.trainer.datamodule
+                spe = math.ceil(dm.epoch_size / (dm.batch_size * self.trainer.accumulate_grad_batches))
+                buf = int(spe * self.trainer.accumulate_grad_batches)
                 scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    total_steps=stepping_batches,
-                    **extra_kwargs,
-                )
-            elif (
-                    stepping_batches == -1
-                    and getattr(self.trainer.datamodule, "epoch_size", None) is not None
-            ):
-                batch_size = self.trainer.datamodule.batch_size
-                epoch_size = self.trainer.datamodule.epoch_size
-                accumulate_grad_batches = self.trainer.accumulate_grad_batches
-                max_epochs = self.trainer.max_epochs
-                steps_per_epoch = math.ceil(
-                    epoch_size / (batch_size * accumulate_grad_batches),
-                )
-                buffer_steps = int(steps_per_epoch * accumulate_grad_batches)
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    steps_per_epoch=steps_per_epoch + buffer_steps,
-                    epochs=max_epochs,
-                    **extra_kwargs,
+                    optimizer, max_lr=max_lr, steps_per_epoch=spe + buf, epochs=self.trainer.max_epochs, **extra,
                 )
             else:
-                total_steps = init_args.get("total_steps")
                 scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    total_steps=total_steps,
-                    **extra_kwargs,
+                    optimizer, max_lr=max_lr, total_steps=init_args["total_steps"], **extra,
                 )
         else:
             scheduler = self.scheduler(optimizer)
@@ -296,631 +282,273 @@ class ChangeDetectionChangeFormer(LightningModule):
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
 
     def forward(self, image_pre: Tensor, image_post: Tensor) -> Tensor:
-        """Forward pass."""
-        return self.model(image_pre, image_post)[-1]  # Because ChangeFormer output a list in its forward pass.
+        return self.model(image_pre, image_post)[-1]
 
-    def on_after_batch_transfer(self, batch, dataloader_idx):
-        if not self.trainer.training:
-            return batch
-        device = batch["image"].device
+    def _forward_logits(self, image_pre: Tensor, image_post: Tensor) -> Tensor:
+        if self.enable_amp and image_pre.device.type == "cuda":
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                return self(image_pre, image_post)
+        return self(image_pre, image_post)
 
-        # 1. Geometric augmentations on images + masks together
-        geo_aug = self._apply_geo_aug()
-        keys_to_aug = {
-            "image_pre": batch["image_pre"],
-            "image": batch["image"],
-        }
-        if "mask-common" in batch:
-            keys_to_aug["mask-common"] = batch["mask-common"].to(torch.float32)
-        if "mask" in batch:
-            keys_to_aug["mask"] = batch["mask"]
-
-        transformed = geo_aug(keys_to_aug)
-        for key in transformed:
-            batch[key] = transformed[key].to(device, non_blocking=True)
-
-        # 2. Intensity augmentations on images only
-        intensity_aug = self._apply_intensity_aug()
-        for img_key in ["image_pre", "image"]:
-            batch[img_key] = intensity_aug({img_key: batch[img_key]})[img_key]
-        return batch
-
-    # TODO : Modifier pour avoir image pre/post
-    def training_step(
-            self,
-            batch: dict[str, Any],
-            batch_idx: int,  # noqa: ARG002
-    ) -> Tensor:
-        """Run training step."""
-        x_pre, x_post, y, one_hot, logits, main_loss, loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
-        # --- Logging ---
-        self.log(
-            "train_loss",
-            main_loss,
-            batch_size=batch_size,
-            prog_bar=True,
-            logger=True,
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-        )
-
-        self.log("main_loss", main_loss, on_epoch=True, sync_dist=True, batch_size=batch_size)
-        self.log("ce_loss", ce_loss, on_epoch=True, sync_dist=True, batch_size=batch_size)
-
-        # --- Calcul des métriques différé (pour éviter de casser autograd) ---
-        with torch.no_grad():
-            common_mask = batch["mask-common"]  # [B, 1, H, W]
-            valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
-
-            # On accumule les prédictions pour calculer les métriques à la fin
-            self.train_iou.update(valid_preds, valid_targets)
-            self.train_f1.update(valid_preds, valid_targets)
-            self.train_precision.update(valid_preds, valid_targets)
-            self.train_recall.update(valid_preds, valid_targets)
-
-        return main_loss
-
+    # ------------------------------------------------------------------
+    # Shared step logic
+    # ------------------------------------------------------------------
     @staticmethod
-    def _extract_valid_pixels(
-            logits: Tensor,
-            one_hot: Tensor,
-            common_mask: Tensor,
-    ) -> tuple[Tensor, Tensor]:
-        """Extract only valid pixels (non-water, non-nodata) for metric computation.
+    def _extract_valid_pixels(logits: Tensor, targets: Tensor, common_mask: Tensor) -> tuple[Tensor, Tensor]:
+        valid = common_mask.squeeze(1) > 0.5
+        preds = torch.argmax(logits, dim=1)
+        return preds[valid], targets[valid]
 
-        Args:
-            logits: [B, C, H, W] model output logits
-            one_hot: [B, C, H, W] one-hot encoded targets
-            common_mask: [B, 1, H, W] validity mask (1=valid, 0=invalid)
+    def _forward_and_get_loss(self, batch: dict[str, Any]):
+        x_pre, x_post = batch["image_pre"], batch["image"]
+        y = batch["mask"]
+        common_mask = batch["mask-common"].to(torch.float32)
+        common_mask = torch.nan_to_num(common_mask, nan=0.0, posinf=1.0, neginf=0.0)
+        B = x_post.shape[0]
 
-        Returns:
-            valid_preds: [N] predicted class indices for valid pixels only
-            valid_targets: [N] target class indices for valid pixels only
-        """
-        # valid_pixels : [B, H, W] booléen
-        valid_pixels = (common_mask.squeeze(1) > 0.5)  # robust to float imprecision
+        if not (torch.isfinite(x_pre).all() and torch.isfinite(x_post).all()):
+            raise RuntimeError("Input images contain NaN/Inf")
 
-        # Prédictions et targets en indices de classe : [B, H, W]
-        preds = torch.argmax(logits, dim=1)  # [B, H, W]
-        targets = torch.argmax(one_hot, dim=1)  # [B, H, W]
+        # Patch near-empty samples to avoid LayerNorm NaN
+        valid_ratio = common_mask.flatten(1).mean(dim=1)
+        bad = valid_ratio < 0.05
+        if bad.any():
+            logger.warning("Patching %d/%d near-empty samples", bad.sum().item(), B)
+            noise = torch.rand_like(x_pre[0:1]) * 0.01
+            for idx in bad.nonzero(as_tuple=True)[0]:
+                x_pre[idx] = noise[0]
+                x_post[idx] = noise[0]
+                common_mask[idx] = 0.0
+                y[idx] = 0
 
-        # Extraire uniquement les pixels valides (aplati en 1D)
-        valid_preds = preds[valid_pixels]  # [N]
-        valid_targets = targets[valid_pixels]  # [N]
+        logits = self._forward_logits(x_pre, x_post)
 
-        return valid_preds, valid_targets
+        # Handle non-finite logits
+        if not torch.isfinite(logits).all():
+            logger.warning("Non-finite logits — returning zero loss")
+            zero = torch.tensor(0.0, device=logits.device, dtype=logits.dtype, requires_grad=True)
+            dummy_targets = torch.zeros((B, *x_post.shape[2:]), device=logits.device, dtype=torch.long)
+            return x_pre, x_post, y.float(), dummy_targets, torch.zeros_like(logits), zero, zero, zero, B
+
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Class-index targets for metrics and index-based losses.
+        y_sq = y.squeeze(1) if y.dim() == 4 else y
+        y_clamped = y_sq.clamp(0, self._effective_num_classes - 1).long()
+
+        # One-hot only where needed by current losses.
+        one_hot = F.one_hot(y_clamped, self._effective_num_classes).permute(0, 3, 1, 2).contiguous().float()
+
+        # Masked loss
+        mask_exp = common_mask.expand_as(logits) if common_mask.shape[1] == 1 else common_mask.unsqueeze(1).expand_as(logits)
+        masked_logits = logits * mask_exp
+        masked_oh = one_hot * mask_exp
+
+        if common_mask.sum() == 0:
+            zero = torch.tensor(0.0, device=logits.device, dtype=logits.dtype, requires_grad=True)
+            return x_pre, x_post, y.float(), y_clamped, logits, zero, zero, zero, B
+
+        w_ml, w_sl = self.loss_ratio
+        ce_loss = self.secondary_loss(masked_logits.contiguous(), masked_oh)
+        dice_loss = self.main_loss(masked_logits.contiguous(), masked_oh)
+        fn_penalty = self._burned_false_negative_penalty(logits, y_clamped, common_mask)
+        total_loss = w_sl * ce_loss + w_ml * dice_loss + fn_penalty
+
+        if not torch.isfinite(total_loss):
+            raise RuntimeError(f"Loss is NaN/Inf (ce={ce_loss.item()}, dice={dice_loss.item()})")
+
+        return x_pre, x_post, y.float(), y_clamped, logits, total_loss, dice_loss, ce_loss, B
+
+    def _update_metrics(self, prefix: str, logits: Tensor, targets: Tensor, common_mask: Tensor):
+        valid_preds, valid_targets = self._extract_valid_pixels(logits, targets, common_mask)
+        if valid_preds.numel() == 0:
+            return
+        for name in ("iou", "f1", "precision", "recall"):
+            getattr(self, f"{prefix}_{name}").update(valid_preds, valid_targets)
+        if hasattr(self, f"{prefix}_iou_classwise"):
+            getattr(self, f"{prefix}_iou_classwise").update(valid_preds, valid_targets)
+
+    def _log_and_reset_metrics(self, prefix: str):
+        for name in ("iou", "f1", "precision", "recall"):
+            metric = getattr(self, f"{prefix}_{name}")
+            self.log(f"{prefix}_{name}", metric.compute(), prog_bar=True, sync_dist=True)
+            metric.reset()
+
+        if hasattr(self, f"{prefix}_iou_classwise"):
+            cw = getattr(self, f"{prefix}_iou_classwise")
+            for class_name, value in cw.compute().items():
+                self.log(f"{prefix}_iou_{class_name}", value, prog_bar=False, sync_dist=True)
+            cw.reset()
+
+    # ------------------------------------------------------------------
+    # Train / Val / Test steps
+    # ------------------------------------------------------------------
+    def training_step(self, batch: dict[str, Any], batch_idx: int) -> Tensor:
+        _, _, _, targets, logits, total_loss, dice_loss, ce_loss, bs = self._forward_and_get_loss(batch)
+        self.log("train_loss", total_loss, batch_size=bs, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+        self.log("main_loss", dice_loss, on_epoch=True, sync_dist=True, batch_size=bs)
+        self.log("ce_loss", ce_loss, on_epoch=True, sync_dist=True, batch_size=bs)
+        with torch.no_grad():
+            self._update_metrics("train", logits, targets, batch["mask-common"])
+        return total_loss
 
     def on_train_epoch_end(self):
-        self.log("train_iou", self.train_iou.compute(), prog_bar=True, sync_dist=True)
-        self.log("train_f1", self.train_f1.compute(), prog_bar=True, sync_dist=True)
-        self.log("train_precision", self.train_precision.compute(), prog_bar=True, sync_dist=True)
-        self.log("train_recall", self.train_recall.compute(), prog_bar=True, sync_dist=True)
+        self._log_and_reset_metrics("train")
+        self.log("lr", self.trainer.optimizers[0].param_groups[0]["lr"], prog_bar=True)
 
-        lr = self.trainer.optimizers[0].param_groups[0]["lr"]
-        self.log("lr", lr, prog_bar=True)
-
-        self.train_iou.reset()
-        self.train_f1.reset()
-        self.train_precision.reset()
-        self.train_recall.reset()
-
-    def validation_step(
-            self,
-            batch: dict[str, Any],
-            batch_idx: int,  # noqa: ARG002
-    ) -> Tensor:
-        """Run validation step."""
-        has_mask = batch.get("has_mask", torch.tensor([True]))
-        if not has_mask.any():
-            return None  # skip ce batch
-        x_pre, x_post, y, one_hot, logits, loss, main_loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
-
-        self.log(
-            "val_loss",
-            loss,
-            batch_size=batch_size,
-            prog_bar=True,
-            logger=True,
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-            rank_zero_only=True,
-        )
+    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> Tensor | None:
+        if not batch.get("has_mask", torch.tensor([True])).any():
+            return None
+        _, _, _, targets, logits, loss, _, _, bs = self._forward_and_get_loss(batch)
+        self.log("val_loss", loss, batch_size=bs, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True, rank_zero_only=True)
         with torch.no_grad():
-            # Masquer les pixels invalides avant de mettre à jour les métriques
-            common_mask = batch["mask-common"]  # [B, 1, H, W]
-            valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
-
-            if valid_preds.numel() > 0:
-                self.val_iou_classwise.update(valid_preds, valid_targets)
-                self.val_iou(valid_preds, valid_targets)
-                self.val_f1(valid_preds, valid_targets)
-                self.val_precision(valid_preds, valid_targets)
-                self.val_recall(valid_preds, valid_targets)
-
+            self._update_metrics("val", logits, targets, batch["mask-common"])
         return logits
 
     def on_validation_epoch_end(self):
-        # Classwise IoU
-        classwise_iou = self.val_iou_classwise.compute()
-        for class_name, value in classwise_iou.items():
-            self.log(f"val_iou_{class_name}", value, prog_bar=False, sync_dist=True)
+        # Alias before reset.
+        self.log("val_recall_burn", self.val_recall.compute(), prog_bar=True, sync_dist=True)
+        self._log_and_reset_metrics("val")
 
-        # Global metrics
-        val_iou = self.val_iou.compute()
-        val_f1 = self.val_f1.compute()
-        val_precision = self.val_precision.compute()
-        val_recall = self.val_recall.compute()
-
-        self.log("val_iou", val_iou, prog_bar=True, sync_dist=True)
-        self.log("val_f1", val_f1, prog_bar=True, sync_dist=True)
-        self.log("val_precision", val_precision, prog_bar=True, sync_dist=True)
-        self.log("val_recall", val_recall, prog_bar=True, sync_dist=True)
-        # In binary setup this recall corresponds to class 1 (burned).
-        self.log("val_recall_burn", val_recall, prog_bar=True, sync_dist=True)
-
-        # Reset all
-        self.val_iou_classwise.reset()
-        self.val_iou.reset()
-        self.val_f1.reset()
-        self.val_precision.reset()
-        self.val_recall.reset()
-
-    def test_step(
-            self,
-            batch: dict[str, Any],
-            batch_idx: int,  # noqa: ARG002
-    ) -> None:
-        """Run test step."""
-
-        has_mask = batch.get("has_mask", torch.tensor([True]))
-        if not has_mask.any():
+    def test_step(self, batch: dict[str, Any], batch_idx: int) -> None:
+        if not batch.get("has_mask", torch.tensor([True])).any():
             return None
-
-        x_pre, x_post, y, one_hot, logits, loss, main_loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
-        # Convert logits to class predictions
-        y_pred = torch.argmax(logits, dim=1)
-        y_true = torch.argmax(one_hot, dim=1)
-
-        # --- Update metrics ---
+        x_pre, x_post, y, targets, logits, loss, _, _, bs = self._forward_and_get_loss(batch)
+        self.log("test_loss", loss, batch_size=bs, on_step=False, on_epoch=True, sync_dist=True)
         with torch.no_grad():
-            common_mask = batch["mask-common"]  # [B, 1, H, W]
-            valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
+            self._update_metrics("test", logits, targets, batch["mask-common"])
 
-            if valid_preds.numel() > 0:
-                self.test_iou_classwise.update(valid_preds, valid_targets)
-                self.test_iou.update(valid_preds, valid_targets)
-                self.test_f1.update(valid_preds, valid_targets)
-                self.test_precision.update(valid_preds, valid_targets)
-                self.test_recall.update(valid_preds, valid_targets)
-
-        # --- Log test loss (epoch-aggregated) ---
-        self.log(
-            "test_loss",
-            loss,
-            batch_size=batch_size,
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-        )
-
-        # --- Visualisations ---
-        if self._total_samples_visualized < self.max_samples:
-            remaining = self.max_samples - self._total_samples_visualized
-            samples_to_visualize = min(remaining, len(x_post))
-
+        # Visualizations
+        remaining = self.max_samples - self._total_samples_visualized
+        if remaining > 0:
             self._total_samples_visualized += self._log_visualizations(
-                trainer=self.trainer,
-                batch=batch,
-                outputs=logits,
-                max_samples=samples_to_visualize,
-                artifact_prefix="test",
-                epoch_suffix=False,
+                trainer=self.trainer, batch=batch, outputs=logits,
+                max_samples=min(remaining, len(x_post)), artifact_prefix="test", epoch_suffix=False,
             )
 
     def on_test_epoch_end(self):
-        # --- Classwise IoU ---
-        classwise_metrics = self.test_iou_classwise.compute()
-        for class_name, value in classwise_metrics.items():
-            self.log(
-                f"test_iou_{class_name}",
-                value,
-                prog_bar=False,
-                sync_dist=True,
-            )
+        self._log_and_reset_metrics("test")
 
-        # --- Global metrics ---
-        self.log("test_iou", self.test_iou.compute(), prog_bar=True, sync_dist=True)
-        self.log("test_f1", self.test_f1.compute(), prog_bar=True, sync_dist=True)
-        self.log("test_precision", self.test_precision.compute(), prog_bar=True, sync_dist=True)
-        self.log("test_recall", self.test_recall.compute(), prog_bar=True, sync_dist=True)
-        # --- Reset metrics ---
-        self.test_iou_classwise.reset()
-        self.test_iou.reset()
-        self.test_f1.reset()
-        self.test_precision.reset()
-        self.test_recall.reset()
-
-    def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[
-        Any, Any, Any, Tensor, Any, float | Any, Any, Any, Any
-    ]:
-        x_pre, x_post = batch["image_pre"], batch["image"]
-        y = batch["mask"]
-        common_data_mask = batch["mask-common"]
-
-        batch_size = x_post.shape[0]
-        # Vérif entrées images
-        if not torch.isfinite(x_pre).all():
-            raise RuntimeError("x_pre contains NaN/Inf")
-        if not torch.isfinite(x_post).all():
-            raise RuntimeError("x_post contains NaN/Inf")
-
-        # S'assurer que le masque commun est bien en float et sans NaN
-        common_data_mask = common_data_mask.to(dtype=torch.float32)
-        common_data_mask = torch.nan_to_num(common_data_mask, nan=0.0, posinf=1.0, neginf=0.0)
-
-        # --- Remplacer les images quasi-vides par du bruit faible ---
-        # pour éviter NaN dans LayerNorm (variance ~ 0 → gradient explose)
-        valid_ratio = common_data_mask.flatten(1).mean(dim=1)  # [B]
-        min_valid_ratio = 0.05  # au moins 10% de pixels valides
-        bad_mask = valid_ratio < min_valid_ratio  # [B] booléen
-        if bad_mask.any():
-            n_bad = bad_mask.sum().item()
-            logger.warning(
-                "Patching %d/%d samples with <%.0f%% valid pixels (ratios: %s)",
-                n_bad, batch_size, min_valid_ratio * 100,
-                [f"{r:.3f}" for r, b in zip(valid_ratio.tolist(), bad_mask.tolist()) if b],
-            )
-            # Remplir les samples quasi-vides avec du bruit uniforme [0, 0.01]
-            # pour que LayerNorm ait une variance > 0
-            noise = torch.rand_like(x_pre[0:1]) * 0.01
-            for idx in bad_mask.nonzero(as_tuple=True)[0]:
-                x_pre[idx] = noise[0]
-                x_post[idx] = noise[0]
-                # Mettre le masque à 0 pour exclure ces samples de la loss
-                common_data_mask[idx] = 0.0
-                y[idx] = 0
-
-        logits = self(x_pre, x_post)  # [B, C, H, W]
-        y_float = y.float()
-        logits_no_nan = torch.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=0.0)
-        num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
-
-        # Vérifier les logits (NaN résiduel)
-        if not torch.isfinite(logits).all():
-            with torch.no_grad():
-                logger.warning(
-                    "Logits contain non-finite values — skipping batch. "
-                    "pre_names=%s, post_names=%s",
-                    batch.get('image_pre_name', 'N/A'),
-                    batch.get('image_name_post', 'N/A'),
-                )
-            zero_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype, requires_grad=True)
-            logits_safe = torch.zeros_like(logits)
-            dummy_one_hot = torch.zeros(
-                (batch_size, num_classes, x_post.shape[2], x_post.shape[3]),
-                device=logits.device, dtype=logits.dtype, )
-
-            return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, batch_size
-
-
-
-        # Préparation du one-hot
-        y_one_hot = y.squeeze(1) if y.dim() == 4 else y
-        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1) # clamp aussi les 255 → num_classes-1
-        one_hot = torch.nn.functional.one_hot(y_one_hot.long(), num_classes=num_classes)
-        one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
-
-        # common_data_mask : [B, 1, H, W], 1=valide, 0=invalide (eau, no-data, padding)
-        # Expand le masque pour matcher les dimensions des logits et du one-hot
-        loss_mask = common_data_mask.to(dtype=torch.float32)
-        if loss_mask.dim() == 4 and loss_mask.shape[1] == 1:
-            loss_mask_expanded = loss_mask.expand_as(logits_no_nan)  # [B, C, H, W]
-        else:
-            loss_mask_expanded = loss_mask.unsqueeze(1).expand_as(logits_no_nan)
-
-        # Appliquer le masque : mettre à 0 les logits et targets pour les pixels invalides
-        # afin qu'ils ne contribuent pas à la loss
-        masked_logits = logits_no_nan * loss_mask_expanded
-        masked_one_hot = one_hot * loss_mask_expanded
-
-        # Vérifier qu'il reste des pixels valides
-        valid_sum = common_data_mask.sum()
-        if valid_sum == 0:
-            # Eviter NaN si la loss divise par le nombre de pixels
-            main_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
-            ce_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
-            loss = main_loss
-            return x_pre, x_post, y_float, one_hot, logits_no_nan, loss, main_loss, ce_loss, batch_size
-
-        w_ml, w_sl = self.loss_ratio
-
-        # Vérifier entrées de la loss
-        if not torch.isfinite(one_hot).all():
-            raise RuntimeError("One-hot targets contain non-finite values (NaN/Inf).")
-
-        # --- Losses ---
-        ce_loss = self.secondary_loss(masked_logits.contiguous(), masked_one_hot)
-        loss = self.main_loss(masked_logits.contiguous(), masked_one_hot)
-        burned_fn_penalty = self._burned_false_negative_penalty(
-            logits=logits_no_nan,
-            one_hot=one_hot,
-            valid_mask=common_data_mask,
-        )
-        main_loss = w_sl * ce_loss + w_ml * loss + burned_fn_penalty
-
-        # Dernière vérification
-        if not torch.isfinite(main_loss):
-            raise RuntimeError(
-                f"Computed loss is NaN/Inf. "
-                f"ce_loss={ce_loss.detach().cpu().item()}, "
-                f"loss={loss.detach().cpu().item()}"
-            )
-
-        return x_pre, x_post, y_float, one_hot, logits_no_nan, main_loss, loss, ce_loss, batch_size
-
-    def _burned_false_negative_penalty(
-            self,
-            logits: Tensor,
-            one_hot: Tensor,
-            valid_mask: Tensor,
-    ) -> Tensor:
-        """Add extra penalty on positive (burned) pixels to reduce false negatives."""
+    # ------------------------------------------------------------------
+    # Burned FN penalty
+    # ------------------------------------------------------------------
+    def _burned_false_negative_penalty(self, logits: Tensor, targets: Tensor, valid_mask: Tensor) -> Tensor:
         if self.burned_class_weight <= 1.0:
             return torch.zeros((), device=logits.device, dtype=logits.dtype)
 
-        if logits.shape[1] > 1:
-            burned_logits = logits[:, 1:2, :, :]
-            burned_targets = one_hot[:, 1:2, :, :]
-        else:
-            burned_logits = logits
-            burned_targets = one_hot
+        burned_logits = logits[:, 1:2] if logits.shape[1] > 1 else logits
+        burned_targets = (targets == 1).unsqueeze(1).to(dtype=logits.dtype)
+        valid_mask = valid_mask.unsqueeze(1) if valid_mask.dim() == 3 else valid_mask
+        valid_mask = valid_mask.to(logits.dtype)
 
-        if valid_mask.dim() == 3:
-            valid_mask = valid_mask.unsqueeze(1)
-        valid_mask = valid_mask.to(dtype=logits.dtype)
-
-        pos_weight = torch.tensor(
-            self.burned_class_weight,
-            device=logits.device,
-            dtype=logits.dtype,
-        )
-        penalty_map = F.binary_cross_entropy_with_logits(
-            burned_logits,
-            burned_targets,
-            pos_weight=pos_weight,
+        penalty = F.binary_cross_entropy_with_logits(
+            burned_logits, burned_targets,
+            pos_weight=torch.tensor(self.burned_class_weight, device=logits.device, dtype=logits.dtype),
             reduction="none",
-        )
-        penalty_map = penalty_map * valid_mask
-        valid_pixels = valid_mask.sum().clamp_min(1.0)
-        return penalty_map.sum() / valid_pixels
+        ) * valid_mask
+        return penalty.sum() / valid_mask.sum().clamp_min(1.0)
 
-    def _log_visualizations(  # noqa: PLR0913
-            self,
-            trainer: Trainer,
-            batch: dict[str, Any],
-            outputs: Tensor,
-            max_samples: int,
-            artifact_prefix: str = "val",
-            *,
-            epoch_suffix: bool = True,
+    # ------------------------------------------------------------------
+    # Visualization
+    # ------------------------------------------------------------------
+    def _log_visualizations(
+        self, trainer: Trainer, batch: dict[str, Any], outputs: Tensor,
+        max_samples: int, artifact_prefix: str = "val", *, epoch_suffix: bool = True,
     ) -> int:
-        """Log visualization figures comparing input diff, ground truth, and prediction.
-
-        Generates side-by-side images of:
-          - Absolute difference between post and pre images (3 selected bands)
-          - Ground truth mask (if available)
-          - Model prediction (with water/no-data pixels shown distinctly)
-
-        Args:
-            trainer: Lightning trainer (used for logger access)
-            batch: Batch dict with keys: image, image_pre, pre_post_name, mask,
-                   has_mask, mask-common
-            outputs: Model logits [B, C, H, W]
-            max_samples: Max number of samples to visualize
-            artifact_prefix: Prefix for artifact path ("test" or "val")
-            epoch_suffix: Whether to add epoch info to artifact filename
-
-        Returns:
-            Number of samples actually visualized
-        """
         if batch is None or outputs is None:
             return 0
-
         try:
-            image_batch = batch["image"]
-            pre_image_batch = batch["image_pre"]
-            batch_image_name = batch["pre_post_name"]
-            has_mask_flags = batch.get("has_mask", torch.tensor([True] * len(image_batch)))
-            mask_batch = batch["mask"].squeeze(1).long()
-            common_mask = batch.get("mask-common")  # [B, 1, H, W] or None
+            images = batch["image"]
+            pre_images = batch["image_pre"]
+            names = batch["pre_post_name"]
+            masks = batch["mask"].squeeze(1).long()
+            has_mask = batch.get("has_mask", torch.tensor([True] * len(images)))
+            common_mask = batch.get("mask-common")
 
-            num_samples = min(max_samples, len(image_batch))
-            num_logged = 0
+            # Pick 3 data bands for RGB vis (skip band 0=COMMON_MASK, last 2=SAT_PASS/BEAM)
+            nb = images.shape[1]
+            avail = list(range(1, max(nb - 2, 2)))
+            rgb = [avail[0], avail[len(avail) // 2], avail[-1]] if len(avail) >= 3 else avail[:3]
 
-            # Determine which bands to use for RGB visualization.
-            # Skip band 0 (COMMON_MASK) and last 2 (SAT_PASS, BEAM).
-            # Pick up to 3 data bands from the middle for a meaningful composite.
-            num_bands = image_batch.shape[1]
-            data_band_start = 1  # skip COMMON_MASK
-            data_band_end = max(num_bands - 2, data_band_start + 1)  # skip SAT_PASS, BEAM
-            available = list(range(data_band_start, data_band_end))
-            # Take 3 evenly spaced bands (or fewer if not enough)
-            if len(available) >= 3:
-                step = max(1, len(available) // 3)
-                rgb_indices = [available[0], available[len(available) // 2], available[-1]]
-            else:
-                rgb_indices = available[:3]
-
-            for i in range(num_samples):
-                image_post = image_batch[i]
-                image_pre = pre_image_batch[i]
-                image_name = batch_image_name[i].replace('\n', '')
-
-                # Compute absolute difference on selected bands
-                image_diff = torch.abs(image_post - image_pre)
-                vis_image = image_diff[rgb_indices, :, :]  # [3, H, W] or fewer
-
-                # Prediction with water/no-data masking
-                pred = torch.argmax(outputs[i], dim=0)  # [H, W]
+            logged = 0
+            for i in range(min(max_samples, len(images))):
+                diff = torch.abs(images[i] - pre_images[i])
+                vis = diff[rgb]
+                pred = torch.argmax(outputs[i], dim=0)
                 if common_mask is not None:
-                    invalid = (common_mask[i].squeeze(0) < 0.5)  # [H, W]
-                    # Use a distinct value (255) for visualization of masked pixels
                     pred = pred.clone()
-                    effective_num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
-                    pred[invalid] = effective_num_classes  # = 2 → index du gris dans la colormap
+                    pred[common_mask[i].squeeze(0) < 0.5] = self._effective_num_classes
 
-                # Ground truth mask
-                has_real_mask = has_mask_flags[i] if isinstance(
-                    has_mask_flags, (list, torch.Tensor)) else has_mask_flags
-                mask_i = mask_batch[i] if has_real_mask else None
-
+                mask_i = masks[i] if (has_mask[i] if isinstance(has_mask, (list, Tensor)) else has_mask) else None
                 fig = visualize_prediction(
-                    image=vis_image,
-                    mask=mask_i,
-                    prediction=pred,
-                    sample_name=image_name[:80],  # truncate long names
-                    num_classes=self.num_classes,
-                    class_colors=self.class_colors,
+                    image=vis, mask=mask_i, prediction=pred,
+                    sample_name=names[i][:80], num_classes=self.num_classes, class_colors=self.class_colors,
                 )
 
-                # Build artifact path
-                # Use a short, filesystem-safe name
-                safe_name = Path(image_name[:60].replace('|', '_').replace('/', '_')).stem
-                base_path = f"{artifact_prefix}/{safe_name}"
-                if epoch_suffix and trainer is not None:
-                    artifact_file = f"{base_path}/idx_{i}_epoch_{trainer.current_epoch}.png"
-                else:
-                    artifact_file = f"{base_path}/idx_{i}.png"
+                safe = Path(names[i][:60].replace("|", "_").replace("/", "_")).stem
+                tag = f"{artifact_prefix}/{safe}/idx_{i}"
+                if epoch_suffix:
+                    tag += f"_epoch_{trainer.current_epoch}"
+                tag += ".png"
 
-                # Log to appropriate logger
-                if hasattr(trainer.logger, "experiment") and hasattr(
-                        trainer.logger.experiment, "log_figure"):
+                if hasattr(trainer.logger, "experiment") and hasattr(trainer.logger.experiment, "log_figure"):
                     trainer.logger.experiment.log_figure(
-                        figure=fig,
-                        artifact_file=artifact_file,
-                        run_id=getattr(trainer.logger, "run_id", None),
+                        figure=fig, artifact_file=tag, run_id=getattr(trainer.logger, "run_id", None),
                     )
                 elif isinstance(trainer.logger, TensorBoardLogger):
                     trainer.logger.experiment.add_figure(
-                        tag=artifact_file,
-                        figure=fig,
-                        global_step=trainer.current_epoch if epoch_suffix else 0,
+                        tag=tag, figure=fig, global_step=trainer.current_epoch if epoch_suffix else 0,
                     )
-                else:
-                    logger.warning("Logger does not support figure logging.")
-
-                # Explicitly close figure to prevent memory leak
                 plt.close(fig)
-                num_logged += 1
-
+                logged += 1
+            return logged
         except Exception:
             logger.exception("Error in visualization logging")
             return 0
 
-        return num_logged
-
-    def predict_step(
-            self,
-            batch: dict[str, Any],
-            batch_idx: int,
-            dataloader_idx: int = 0,
-    ) -> dict[str, Any]:
-        """Run prediction step (inference only, no loss/metrics)."""
-
-        # TODO : Masquer l'eau
-
-        x_pre = batch["image_pre"]
-        x_post = batch["image"]
-
-        # Forward pass → logits [B, C, H, W]
+    # ------------------------------------------------------------------
+    # Predict
+    # ------------------------------------------------------------------
+    def predict_step(self, batch: dict[str, Any], batch_idx: int, dataloader_idx: int = 0) -> dict[str, Any]:
+        x_pre, x_post = batch["image_pre"], batch["image"]
         with torch.no_grad():
-            logits = self(x_pre, x_post)
+            logits = self._forward_logits(x_pre, x_post)
 
-        # Convertir en probabilités et en classes prédites
-        if self.num_classes == 1:
-            # Binaire : 2 classes (0=no-change, 1=change)
-            probs = torch.softmax(logits, dim=1)  # [B, 2, H, W]
-            y_pred = torch.argmax(probs, dim=1)  # [B, H, W]
-        else:
-            probs = torch.softmax(logits, dim=1)
-            y_pred = torch.argmax(probs, dim=1)
+        probs = torch.softmax(logits, dim=1)
+        y_pred = torch.argmax(probs, dim=1)
 
-        # --- Masquer l'eau avec NO_DATA (32767) ---
-        # mask-common inclut déjà le masque d'eau (combiné dans le dataset)
-        # On peut aussi utiliser water_mask directement pour être explicite
-        if "mask-common" in batch:
-            common_mask = batch["mask-common"]  # [B, 1, H, W] bool ou float
-            # common_mask == 1 → pixel valide, == 0 → pixel à masquer (eau, no-data, etc.)
-            invalid_mask = (common_mask.squeeze(1) == 0)  # [B, H, W]
-            y_pred = y_pred.masked_fill(invalid_mask, NO_DATA)
-        elif "water_mask" in batch:
-            water_mask = batch["water_mask"]  # [B, 1, H, W]
-            is_water = (water_mask.squeeze(1) > 0)  # eau = valeur > 0
-            y_pred = y_pred.masked_fill(is_water, NO_DATA)
+        # Mask invalid pixels
+        mask_key = "mask-common" if "mask-common" in batch else ("water_mask" if "water_mask" in batch else None)
+        if mask_key:
+            invalid = batch[mask_key].squeeze(1) == 0 if mask_key == "mask-common" else batch[mask_key].squeeze(1) > 0
+            y_pred = y_pred.masked_fill(invalid, NO_DATA)
 
-        # Retourner un dict avec tout ce qu'il faut pour sauvegarder après
         result = {
-            "predictions": y_pred,  # [B, H, W] classes entières
-            "probabilities": probs,  # [B, C, H, W] probabilités par classe
-            "logits": logits,  # [B, C, H, W] logits bruts
-            "pre_post_name": batch["pre_post_name"],
-            "cell_id": batch["cell_id"],
-            "profile": batch["profile"],  # profil rasterio pour écriture GeoTIFF
-            "original_height": batch["original_height"],
-            "original_width": batch["original_width"],
+            "predictions": y_pred, "probabilities": probs, "logits": logits,
+            "pre_post_name": batch["pre_post_name"], "cell_id": batch["cell_id"],
+            "profile": batch["profile"],
+            "original_height": batch["original_height"], "original_width": batch["original_width"],
         }
-
-        # --- Propager les métadonnées optionnelles (event_id, db_nbac_fire_id, etc.) ---
-        for key in ("pair_id",
-                    "event_id",
-                    "db_nbac_fire_id",
-                    'group_date_pre',
-                    'group_date_post',
-                    'group_id_pre',
-                    'group_id_post'):
-            if key in batch:
-                result[key] = batch[key]
-
+        for k in ("pair_id", "event_id", "db_nbac_fire_id", "group_date_pre", "group_date_post", "group_id_pre", "group_id_post"):
+            if k in batch:
+                result[k] = batch[k]
         if batch.get("has_mask", torch.tensor(False)).any():
             result["mask"] = batch["mask"]
-
         return result
 
     def on_predict_end(self) -> None:
-        """Appelé après que tous les predict_step soient terminés.
-
-        Structure de sortie :
-            output_dir / predictions / EVENT_ID / PREDICTION_DATE / cell_id / image.tif
-            output_dir / predictions / EVENT_ID / PREDICTION_DATE / merged.tif
-        """
-        from collections import defaultdict
-        from rasterio.merge import merge as rio_merge
         predictions = self.trainer.predict_loop.predictions
         if not predictions:
             logger.warning("No predictions to save.")
             return
 
-        # --- Base output directory ---
         predict_date = datetime.now().strftime("%Y%m%d_%H%M")
-        logger.info(f"Saving predictions to -- {self.predict_output_dir}")
-        if self.predict_output_dir is not None:
-            base_dir = Path(self.predict_output_dir)
-            if base_dir.name != "predictions":
-                base_dir = base_dir / "predictions"
-        else:
-            base_dir = Path(self.trainer.default_root_dir) / "predictions"
+        base_dir = Path(self.predict_output_dir or self.trainer.default_root_dir)
+        if base_dir.name != "predictions":
+            base_dir = base_dir / "predictions"
 
-        # --- Phase 1 : écrire chaque tuile individuelle ---
-        # On collecte les chemins par (event_id, predict_date) pour le merge
-        group_tile_paths: dict[tuple[str, str, str], list[Path]] = defaultdict(list)
-        event_all_tile_paths: dict[str, list[Path]] = defaultdict(list)
-
-        logger.info(f"Saving predictions to {base_dir}")
-        base_dir.mkdir(parents=True, exist_ok=True)
-
-        # --- Écrire le manifeste JSON pour l'ingestion DB ---
+        group_tiles: dict[tuple[str, str, str], list[Path]] = defaultdict(list)
+        event_tiles: dict[str, list[Path]] = defaultdict(list)
         manifest = {
             "prediction_date": predict_date,
             "model_name": self.change_detection_model,
@@ -930,195 +558,112 @@ class ChangeDetectionChangeFormer(LightningModule):
         }
 
         for batch_result in predictions:
-            batch_pair_ids = batch_result.get("pair_id")
-            batch_cell_id = batch_result['cell_id']
-            y_pred = batch_result["predictions"]  # [B, H_padded, W_padded]
-            names = batch_result["pre_post_name"]
-            batch_profiles = batch_result["profile"]
-            orig_heights = batch_result["original_height"]  # Tensor [B] ou list
-            orig_widths = batch_result["original_width"]  # Tensor [B] ou list
-            batch_size = y_pred.shape[0]
-            # event_id : peut être un Tensor, une list, ou absent
-            batch_event_ids = batch_result.get("event_id")
-            # Fallback pour le training dataset qui a db_nbac_fire_id
-            if batch_event_ids is None:
-                batch_event_ids = batch_result.get("db_nbac_fire_id")
+            self._save_batch_tiles(batch_result, base_dir, predict_date, group_tiles, event_tiles, manifest)
 
-            batch_group_id_pre = batch_result.get("group_id_pre")
-            batch_group_id_post = batch_result.get("group_id_post")
-            batch_group_date_pre = batch_result.get("group_date_pre")
-            batch_group_date_post = batch_result.get("group_date_post")
+        # Write manifest once
+        manifest_path = base_dir / "manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2, default=str)
+        logger.info("Saved manifest to %s", manifest_path)
 
-            for i in range(batch_size):
-                cell_id = batch_cell_id[i]
-                sample_name = names[i].replace('\n', '').replace('|', '_').replace('/', '_')
-                pair_id = self._extract_scalar(batch_pair_ids, i, default=None)
-                event_id = self._extract_scalar(batch_event_ids, i, default="unknown_event")
-                group_id_pre = self._extract_scalar(batch_group_id_pre, i, default="all")
-                group_id_post = self._extract_scalar(batch_group_id_post, i, default="all")
-                group_date_pre = self._extract_scalar(batch_group_date_pre, i, default="all")
-                group_date_post = self._extract_scalar(batch_group_date_post, i, default="all")
-
-                # --- Récupérer les dimensions originales ---
-                orig_h = orig_heights[i].item() if isinstance(orig_heights, torch.Tensor) else int(orig_heights[i])
-                orig_w = orig_widths[i].item() if isinstance(orig_widths, torch.Tensor) else int(orig_widths[i])
-
-                # --- Découper le padding (crop au coin supérieur-gauche) ---
-                pred_np = y_pred[i, :orig_h, :orig_w].cpu().numpy().astype(np.uint16)
-
-                # --- Reconstruire le profil rasterio ---
-                crs_val = batch_profiles["crs"][i] if isinstance(batch_profiles["crs"], (list, tuple)) else batch_profiles["crs"]
-
-                transform_raw = batch_profiles["transform"]
-
-                t_list = [transform_raw[k][i].item() for k in range(6)]
-
-                print(t_list)
-
-                profile_i = {
-                    "driver": "GTiff",
-                    "dtype": "uint16",
-                    "count": 1,
-                    "nodata" : 32767,
-                    "height": orig_h,  # ← dimensions ORIGINALES, pas paddées
-                    "width": orig_w,  # ← dimensions ORIGINALES, pas paddées
-                    "crs": crs_val,
-                    "transform": Affine(*t_list),
-                }
-                # --- Chemin : base / EVENT_ID / PREDICTION_DATE / cell_id / image.tif ---
-                event_date_dir = base_dir / event_id / predict_date
-                tile_dir = event_date_dir / cell_id
-                tile_dir.mkdir(parents=True, exist_ok=True)
-                out_path = tile_dir / f"{pair_id}-{sample_name}.tif"
-
-
-                with rio.open(str(out_path), "w", **profile_i) as dst:
-                    dst.write(pred_np[np.newaxis, :, :])
-
-                # Collecter pour les merges (APRÈS le with)
-                event_date_key = str(event_date_dir)
-                group_tile_paths[(event_date_key, str(group_id_pre), str(group_id_post))].append(out_path)
-                event_all_tile_paths[event_date_key].append(out_path)
-
-                logger.info("Saved prediction to %s (%dx%d)", out_path, orig_w, orig_h)
-
-                manifest["predictions"].append({
-                    "pair_id": pair_id,
-                    "event_id": event_id,
-                    "cell_id": cell_id,
-                    "group_id_pre": group_id_pre,
-                    "group_id_post": group_id_post,
-                    "group_date_pre": group_date_pre,
-                    "group_date_post": group_date_post,
-                    "tif_path": str(out_path),
-                })
-
-                manifest_path = base_dir / "manifest.json"
-                import json
-                with open(manifest_path, "w") as f:
-                    json.dump(manifest, f, indent=2, default=str)
-                logger.info("Saved prediction manifest to %s", manifest_path)
-
-        self._merge_predictions(group_tile_paths, event_all_tile_paths)
+        self._merge_predictions(group_tiles, event_tiles)
         logger.info("All predictions saved to %s", base_dir)
 
+    def _save_batch_tiles(self, batch_result, base_dir, predict_date, group_tiles, event_tiles, manifest):
+        y_pred = batch_result["predictions"]
+        profiles = batch_result["profile"]
+        B = y_pred.shape[0]
+
+        for i in range(B):
+            cell_id = batch_result["cell_id"][i]
+            name = batch_result["pre_post_name"][i].replace("\n", "").replace("|", "_").replace("/", "_")
+            pair_id = self._extract_scalar(batch_result.get("pair_id"), i, default=None)
+            event_id = self._extract_scalar(batch_result.get("event_id") or batch_result.get("db_nbac_fire_id"), i, default="unknown_event")
+            gid_pre = self._extract_scalar(batch_result.get("group_id_pre"), i, default="all")
+            gid_post = self._extract_scalar(batch_result.get("group_id_post"), i, default="all")
+            gdate_pre = self._extract_scalar(batch_result.get("group_date_pre"), i, default="all")
+            gdate_post = self._extract_scalar(batch_result.get("group_date_post"), i, default="all")
+
+            oh = batch_result["original_height"]
+            ow = batch_result["original_width"]
+            orig_h = oh[i].item() if isinstance(oh, Tensor) else int(oh[i])
+            orig_w = ow[i].item() if isinstance(ow, Tensor) else int(ow[i])
+            pred_np = y_pred[i, :orig_h, :orig_w].cpu().numpy().astype(np.uint16)
+
+            t_list = [profiles["transform"][k][i].item() for k in range(6)]
+            crs_val = profiles["crs"][i] if isinstance(profiles["crs"], (list, tuple)) else profiles["crs"]
+            profile_i = {
+                "driver": "GTiff", "dtype": "uint16", "count": 1, "nodata": 32767,
+                "height": orig_h, "width": orig_w, "crs": crs_val, "transform": Affine(*t_list),
+                "compress": "lzw", "tiled": True, "blockxsize": 256, "blockysize": 256, "predictor": 2,
+            }
+
+            event_dir = base_dir / event_id / predict_date
+            tile_dir = event_dir / cell_id
+            tile_dir.mkdir(parents=True, exist_ok=True)
+            out_path = tile_dir / f"{pair_id}-{name}.tif"
+
+            with rio.open(str(out_path), "w", **profile_i) as dst:
+                dst.write(pred_np[np.newaxis])
+
+            edk = str(event_dir)
+            group_tiles[(edk, str(gid_pre), str(gid_post))].append(out_path)
+            event_tiles[edk].append(out_path)
+
+            logger.info("Saved %s (%dx%d)", out_path, orig_w, orig_h)
+            manifest["predictions"].append({
+                "pair_id": pair_id, "event_id": event_id, "cell_id": cell_id,
+                "group_id_pre": gid_pre, "group_id_post": gid_post,
+                "group_date_pre": gdate_pre, "group_date_post": gdate_post,
+                "tif_path": str(out_path),
+            })
+
     @staticmethod
-    def _extract_scalar(batch_field, index: int, default: str = "unknown") -> str:
-        """Extract a scalar string value from a batched field at position index."""
-        if batch_field is None:
+    def _extract_scalar(field, index: int, default: str = "unknown") -> str:
+        if field is None:
             return default
-        if isinstance(batch_field, torch.Tensor):
-            return str(batch_field[index].item())
-        if isinstance(batch_field, (list, tuple)):
-            return str(batch_field[index])
-        return str(batch_field)
+        if isinstance(field, Tensor):
+            return str(field[index].item())
+        if isinstance(field, (list, tuple)):
+            return str(field[index])
+        return str(field)
 
     @staticmethod
-    def _merge_predictions(
-            group_tile_paths: dict[tuple[str, str, str], list[Path]],
-            event_all_tile_paths: dict[str, list[Path]],
-    ) -> None:
-        """Merge tiles in two passes:
-        1. Per group_id_pre/group_id_post pair → merged_group_{pre}_{post}.tif
-        2. All tiles in the event/date dir    → merged_all.tif
-        """
-        from rasterio.merge import merge as rio_merge
+    def _merge_tiles(tile_paths: list[Path], out_path: Path, label: str) -> None:
+        if len(tile_paths) < 2:
+            logger.info("Skip merge %s (only %d tile)", label, len(tile_paths))
+            return
+        datasets = []
+        try:
+            datasets = [rio.open(str(p)) for p in tile_paths]
+            mosaic, transform = rio_merge(datasets)
+            profile = datasets[0].profile.copy()
+            dtype_name = str(profile.get("dtype", ""))
+            profile.update(
+                height=mosaic.shape[1],
+                width=mosaic.shape[2],
+                transform=transform,
+                compress="lzw",
+                tiled=True,
+                blockxsize=256,
+                blockysize=256,
+                predictor=2 if _is_integer_dtype(dtype_name) else 3,
+            )
+            with rio.open(str(out_path), "w", **profile) as dst:
+                dst.write(mosaic)
+            logger.info("Merged %d tiles → %s (%dx%d)", len(tile_paths), out_path, mosaic.shape[2], mosaic.shape[1])
+        except Exception:
+            logger.exception("Failed merge: %s", label)
+        finally:
+            for ds in datasets:
+                try:
+                    ds.close()
+                except Exception:
+                    pass
 
-        # --- Pass 1 : merge par paire (group_id_pre, group_id_post) ---
-        for (event_date_dir_str, group_pre, group_post), tile_paths in group_tile_paths.items():
-            event_date_dir = Path(event_date_dir_str)
-            if len(tile_paths) < 2:
-                # Rien à merger s'il n'y a qu'une seule tuile
-                logger.info("Skipping merge for group %s/%s (only %d tile)",
-                            group_pre, group_post, len(tile_paths))
-                continue
-
-            merged_name = f"merged_group_{group_pre}_{group_post}.tif"
-            logger.info("Merging %d tiles → %s/%s", len(tile_paths), event_date_dir, merged_name)
-
-            datasets_to_merge = []
-            try:
-                datasets_to_merge = [rio.open(str(p)) for p in tile_paths]
-                mosaic, mosaic_transform = rio_merge(datasets_to_merge)
-
-                merge_profile = datasets_to_merge[0].profile.copy()
-                merge_profile.update({
-                    "height": mosaic.shape[1],
-                    "width": mosaic.shape[2],
-                    "transform": mosaic_transform,
-                })
-
-                merged_path = event_date_dir / merged_name
-                with rio.open(str(merged_path), "w", **merge_profile) as dst:
-                    dst.write(mosaic)
-
-                logger.info("Saved merged group to %s (%dx%d)",
-                            merged_path, mosaic.shape[2], mosaic.shape[1])
-
-            except Exception:
-                logger.exception("Failed to merge group %s/%s in %s",
-                                 group_pre, group_post, event_date_dir)
-            finally:
-                for ds in datasets_to_merge:
-                    try:
-                        ds.close()
-                    except Exception:
-                        pass
-
-        # --- Pass 2 : merge global par EVENT_ID / PREDICTION_DATE ---
-        for event_date_dir_str, tile_paths in event_all_tile_paths.items():
-            event_date_dir = Path(event_date_dir_str)
-            if len(tile_paths) < 2:
-                logger.info("Skipping global merge for %s (only %d tile)",
-                            event_date_dir, len(tile_paths))
-                continue
-
-            logger.info("Merging all %d tiles → %s/merged_all.tif", len(tile_paths), event_date_dir)
-
-            datasets_to_merge = []
-            try:
-                datasets_to_merge = [rio.open(str(p)) for p in tile_paths]
-                mosaic, mosaic_transform = rio_merge(datasets_to_merge)
-
-                merge_profile = datasets_to_merge[0].profile.copy()
-                merge_profile.update({
-                    "height": mosaic.shape[1],
-                    "width": mosaic.shape[2],
-                    "transform": mosaic_transform,
-                })
-
-                merged_path = event_date_dir / "merged_all.tif"
-                with rio.open(str(merged_path), "w", **merge_profile) as dst:
-                    dst.write(mosaic)
-
-                logger.info("Saved global merge to %s (%dx%d)",
-                            merged_path, mosaic.shape[2], mosaic.shape[1])
-
-            except Exception:
-                logger.exception("Failed to create global merge in %s", event_date_dir)
-            finally:
-                for ds in datasets_to_merge:
-                    try:
-                        ds.close()
-                    except Exception:
-                        pass
+    @classmethod
+    def _merge_predictions(cls, group_tiles, event_tiles) -> None:
+        for (edk, gpre, gpost), paths in group_tiles.items():
+            cls._merge_tiles(paths, Path(edk) / f"merged_group_{gpre}_{gpost}.tif", f"group {gpre}/{gpost}")
+        for edk, paths in event_tiles.items():
+            cls._merge_tiles(paths, Path(edk) / "merged_all.tif", f"global {edk}")
