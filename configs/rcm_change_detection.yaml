@@ -16,7 +16,7 @@ trainer:
     init_args:
       save_dir: &log_dir ./lightning_logs
 
-      name: &run_name 2026_4_A_mask_water_10pct_b3_changeformer_focal-lovasz_fire_id_cosw_mchi_rr_rl
+      name: &run_name 2026_4_A_2023_2025_mask_water_10pct_b2_changeformer_focal-lovasz_fire_id_cosw_mchi_rr_rl
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -76,7 +76,7 @@ model:
     in_channels: 11 # Should be the length of data.band_names + 4
     max_samples: 20
     num_classes: 1  # binary change detection
-    burned_class_weight: 3.0  # >1 penalizes false negatives on class burn (1)
+    burned_class_weight: 2.0  # >1 penalizes false negatives on class burn (1)
 
     main_loss:
       #class_path: segmentation_models_pytorch.losses.SoftBCEWithLogitsLoss
