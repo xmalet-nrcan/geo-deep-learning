@@ -334,60 +334,43 @@ class ChangeDetectionChangeFormer(LightningModule):
         y_sq = y.squeeze(1) if y.dim() == 4 else y
         y_clamped = y_sq.clamp(0, self._effective_num_classes - 1).long()
 
-        # --- Compute losses on VALID pixels only ---
-        # SMP FocalLoss/LovaszLoss expect raw logits; zeroing masked pixels corrupts them.
-        # Instead, we reshape valid pixels into a pseudo-batch for the loss functions.
+        # --- Compute losses on valid pixels only ---
+        # SMP FocalLoss/LovaszLoss in binary mode expect:
+        #   y_pred: [B, 1, H, W] raw logits
+        #   y_true: [B, H, W]    long targets (0 or 1)
+        #
+        # Strategy: set invalid pixels to a "neutral" state that produces ~zero loss:
+        #   - logits → large negative value (-100) so sigmoid → ~0
+        #   - targets → 0 (class "unburn")
+        # This makes FocalLoss/LovaszLoss effectively ignore these pixels because
+        # the prediction (0) matches the target (0) with high confidence.
         valid_mask_2d = common_mask.squeeze(1) > 0.5  # [B, H, W]
 
         if valid_mask_2d.sum() == 0:
             zero = torch.tensor(0.0, device=logits.device, dtype=logits.dtype, requires_grad=True)
             return x_pre, x_post, y.float(), y_clamped, logits, zero, zero, zero, B
 
-        # For SMP binary losses: they expect logits [B,1,H,W] and targets [B,1,H,W].
-        # We set invalid pixels to ignore values that don't affect the loss:
-        #   - logits → 0 (sigmoid(0)=0.5, but target also set to 0 → low gradient)
-        #   - targets → 0 (unburned class, safe default)
-        # This is imperfect, so we use a gather-based approach instead.
-
-        # Gather valid pixels: flatten spatial dims, then index.
-        # logits: [B, C, H, W] → [B, C, H*W] → gather valid → [N, C]
-        BHW = valid_mask_2d  # [B, H, W]
         C = logits.shape[1]
+        invalid_mask_2d = ~valid_mask_2d  # [B, H, W]
 
-        # Flatten to [B, H*W]
-        valid_flat = BHW.reshape(B, -1)  # [B, H*W]
-        logits_flat = logits.reshape(B, C, -1)  # [B, C, H*W]
-        targets_flat = y_clamped.reshape(B, -1)  # [B, H*W]
-
-        # Collect all valid pixels across the batch
-        valid_logits_list = []
-        valid_targets_list = []
-        for b_idx in range(B):
-            mask_b = valid_flat[b_idx]  # [H*W] bool
-            if mask_b.any():
-                valid_logits_list.append(logits_flat[b_idx, :, mask_b].T)  # [N_b, C]
-                valid_targets_list.append(targets_flat[b_idx, mask_b])  # [N_b]
-
-        valid_logits_cat = torch.cat(valid_logits_list, dim=0)  # [N_total, C]
-        valid_targets_cat = torch.cat(valid_targets_list, dim=0)  # [N_total]
-
-        # Reshape for SMP losses: they expect [B, C, H, W] format.
-        # We fake a single-row spatial layout: [1, C, 1, N_total]
-        N = valid_logits_cat.shape[0]
-        loss_logits = valid_logits_cat.T.unsqueeze(0).unsqueeze(2)  # [1, C, 1, N]
-        loss_targets = valid_targets_cat.unsqueeze(0).unsqueeze(1)  # [1, 1, N]
-
-        # For binary mode (C=2), SMP expects logits [B,1,H,W] → take class-1 logit only.
+        # For binary (C=2): extract class-1 logit → [B, 1, H, W]
         if C == 2:
-            loss_logits_binary = loss_logits[:, 1:2, :, :]  # [1, 1, 1, N]
-            loss_targets_binary = loss_targets.float()  # [1, 1, N]
+            loss_logits = logits[:, 1:2, :, :]  # [B, 1, H, W]
         else:
-            loss_logits_binary = loss_logits
-            loss_targets_binary = loss_targets.float()
+            loss_logits = logits
+
+        # Clone to avoid modifying original logits (needed for metrics)
+        loss_logits = loss_logits.clone()
+        loss_targets = y_clamped.clone()
+
+        # Neutralize invalid pixels
+        invalid_expanded = invalid_mask_2d.unsqueeze(1).expand_as(loss_logits)
+        loss_logits[invalid_expanded] = -100.0  # sigmoid(-100) ≈ 0
+        loss_targets[invalid_mask_2d] = 0  # target = "unburn" → matches prediction
 
         w_ml, w_sl = self.loss_ratio
-        dice_loss = self.main_loss(loss_logits_binary, loss_targets_binary)
-        ce_loss = self.secondary_loss(loss_logits_binary, loss_targets_binary)
+        dice_loss = self.main_loss(loss_logits, loss_targets)
+        ce_loss = self.secondary_loss(loss_logits, loss_targets)
         fn_penalty = self._burned_false_negative_penalty(logits, y_clamped, common_mask)
         total_loss = w_ml * dice_loss + w_sl * ce_loss + fn_penalty
 
