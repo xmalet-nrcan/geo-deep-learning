@@ -99,14 +99,11 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.class_colors = class_colors
         self.threshold = threshold
         self.predict_output_dir = predict_output_dir
-        self.enable_amp = bool(kwargs.get("enable_amp", True))
-        self.sar_speckle_p = float(kwargs.get("sar_speckle_p", 0.35))
+        # SAR-aware augmentation parameters (disabled by default; enable after baseline converges).
+        self.sar_speckle_p = float(kwargs.get("sar_speckle_p", 0.14))
         self.sar_speckle_std = float(kwargs.get("sar_speckle_std", 0.08))
-        self.sar_jitter_p = float(kwargs.get("sar_jitter_p", 0.35))
+        self.sar_jitter_p = float(kwargs.get("sar_jitter_p", 0.14))
         self.sar_jitter_max = float(kwargs.get("sar_jitter_max", 0.08))
-
-        # Improve GEMM performance on Ampere+ while keeping numerics stable.
-        torch.set_float32_matmul_precision("high")
 
         self._effective_num_classes = num_classes + 1 if num_classes == 1 else num_classes
         self.labels = class_labels or [str(i) for i in range(self._effective_num_classes)]
@@ -167,10 +164,17 @@ class ChangeDetectionChangeFormer(LightningModule):
     @staticmethod
     def _intensity_aug() -> AugmentationSequential:
         return AugmentationSequential(
-            krn.augmentation.RandomGaussianNoise(mean=0.0, std=0.05, p=0.3, keepdim=True),
+            krn.augmentation.RandomGaussianNoise(mean=0.0,
+                                                 std=0.05,
+                                                 p=0.3, keepdim=True),
             # Keep mild blur/erase to avoid distorting SAR texture statistics too much.
-            krn.augmentation.RandomGaussianBlur(kernel_size=(3, 3), sigma=(0.1, 0.8), p=0.1, keepdim=True),
-            krn.augmentation.RandomErasing(scale=(0.01, 0.03), ratio=(0.5, 2.0), p=0.05, keepdim=True),
+            krn.augmentation.RandomGaussianBlur(kernel_size=(3, 3),
+                                                sigma=(0.1, 0.8),
+                                                p=0.1,
+                                                keepdim=True),
+            krn.augmentation.RandomErasing(scale=(0.01, 0.03),
+                                           ratio=(0.5, 2.0),
+                                           p=0.05, keepdim=True),
             data_keys=None,
         )
 
@@ -284,12 +288,6 @@ class ChangeDetectionChangeFormer(LightningModule):
     def forward(self, image_pre: Tensor, image_post: Tensor) -> Tensor:
         return self.model(image_pre, image_post)[-1]
 
-    def _forward_logits(self, image_pre: Tensor, image_post: Tensor) -> Tensor:
-        if self.enable_amp and image_pre.device.type == "cuda":
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
-                return self(image_pre, image_post)
-        return self(image_pre, image_post)
-
     # ------------------------------------------------------------------
     # Shared step logic
     # ------------------------------------------------------------------
@@ -321,7 +319,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 common_mask[idx] = 0.0
                 y[idx] = 0
 
-        logits = self._forward_logits(x_pre, x_post)
+        logits = self(x_pre, x_post)
 
         # Handle non-finite logits
         if not torch.isfinite(logits).all():
@@ -518,7 +516,7 @@ class ChangeDetectionChangeFormer(LightningModule):
     def predict_step(self, batch: dict[str, Any], batch_idx: int, dataloader_idx: int = 0) -> dict[str, Any]:
         x_pre, x_post = batch["image_pre"], batch["image"]
         with torch.no_grad():
-            logits = self._forward_logits(x_pre, x_post)
+            logits = self(x_pre, x_post)
 
         probs = torch.softmax(logits, dim=1)
         y_pred = torch.argmax(probs, dim=1)
