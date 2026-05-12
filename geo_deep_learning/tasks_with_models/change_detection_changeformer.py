@@ -355,7 +355,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         total_loss = w_sl * ce_loss + w_ml * dice_loss + fn_penalty
 
         if not torch.isfinite(total_loss):
-            raise RuntimeError(f"Loss is NaN/Inf (ce={ce_loss.item()}, dice={dice_loss.item()})")
+            logger.warning(
+                "Non-finite total_loss detected — ce=%.6f, dice=%.6f, fn_penalty=%.6f. Returning zero loss.",
+                ce_loss.item(), dice_loss.item(), fn_penalty.item(),
+            )
+            zero = torch.tensor(0.0, device=logits.device, dtype=logits.dtype, requires_grad=True)
+            return x_pre, x_post, y.float(), y_clamped, logits, zero, zero, zero, B
 
         return x_pre, x_post, y.float(), y_clamped, logits, total_loss, dice_loss, ce_loss, B
 
@@ -436,17 +441,18 @@ class ChangeDetectionChangeFormer(LightningModule):
         if self.burned_class_weight <= 1.0:
             return torch.zeros((), device=logits.device, dtype=logits.dtype)
 
-        burned_logits = logits[:, 1:2] if logits.shape[1] > 1 else logits
-        burned_targets = (targets == 1).unsqueeze(1).to(dtype=logits.dtype)
-        valid_mask = valid_mask.unsqueeze(1) if valid_mask.dim() == 3 else valid_mask
-        valid_mask = valid_mask.to(logits.dtype)
+        # Force float32 to avoid NaN from BCE under AMP/float16.
+        burned_logits = (logits[:, 1:2] if logits.shape[1] > 1 else logits).float()
+        burned_targets = (targets == 1).unsqueeze(1).float()
+        vm = valid_mask.unsqueeze(1) if valid_mask.dim() == 3 else valid_mask
+        vm = vm.float()
 
         penalty = F.binary_cross_entropy_with_logits(
             burned_logits, burned_targets,
-            pos_weight=torch.tensor(self.burned_class_weight, device=logits.device, dtype=logits.dtype),
+            pos_weight=torch.tensor(self.burned_class_weight, device=logits.device, dtype=torch.float32),
             reduction="none",
-        ) * valid_mask
-        return penalty.sum() / valid_mask.sum().clamp_min(1.0)
+        ) * vm
+        return penalty.sum() / vm.sum().clamp_min(1.0)
 
     # ------------------------------------------------------------------
     # Visualization
