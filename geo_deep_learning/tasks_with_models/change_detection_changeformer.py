@@ -228,7 +228,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         aug = self._intensity_aug()
         for k in ("image_pre", "image"):
             batch[k] = aug({k: batch[k]})[k]
-            batch[k] = self._apply_sar_aware_aug(batch[k])
+            # batch[k] = self._apply_sar_aware_aug(batch[k])
         return batch
 
     # ------------------------------------------------------------------
