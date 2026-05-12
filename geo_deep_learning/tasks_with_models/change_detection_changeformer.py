@@ -334,23 +334,62 @@ class ChangeDetectionChangeFormer(LightningModule):
         y_sq = y.squeeze(1) if y.dim() == 4 else y
         y_clamped = y_sq.clamp(0, self._effective_num_classes - 1).long()
 
-        # One-hot only where needed by current losses.
-        one_hot = F.one_hot(y_clamped, self._effective_num_classes).permute(0, 3, 1, 2).contiguous().float()
+        # --- Compute losses on VALID pixels only ---
+        # SMP FocalLoss/LovaszLoss expect raw logits; zeroing masked pixels corrupts them.
+        # Instead, we reshape valid pixels into a pseudo-batch for the loss functions.
+        valid_mask_2d = common_mask.squeeze(1) > 0.5  # [B, H, W]
 
-        # Masked loss
-        mask_exp = common_mask.expand_as(logits) if common_mask.shape[1] == 1 else common_mask.unsqueeze(1).expand_as(logits)
-        masked_logits = logits * mask_exp
-        masked_oh = one_hot * mask_exp
-
-        if common_mask.sum() == 0:
+        if valid_mask_2d.sum() == 0:
             zero = torch.tensor(0.0, device=logits.device, dtype=logits.dtype, requires_grad=True)
             return x_pre, x_post, y.float(), y_clamped, logits, zero, zero, zero, B
 
+        # For SMP binary losses: they expect logits [B,1,H,W] and targets [B,1,H,W].
+        # We set invalid pixels to ignore values that don't affect the loss:
+        #   - logits → 0 (sigmoid(0)=0.5, but target also set to 0 → low gradient)
+        #   - targets → 0 (unburned class, safe default)
+        # This is imperfect, so we use a gather-based approach instead.
+
+        # Gather valid pixels: flatten spatial dims, then index.
+        # logits: [B, C, H, W] → [B, C, H*W] → gather valid → [N, C]
+        BHW = valid_mask_2d  # [B, H, W]
+        C = logits.shape[1]
+
+        # Flatten to [B, H*W]
+        valid_flat = BHW.reshape(B, -1)  # [B, H*W]
+        logits_flat = logits.reshape(B, C, -1)  # [B, C, H*W]
+        targets_flat = y_clamped.reshape(B, -1)  # [B, H*W]
+
+        # Collect all valid pixels across the batch
+        valid_logits_list = []
+        valid_targets_list = []
+        for b_idx in range(B):
+            mask_b = valid_flat[b_idx]  # [H*W] bool
+            if mask_b.any():
+                valid_logits_list.append(logits_flat[b_idx, :, mask_b].T)  # [N_b, C]
+                valid_targets_list.append(targets_flat[b_idx, mask_b])  # [N_b]
+
+        valid_logits_cat = torch.cat(valid_logits_list, dim=0)  # [N_total, C]
+        valid_targets_cat = torch.cat(valid_targets_list, dim=0)  # [N_total]
+
+        # Reshape for SMP losses: they expect [B, C, H, W] format.
+        # We fake a single-row spatial layout: [1, C, 1, N_total]
+        N = valid_logits_cat.shape[0]
+        loss_logits = valid_logits_cat.T.unsqueeze(0).unsqueeze(2)  # [1, C, 1, N]
+        loss_targets = valid_targets_cat.unsqueeze(0).unsqueeze(1)  # [1, 1, N]
+
+        # For binary mode (C=2), SMP expects logits [B,1,H,W] → take class-1 logit only.
+        if C == 2:
+            loss_logits_binary = loss_logits[:, 1:2, :, :]  # [1, 1, 1, N]
+            loss_targets_binary = loss_targets.float()  # [1, 1, N]
+        else:
+            loss_logits_binary = loss_logits
+            loss_targets_binary = loss_targets.float()
+
         w_ml, w_sl = self.loss_ratio
-        ce_loss = self.secondary_loss(masked_logits.contiguous(), masked_oh)
-        dice_loss = self.main_loss(masked_logits.contiguous(), masked_oh)
+        dice_loss = self.main_loss(loss_logits_binary, loss_targets_binary)
+        ce_loss = self.secondary_loss(loss_logits_binary, loss_targets_binary)
         fn_penalty = self._burned_false_negative_penalty(logits, y_clamped, common_mask)
-        total_loss = w_sl * ce_loss + w_ml * dice_loss + fn_penalty
+        total_loss = w_ml * dice_loss + w_sl * ce_loss + fn_penalty
 
         if not torch.isfinite(total_loss):
             logger.warning(
