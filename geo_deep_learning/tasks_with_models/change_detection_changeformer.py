@@ -11,6 +11,7 @@ import numpy as np
 import rasterio as rio
 import kornia as krn
 import torch
+import torch.nn.functional as F
 from datetime import datetime
 from rasterio.transform import Affine
 from matplotlib import pyplot as plt
@@ -54,6 +55,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             scheduler: LRSchedulerCallable = torch.optim.lr_scheduler.ConstantLR,
             scheduler_config: dict[str, Any] | None = None,
             weights: str | None = None,
+            burned_class_weight: float = 1.0,
             class_labels: list[str] | None = None,
             class_colors: list[str] | None = None,
             weights_from_checkpoint_path: str | None = None,
@@ -67,7 +69,10 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.save_hyperparameters()
         self.change_detection_model = change_detection_model
         self.in_channels = in_channels
-
+        self.burned_class_weight = float(burned_class_weight)
+        if self.burned_class_weight < 1.0:
+            msg = "burned_class_weight must be >= 1.0"
+            raise ValueError(msg)
         self.num_classes = num_classes  # Should be 2
         self.image_size = image_size
         self.max_samples = max_samples
@@ -331,7 +336,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Logging ---
         self.log(
             "train_loss",
-            loss,
+            main_loss,
             batch_size=batch_size,
             prog_bar=True,
             logger=True,
@@ -354,7 +359,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             self.train_precision.update(valid_preds, valid_targets)
             self.train_recall.update(valid_preds, valid_targets)
 
-        return loss
+        return main_loss
 
     @staticmethod
     def _extract_valid_pixels(
@@ -443,10 +448,17 @@ class ChangeDetectionChangeFormer(LightningModule):
             self.log(f"val_iou_{class_name}", value, prog_bar=False, sync_dist=True)
 
         # Global metrics
-        self.log("val_iou", self.val_iou.compute(), prog_bar=True, sync_dist=True)
-        self.log("val_f1", self.val_f1.compute(), prog_bar=True, sync_dist=True)
-        self.log("val_precision", self.val_precision.compute(), prog_bar=True, sync_dist=True)
-        self.log("val_recall", self.val_recall.compute(), prog_bar=True, sync_dist=True)
+        val_iou = self.val_iou.compute()
+        val_f1 = self.val_f1.compute()
+        val_precision = self.val_precision.compute()
+        val_recall = self.val_recall.compute()
+
+        self.log("val_iou", val_iou, prog_bar=True, sync_dist=True)
+        self.log("val_f1", val_f1, prog_bar=True, sync_dist=True)
+        self.log("val_precision", val_precision, prog_bar=True, sync_dist=True)
+        self.log("val_recall", val_recall, prog_bar=True, sync_dist=True)
+        # In binary setup this recall corresponds to class 1 (burned).
+        self.log("val_recall_burn", val_recall, prog_bar=True, sync_dist=True)
 
         # Reset all
         self.val_iou_classwise.reset()
@@ -593,6 +605,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, batch_size
 
 
+
         # Préparation du one-hot
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
         y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1) # clamp aussi les 255 → num_classes-1
@@ -630,7 +643,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Losses ---
         ce_loss = self.secondary_loss(masked_logits.contiguous(), masked_one_hot)
         loss = self.main_loss(masked_logits.contiguous(), masked_one_hot)
-        main_loss = w_sl * ce_loss + w_ml * loss
+        burned_fn_penalty = self._burned_false_negative_penalty(
+            logits=logits_no_nan,
+            one_hot=one_hot,
+            valid_mask=common_data_mask,
+        )
+        main_loss = w_sl * ce_loss + w_ml * loss + burned_fn_penalty
 
         # Dernière vérification
         if not torch.isfinite(main_loss):
@@ -641,6 +659,42 @@ class ChangeDetectionChangeFormer(LightningModule):
             )
 
         return x_pre, x_post, y_float, one_hot, logits_no_nan, main_loss, loss, ce_loss, batch_size
+
+    def _burned_false_negative_penalty(
+            self,
+            logits: Tensor,
+            one_hot: Tensor,
+            valid_mask: Tensor,
+    ) -> Tensor:
+        """Add extra penalty on positive (burned) pixels to reduce false negatives."""
+        if self.burned_class_weight <= 1.0:
+            return torch.zeros((), device=logits.device, dtype=logits.dtype)
+
+        if logits.shape[1] > 1:
+            burned_logits = logits[:, 1:2, :, :]
+            burned_targets = one_hot[:, 1:2, :, :]
+        else:
+            burned_logits = logits
+            burned_targets = one_hot
+
+        if valid_mask.dim() == 3:
+            valid_mask = valid_mask.unsqueeze(1)
+        valid_mask = valid_mask.to(dtype=logits.dtype)
+
+        pos_weight = torch.tensor(
+            self.burned_class_weight,
+            device=logits.device,
+            dtype=logits.dtype,
+        )
+        penalty_map = F.binary_cross_entropy_with_logits(
+            burned_logits,
+            burned_targets,
+            pos_weight=pos_weight,
+            reduction="none",
+        )
+        penalty_map = penalty_map * valid_mask
+        valid_pixels = valid_mask.sum().clamp_min(1.0)
+        return penalty_map.sum() / valid_pixels
 
     def _log_visualizations(  # noqa: PLR0913
             self,
