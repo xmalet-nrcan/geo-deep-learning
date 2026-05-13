@@ -334,16 +334,14 @@ class ChangeDetectionChangeFormer(LightningModule):
         y_sq = y.squeeze(1) if y.dim() == 4 else y
         y_clamped = y_sq.clamp(0, self._effective_num_classes - 1).long()
 
-        # --- Compute losses on valid pixels only ---
+        # --- Compute losses on VALID pixels only ---
         # SMP FocalLoss/LovaszLoss in binary mode expect:
         #   y_pred: [B, 1, H, W] raw logits
         #   y_true: [B, H, W]    long targets (0 or 1)
         #
-        # Strategy: set invalid pixels to a "neutral" state that produces ~zero loss:
-        #   - logits → large negative value (-100) so sigmoid → ~0
-        #   - targets → 0 (class "unburn")
-        # This makes FocalLoss/LovaszLoss effectively ignore these pixels because
-        # the prediction (0) matches the target (0) with high confidence.
+        # We extract only valid pixels, then reshape them as a fake [N, 1, 1, 1]
+        # batch so each "sample" is a single pixel. This ensures NO invalid pixel
+        # contributes to the loss at all.
         valid_mask_2d = common_mask.squeeze(1) > 0.5  # [B, H, W]
 
         if valid_mask_2d.sum() == 0:
@@ -351,22 +349,21 @@ class ChangeDetectionChangeFormer(LightningModule):
             return x_pre, x_post, y.float(), y_clamped, logits, zero, zero, zero, B
 
         C = logits.shape[1]
-        invalid_mask_2d = ~valid_mask_2d  # [B, H, W]
 
-        # For binary (C=2): extract class-1 logit → [B, 1, H, W]
+        # For binary (C=2): use class-1 logit
         if C == 2:
-            loss_logits = logits[:, 1:2, :, :]  # [B, 1, H, W]
+            burn_logits = logits[:, 1, :, :]  # [B, H, W]
         else:
-            loss_logits = logits
+            burn_logits = logits[:, 0, :, :]  # fallback
 
-        # Clone to avoid modifying original logits (needed for metrics)
-        loss_logits = loss_logits.clone()
-        loss_targets = y_clamped.clone()
+        # Extract valid pixels → 1D tensors
+        valid_burn_logits = burn_logits[valid_mask_2d]  # [N]
+        valid_targets = y_clamped[valid_mask_2d]  # [N]
 
-        # Neutralize invalid pixels
-        invalid_expanded = invalid_mask_2d.unsqueeze(1).expand_as(loss_logits)
-        loss_logits[invalid_expanded] = -100.0  # sigmoid(-100) ≈ 0
-        loss_targets[invalid_mask_2d] = 0  # target = "unburn" → matches prediction
+        # Reshape to [N, 1, 1, 1] for SMP binary losses
+        N = valid_burn_logits.shape[0]
+        loss_logits = valid_burn_logits.reshape(N, 1, 1, 1)  # [N, 1, 1, 1]
+        loss_targets = valid_targets.reshape(N, 1, 1)  # [N, 1, 1]
 
         w_ml, w_sl = self.loss_ratio
         dice_loss = self.main_loss(loss_logits, loss_targets)
