@@ -618,30 +618,19 @@ class ChangeDetectionChangeFormer(LightningModule):
             return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, batch_size
 
 
-
-        # Préparation du one-hot
+        # Préparation du one-hot (pour les métriques)
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
-        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1) # clamp aussi les 255 → num_classes-1
+        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1)
         one_hot = torch.nn.functional.one_hot(y_one_hot.long(), num_classes=num_classes)
         one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
 
         # common_data_mask : [B, 1, H, W], 1=valide, 0=invalide (eau, no-data, padding)
-        # Expand le masque pour matcher les dimensions des logits et du one-hot
         loss_mask = common_data_mask.to(dtype=torch.float32)
-        if loss_mask.dim() == 4 and loss_mask.shape[1] == 1:
-            loss_mask_expanded = loss_mask.expand_as(logits_no_nan)  # [B, C, H, W]
-        else:
-            loss_mask_expanded = loss_mask.unsqueeze(1).expand_as(logits_no_nan)
-
-        # Appliquer le masque : mettre à 0 les logits et targets pour les pixels invalides
-        # afin qu'ils ne contribuent pas à la loss
-        masked_logits = logits_no_nan * loss_mask_expanded
-        masked_one_hot = one_hot * loss_mask_expanded
+        valid_mask_2d = loss_mask.squeeze(1)  # [B, H, W]
 
         # Vérifier qu'il reste des pixels valides
-        valid_sum = common_data_mask.sum()
+        valid_sum = valid_mask_2d.sum()
         if valid_sum == 0:
-            # Eviter NaN si la loss divise par le nombre de pixels
             main_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
             ce_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
             loss = main_loss
@@ -653,15 +642,33 @@ class ChangeDetectionChangeFormer(LightningModule):
         if not torch.isfinite(one_hot).all():
             raise RuntimeError("One-hot targets contain non-finite values (NaN/Inf).")
 
-        # --- Losses ---
-        ce_loss = self.secondary_loss(masked_logits.contiguous(), masked_one_hot)
-        loss = self.main_loss(masked_logits.contiguous(), masked_one_hot)
-        burned_fn_penalty = self._burned_false_negative_penalty(
-            logits=logits_no_nan,
-            targets=y_float.long(),
-            valid_mask=common_data_mask,
-        )
-        main_loss = w_sl * ce_loss + w_ml * loss + burned_fn_penalty
+        # --- Losses (multiclass mode) ---
+        # SMP FocalLoss/LovaszLoss en mode multiclass attendent :
+        #   logits: [B, C, H, W], targets: [B, H, W] (indices de classe long)
+        # On met les pixels invalides à classe 0 pour ne pas crasher,
+        # puis on applique la pénalité burned uniquement sur les pixels valides.
+        targets_for_loss = y_one_hot.long()  # [B, H, W]
+        targets_for_loss = targets_for_loss * valid_mask_2d.long()  # invalides → classe 0
+
+        ce_loss = self.secondary_loss(logits_no_nan, targets_for_loss)
+        loss = self.main_loss(logits_no_nan, targets_for_loss)
+
+        # --- Burned false-negative penalty (class imbalance) ---
+        # Pénalité additionnelle sur les pixels brûlés valides uniquement,
+        # utilisant F.cross_entropy (compatible softmax 2-canaux).
+        if self.burned_class_weight > 1.0:
+            burned_pixels = (targets_for_loss == 1) & (valid_mask_2d > 0.5)
+            if burned_pixels.any():
+                burned_ce = F.cross_entropy(
+                    logits_no_nan,
+                    targets_for_loss,
+                    reduction="none",
+                )  # [B, H, W]
+                burned_penalty = (burned_ce * burned_pixels.float()).sum() / burned_pixels.float().sum()
+                extra_weight = self.burned_class_weight - 1.0
+                loss = loss + extra_weight * burned_penalty
+
+        main_loss = w_sl * ce_loss + w_ml * loss
 
         # Dernière vérification
         if not torch.isfinite(main_loss):
