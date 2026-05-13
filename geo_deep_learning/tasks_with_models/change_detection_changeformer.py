@@ -225,7 +225,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 else:
                     keys_to_pad[mask_names] = batch[mask_names].to(torch.float32)
 
-        transformed = aug(keys_to_pad)
+        transformed = pad(keys_to_pad)
         batch.update(transformed)
         return batch
 
@@ -673,17 +673,20 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         return x_pre, x_post, y_float, one_hot, logits_no_nan, main_loss, loss, ce_loss, batch_size
 
-    def _burned_false_negative_penalty(self,
-                                       logits: Tensor,
-                                       targets: Tensor,
-                                       valid_mask: Tensor) -> Tensor:
+    def _burned_false_negative_penalty(self, logits: Tensor, targets: Tensor, valid_mask: Tensor) -> Tensor:
         """Add extra penalty on positive (burned) pixels to reduce false negatives."""
         if self.burned_class_weight <= 1.0:
             return torch.zeros((), device=logits.device, dtype=logits.dtype)
 
         burned_logits = logits[:, 1:2] if logits.shape[1] > 1 else logits
+
+        # Squeeze targets to (B, H, W) if needed
+        if targets.dim() == 4:
+            targets = targets.squeeze(1)
         burned_targets = (targets == 1).unsqueeze(1).to(dtype=logits.dtype)
-        valid_mask = valid_mask.unsqueeze(1) if valid_mask.dim() == 3 else valid_mask
+
+        if valid_mask.dim() == 3:
+            valid_mask = valid_mask.unsqueeze(1)
         valid_mask = valid_mask.to(logits.dtype)
 
         penalty = F.binary_cross_entropy_with_logits(
