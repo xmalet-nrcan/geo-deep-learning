@@ -187,13 +187,29 @@ class ChangeDetectionChangeFormer(LightningModule):
             data_keys=None,
         )
 
-    def on_before_batch_transfer(
-            self,
-            batch: dict[str, Any],
-            dataloader_idx: int,  # noqa: ARG002
-    ) -> dict[str, Any]:
-        aug = AugmentationSequential(
-            krn.augmentation.PadTo(size=self.image_size, pad_mode='constant', pad_value=0, keepdim=False),
+    def _apply_sar_aware_aug(self, image: Tensor) -> Tensor:
+        """Apply lightweight SAR-specific augmentations (speckle + radiometric jitter)."""
+        out = image
+
+        if torch.rand(1, device=out.device).item() < self.sar_speckle_p:
+            # Multiplicative speckle factor around 1.0.
+            speckle = torch.randn_like(out) * self.sar_speckle_std + 1.0
+            out = out * speckle.clamp_min(0.0)
+
+        if torch.rand(1, device=out.device).item() < self.sar_jitter_p:
+            # Per-sample gain jitter to mimic mild radiometric calibration drift.
+            b = out.shape[0]
+            gain = 1.0 + (torch.rand((b, 1, 1, 1), device=out.device) * 2 - 1) * self.sar_jitter_max
+            out = out * gain
+
+        return out
+
+    # ------------------------------------------------------------------
+    # Hooks
+    # ------------------------------------------------------------------
+    def on_before_batch_transfer(self, batch: dict[str, Any], dataloader_idx: int) -> dict[str, Any]:
+        pad = AugmentationSequential(
+            krn.augmentation.PadTo(size=self.image_size, pad_mode="constant", pad_value=0, keepdim=False),
             data_keys=None,
         )
 
@@ -479,9 +495,6 @@ class ChangeDetectionChangeFormer(LightningModule):
             return None
 
         x_pre, x_post, y, one_hot, logits, loss, main_loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
-        # Convert logits to class predictions
-        y_pred = torch.argmax(logits, dim=1)
-        y_true = torch.argmax(one_hot, dim=1)
 
         # --- Update metrics ---
         with torch.no_grad():
@@ -645,7 +658,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         loss = self.main_loss(masked_logits.contiguous(), masked_one_hot)
         burned_fn_penalty = self._burned_false_negative_penalty(
             logits=logits_no_nan,
-            one_hot=one_hot,
+            targets=y_float.long(),
             valid_mask=common_data_mask,
         )
         main_loss = w_sl * ce_loss + w_ml * loss + burned_fn_penalty
@@ -660,41 +673,25 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         return x_pre, x_post, y_float, one_hot, logits_no_nan, main_loss, loss, ce_loss, batch_size
 
-    def _burned_false_negative_penalty(
-            self,
-            logits: Tensor,
-            one_hot: Tensor,
-            valid_mask: Tensor,
-    ) -> Tensor:
+    def _burned_false_negative_penalty(self,
+                                       logits: Tensor,
+                                       targets: Tensor,
+                                       valid_mask: Tensor) -> Tensor:
         """Add extra penalty on positive (burned) pixels to reduce false negatives."""
         if self.burned_class_weight <= 1.0:
             return torch.zeros((), device=logits.device, dtype=logits.dtype)
 
-        if logits.shape[1] > 1:
-            burned_logits = logits[:, 1:2, :, :]
-            burned_targets = one_hot[:, 1:2, :, :]
-        else:
-            burned_logits = logits
-            burned_targets = one_hot
+        burned_logits = logits[:, 1:2] if logits.shape[1] > 1 else logits
+        burned_targets = (targets == 1).unsqueeze(1).to(dtype=logits.dtype)
+        valid_mask = valid_mask.unsqueeze(1) if valid_mask.dim() == 3 else valid_mask
+        valid_mask = valid_mask.to(logits.dtype)
 
-        if valid_mask.dim() == 3:
-            valid_mask = valid_mask.unsqueeze(1)
-        valid_mask = valid_mask.to(dtype=logits.dtype)
-
-        pos_weight = torch.tensor(
-            self.burned_class_weight,
-            device=logits.device,
-            dtype=logits.dtype,
-        )
-        penalty_map = F.binary_cross_entropy_with_logits(
-            burned_logits,
-            burned_targets,
-            pos_weight=pos_weight,
+        penalty = F.binary_cross_entropy_with_logits(
+            burned_logits, burned_targets,
+            pos_weight=torch.tensor(self.burned_class_weight, device=logits.device, dtype=logits.dtype),
             reduction="none",
-        )
-        penalty_map = penalty_map * valid_mask
-        valid_pixels = valid_mask.sum().clamp_min(1.0)
-        return penalty_map.sum() / valid_pixels
+        ) * valid_mask
+        return penalty.sum() / valid_mask.sum().clamp_min(1.0)
 
     def _log_visualizations(  # noqa: PLR0913
             self,
