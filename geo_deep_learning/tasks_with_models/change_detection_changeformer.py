@@ -352,7 +352,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Logging ---
         self.log(
             "train_loss",
-            main_loss,
+            loss,
             batch_size=batch_size,
             prog_bar=True,
             logger=True,
@@ -375,7 +375,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             self.train_precision.update(valid_preds, valid_targets)
             self.train_recall.update(valid_preds, valid_targets)
 
-        return main_loss
+        return loss
 
     @staticmethod
     def _extract_valid_pixels(
@@ -464,17 +464,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             self.log(f"val_iou_{class_name}", value, prog_bar=False, sync_dist=True)
 
         # Global metrics
-        val_iou = self.val_iou.compute()
-        val_f1 = self.val_f1.compute()
-        val_precision = self.val_precision.compute()
-        val_recall = self.val_recall.compute()
-
-        self.log("val_iou", val_iou, prog_bar=True, sync_dist=True)
-        self.log("val_f1", val_f1, prog_bar=True, sync_dist=True)
-        self.log("val_precision", val_precision, prog_bar=True, sync_dist=True)
-        self.log("val_recall", val_recall, prog_bar=True, sync_dist=True)
-        # In binary setup this recall corresponds to class 1 (burned).
-        self.log("val_recall_burn", val_recall, prog_bar=True, sync_dist=True)
+        self.log("val_iou", self.val_iou.compute(), prog_bar=True, sync_dist=True)
+        self.log("val_f1", self.val_f1.compute(), prog_bar=True, sync_dist=True)
+        self.log("val_precision", self.val_precision.compute(), prog_bar=True, sync_dist=True)
+        self.log("val_recall", self.val_recall.compute(), prog_bar=True, sync_dist=True)
 
         # Reset all
         self.val_iou_classwise.reset()
@@ -495,6 +488,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             return None
 
         x_pre, x_post, y, one_hot, logits, loss, main_loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
+
 
         # --- Update metrics ---
         with torch.no_grad():
@@ -626,11 +620,20 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # common_data_mask : [B, 1, H, W], 1=valide, 0=invalide (eau, no-data, padding)
         loss_mask = common_data_mask.to(dtype=torch.float32)
-        valid_mask_2d = loss_mask.squeeze(1)  # [B, H, W]
+        if loss_mask.dim() == 4 and loss_mask.shape[1] == 1:
+            loss_mask_expanded = loss_mask.expand_as(logits_no_nan)  # [B, C, H, W]
+        else:
+            loss_mask_expanded = loss_mask.unsqueeze(1).expand_as(logits_no_nan)
+
+        # Appliquer le masque : mettre à 0 les logits et targets pour les pixels invalides
+        # afin qu'ils ne contribuent pas à la loss
+        masked_logits = logits_no_nan * loss_mask_expanded
+        masked_one_hot = one_hot * loss_mask_expanded
 
         # Vérifier qu'il reste des pixels valides
-        valid_sum = valid_mask_2d.sum()
+        valid_sum = common_data_mask.sum()
         if valid_sum == 0:
+            # Eviter NaN si la loss divise par le nombre de pixels
             main_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
             ce_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
             loss = main_loss
@@ -642,35 +645,9 @@ class ChangeDetectionChangeFormer(LightningModule):
         if not torch.isfinite(one_hot).all():
             raise RuntimeError("One-hot targets contain non-finite values (NaN/Inf).")
 
-        # --- Losses (binary mode) ---
-        # SMP FocalLoss/LovaszLoss en mode binary attendent :
-        #   logits: [B, 1, H, W] (logit de la classe positive)
-        #   targets: [B, H, W] (float 0.0 ou 1.0)
-        # Le modèle sort [B, 2, H, W] (softmax), on extrait le logit de classe 1.
-        targets_for_loss = y_one_hot.float()  # [B, H, W] — 0.0 ou 1.0
-        targets_for_loss = targets_for_loss * valid_mask_2d  # invalides → 0.0
-
-        # Extraire le logit de la classe burned (canal 1) pour les losses binaires
-        logits_burned = logits_no_nan[:, 1:2, :, :]  # [B, 1, H, W]
-
-        ce_loss = self.secondary_loss(logits_burned, targets_for_loss.long())
-        loss = self.main_loss(logits_burned, targets_for_loss.long())
-
-        # --- Burned false-negative penalty (class imbalance) ---
-        # Pénalité additionnelle sur les pixels brûlés valides uniquement,
-        # utilisant F.cross_entropy (compatible softmax 2-canaux).
-        if self.burned_class_weight > 1.0:
-            burned_pixels = (targets_for_loss > 0.5) & (valid_mask_2d > 0.5)
-            if burned_pixels.any():
-                burned_ce = F.cross_entropy(
-                    logits_no_nan,
-                    y_one_hot.long(),
-                    reduction="none",
-                )  # [B, H, W]
-                burned_penalty = (burned_ce * burned_pixels.float()).sum() / burned_pixels.float().sum()
-                extra_weight = self.burned_class_weight - 1.0
-                loss = loss + extra_weight * burned_penalty
-
+        # --- Losses ---
+        ce_loss = self.secondary_loss(masked_logits.contiguous(), masked_one_hot)
+        loss = self.main_loss(masked_logits.contiguous(), masked_one_hot)
         main_loss = w_sl * ce_loss + w_ml * loss
 
         # Dernière vérification
