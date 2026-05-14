@@ -642,26 +642,29 @@ class ChangeDetectionChangeFormer(LightningModule):
         if not torch.isfinite(one_hot).all():
             raise RuntimeError("One-hot targets contain non-finite values (NaN/Inf).")
 
-        # --- Losses (multiclass mode) ---
-        # SMP FocalLoss/LovaszLoss en mode multiclass attendent :
-        #   logits: [B, C, H, W], targets: [B, H, W] (indices de classe long)
-        # On met les pixels invalides à classe 0 pour ne pas crasher,
-        # puis on applique la pénalité burned uniquement sur les pixels valides.
-        targets_for_loss = y_one_hot.long()  # [B, H, W]
-        targets_for_loss = targets_for_loss * valid_mask_2d.long()  # invalides → classe 0
+        # --- Losses (binary mode) ---
+        # SMP FocalLoss/LovaszLoss en mode binary attendent :
+        #   logits: [B, 1, H, W] (logit de la classe positive)
+        #   targets: [B, H, W] (float 0.0 ou 1.0)
+        # Le modèle sort [B, 2, H, W] (softmax), on extrait le logit de classe 1.
+        targets_for_loss = y_one_hot.float()  # [B, H, W] — 0.0 ou 1.0
+        targets_for_loss = targets_for_loss * valid_mask_2d  # invalides → 0.0
 
-        ce_loss = self.secondary_loss(logits_no_nan, targets_for_loss)
-        loss = self.main_loss(logits_no_nan, targets_for_loss)
+        # Extraire le logit de la classe burned (canal 1) pour les losses binaires
+        logits_burned = logits_no_nan[:, 1:2, :, :]  # [B, 1, H, W]
+
+        ce_loss = self.secondary_loss(logits_burned, targets_for_loss.long())
+        loss = self.main_loss(logits_burned, targets_for_loss.long())
 
         # --- Burned false-negative penalty (class imbalance) ---
         # Pénalité additionnelle sur les pixels brûlés valides uniquement,
         # utilisant F.cross_entropy (compatible softmax 2-canaux).
         if self.burned_class_weight > 1.0:
-            burned_pixels = (targets_for_loss == 1) & (valid_mask_2d > 0.5)
+            burned_pixels = (targets_for_loss > 0.5) & (valid_mask_2d > 0.5)
             if burned_pixels.any():
                 burned_ce = F.cross_entropy(
                     logits_no_nan,
-                    targets_for_loss,
+                    y_one_hot.long(),
                     reduction="none",
                 )  # [B, H, W]
                 burned_penalty = (burned_ce * burned_pixels.float()).sum() / burned_pixels.float().sum()
