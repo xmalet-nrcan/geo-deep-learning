@@ -1,30 +1,31 @@
 """Segmentation SegFormer model."""
 
+from pathlib import Path
+
+import kornia as krn
 import logging
 import math
-import warnings
-from collections.abc import Callable
-from pathlib import Path
-from typing import Any
-
 import numpy as np
 import rasterio as rio
-import kornia as krn
 import torch
 import torch.nn.functional as F
+import warnings
+from collections.abc import Callable
 from datetime import datetime
-from rasterio.transform import Affine
-from matplotlib import pyplot as plt
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
 from lightning.pytorch.loggers import TensorBoardLogger
+from matplotlib import pyplot as plt
+from rasterio.transform import Affine
 from torch import Tensor
 from torchmetrics import JaccardIndex, F1Score
 from torchmetrics.classification import BinaryJaccardIndex
+from torchmetrics.classification import BinaryPrecision, BinaryRecall
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
-from torchmetrics.classification import BinaryPrecision, BinaryRecall
+from typing import Any
+
 from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA, BandName  # noqa: F401
 from geo_deep_learning.models.change_detection.change_detection_model import ChangeDetectionModel
 from geo_deep_learning.tools.visualization import visualize_prediction
@@ -36,7 +37,7 @@ warnings.filterwarnings(
 )
 
 logger = logging.getLogger(__name__)
-
+IGNORE_MASK_INDEX=255
 
 class ChangeDetectionChangeFormer(LightningModule):
     """Change Detection with ChangeFormer V6 model."""
@@ -129,36 +130,35 @@ class ChangeDetectionChangeFormer(LightningModule):
         task_type = "multiclass" if num_classes > 2 else "binary"
 
         if num_classes == 2:
-            self.train_iou = BinaryJaccardIndex(threshold=self.threshold)
-            self.val_iou = BinaryJaccardIndex(threshold=self.threshold)
-            self.test_iou = BinaryJaccardIndex(threshold=self.threshold)
+            self.train_iou = BinaryJaccardIndex(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX)
+            self.val_iou = BinaryJaccardIndex(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX)
+            self.test_iou = BinaryJaccardIndex(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX)
         else:
             self.train_iou = JaccardIndex(task=task_type, num_classes=num_classes)
             self.val_iou = JaccardIndex(task=task_type, num_classes=num_classes)
             self.test_iou = JaccardIndex(task=task_type, num_classes=num_classes)
 
-        self.train_f1 = F1Score(task=task_type, num_classes=num_classes)
-        self.val_f1 = F1Score(task=task_type, num_classes=num_classes)
-        self.test_f1 = F1Score(task=task_type, num_classes=num_classes)
+        self.train_f1 = F1Score(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX)
+        self.val_f1 = F1Score(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX)
+        self.test_f1 = F1Score(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX)
 
         if num_classes == 2:
-            self.train_precision = BinaryPrecision(threshold=self.threshold)
-            self.val_precision = BinaryPrecision(threshold=self.threshold)
-            self.test_precision = BinaryPrecision(threshold=self.threshold)
-            self.train_recall = BinaryRecall(threshold=self.threshold)
-            self.val_recall = BinaryRecall(threshold=self.threshold)
-            self.test_recall = BinaryRecall(threshold=self.threshold)
+            self.train_precision = BinaryPrecision(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX )
+            self.val_precision = BinaryPrecision(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX )
+            self.test_precision = BinaryPrecision(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX )
+            self.train_recall = BinaryRecall(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX )
+            self.val_recall = BinaryRecall(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX )
+            self.test_recall = BinaryRecall(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX )
         else:
             from torchmetrics import Precision, Recall
-            self.train_precision = Precision(task=task_type, num_classes=num_classes)
-            self.val_precision = Precision(task=task_type, num_classes=num_classes)
-            self.test_precision = Precision(task=task_type, num_classes=num_classes)
-            self.train_recall = Recall(task=task_type, num_classes=num_classes)
-            self.val_recall = Recall(task=task_type, num_classes=num_classes)
-            self.test_recall = Recall(task=task_type, num_classes=num_classes)
+            self.train_precision = Precision(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX )
+            self.val_precision = Precision(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX )
+            self.test_precision = Precision(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX )
+            self.train_recall = Recall(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX )
+            self.val_recall = Recall(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX )
+            self.test_recall = Recall(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX )
 
         self.predict_output_dir = predict_output_dir
-
 
     def _apply_geo_aug(self) -> AugmentationSequential:
         """Geometric augmentations (applied to images + masks)."""
@@ -193,7 +193,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             dataloader_idx: int,  # noqa: ARG002
     ) -> dict[str, Any]:
         aug = AugmentationSequential(
-            krn.augmentation.PadTo(size=self.image_size, pad_mode='constant', pad_value=0, keepdim=False),
+            krn.augmentation.PadTo(size=self.image_size,
+                                   pad_mode='constant',
+                                   pad_value=0,
+                                   keepdim=False),
             data_keys=None,
         )
 
@@ -202,7 +205,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # En predict, mask et mask-common sont toujours présents dans votre dataset
         # car __getitem__ les retourne toujours
-        for mask_names in ['mask','mask-common','water_mask']:
+        for mask_names in ['mask', 'mask-common', 'water_mask']:
             if mask_names in batch:
                 if mask_names == 'mask':
                     keys_to_pad[mask_names] = batch[mask_names]
@@ -220,10 +223,6 @@ class ChangeDetectionChangeFormer(LightningModule):
             in_channels=self.in_channels,
             out_channels=self.num_classes + 1 if self.num_classes == 1 else self.num_classes,
         )
-
-        for module in self.model.modules():
-            if isinstance(module, torch.nn.LayerNorm):
-                module.eps = 1e-5  # défaut PyTorch, mais vérifions
 
         if self.weights_from_checkpoint_path:
             map_location = self.device
@@ -367,7 +366,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             one_hot: Tensor,
             common_mask: Tensor,
     ) -> tuple[Tensor, Tensor]:
-        """Extract only valid pixels (non-water, non-nodata) for metric computation.
+        """Extract valid pixels for metric computation.
+
+        Invalid pixels are set to IGNORE_MASK_INDEX (255) so that metrics
+        configured with ignore_index=IGNORE_MASK_INDEX will skip them.
 
         Args:
             logits: [B, C, H, W] model output logits
@@ -375,8 +377,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             common_mask: [B, 1, H, W] validity mask (1=valid, 0=invalid)
 
         Returns:
-            valid_preds: [N] predicted class indices for valid pixels only
-            valid_targets: [N] target class indices for valid pixels only
+            all_preds: [M] predicted class indices (invalid pixels = IGNORE_MASK_INDEX)
+            all_targets: [M] target class indices (invalid pixels = IGNORE_MASK_INDEX)
         """
         # valid_pixels : [B, H, W] booléen
         valid_pixels = (common_mask.squeeze(1) > 0.5)  # robust to float imprecision
@@ -385,11 +387,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         preds = torch.argmax(logits, dim=1)  # [B, H, W]
         targets = torch.argmax(one_hot, dim=1)  # [B, H, W]
 
-        # Extraire uniquement les pixels valides (aplati en 1D)
-        valid_preds = preds[valid_pixels]  # [N]
-        valid_targets = targets[valid_pixels]  # [N]
+        # Mettre les pixels invalides à IGNORE_MASK_INDEX pour qu'ils soient ignorés par les métriques
+        preds[~valid_pixels] = IGNORE_MASK_INDEX
+        targets[~valid_pixels] = IGNORE_MASK_INDEX
 
-        return valid_preds, valid_targets
+        # Retourner tous les pixels aplatis — les métriques avec ignore_index ignoreront IGNORE_MASK_INDEX
+        return preds.flatten(), targets.flatten()
 
     def on_train_epoch_end(self):
         self.log("train_iou", self.train_iou.compute(), prog_bar=True, sync_dist=True)
@@ -414,11 +417,11 @@ class ChangeDetectionChangeFormer(LightningModule):
         has_mask = batch.get("has_mask", torch.tensor([True]))
         if not has_mask.any():
             return None  # skip ce batch
-        x_pre, x_post, y, one_hot, logits, loss, main_loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
+        x_pre, x_post, y, one_hot, logits, main_loss, loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
 
         self.log(
             "val_loss",
-            loss,
+            main_loss,
             batch_size=batch_size,
             prog_bar=True,
             logger=True,
@@ -433,7 +436,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
 
             if valid_preds.numel() > 0:
-                self.val_iou_classwise.update(valid_preds, valid_targets)
+                # MeanIoU n'a pas d'ignore_index : filtrer les pixels valides uniquement
+                valid_mask = valid_preds != IGNORE_MASK_INDEX
+                if valid_mask.any():
+                    self.val_iou_classwise.update(valid_preds[valid_mask], valid_targets[valid_mask])
                 self.val_iou(valid_preds, valid_targets)
                 self.val_f1(valid_preds, valid_targets)
                 self.val_precision(valid_preds, valid_targets)
@@ -478,7 +484,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         if not has_mask.any():
             return None
 
-        x_pre, x_post, y, one_hot, logits, loss, main_loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
+        x_pre, x_post, y, one_hot, logits, main_loss, loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
         # Convert logits to class predictions
         y_pred = torch.argmax(logits, dim=1)
         y_true = torch.argmax(one_hot, dim=1)
@@ -489,7 +495,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
 
             if valid_preds.numel() > 0:
-                self.test_iou_classwise.update(valid_preds, valid_targets)
+                # MeanIoU n'a pas d'ignore_index : filtrer les pixels valides uniquement
+                valid_mask = valid_preds != IGNORE_MASK_INDEX
+                if valid_mask.any():
+                    self.test_iou_classwise.update(valid_preds[valid_mask], valid_targets[valid_mask])
                 self.test_iou.update(valid_preds, valid_targets)
                 self.test_f1.update(valid_preds, valid_targets)
                 self.test_precision.update(valid_preds, valid_targets)
@@ -498,7 +507,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Log test loss (epoch-aggregated) ---
         self.log(
             "test_loss",
-            loss,
+            main_loss,
             batch_size=batch_size,
             on_step=False,
             on_epoch=True,
@@ -542,9 +551,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.test_precision.reset()
         self.test_recall.reset()
 
-    def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[
-        Any, Any, Any, Tensor, Any, float | Any, Any, Any, Any
-    ]:
+    def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[ Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, int]:
         x_pre, x_post = batch["image_pre"], batch["image"]
         y = batch["mask"]
         common_data_mask = batch["mask-common"]
@@ -559,7 +566,16 @@ class ChangeDetectionChangeFormer(LightningModule):
         # S'assurer que le masque commun est bien en float et sans NaN
         common_data_mask = common_data_mask.to(dtype=torch.float32)
         common_data_mask = torch.nan_to_num(common_data_mask, nan=0.0, posinf=1.0, neginf=0.0)
-
+        if logger.isEnabledFor(logging.DEBUG):
+            with torch.no_grad():
+                logger.debug(
+                    "x_pre stats: min=%.4f, max=%.4f, mean=%.4f",
+                    x_pre.min().item(), x_pre.max().item(), x_pre.mean().item(),
+                )
+                logger.debug(
+                    "x_post stats: min=%.4f, max=%.4f, mean=%.4f",
+                    x_post.min().item(), x_post.max().item(), x_post.mean().item(),
+                )
         # --- Remplacer les images quasi-vides par du bruit faible ---
         # pour éviter NaN dans LayerNorm (variance ~ 0 → gradient explose)
         valid_ratio = common_data_mask.flatten(1).mean(dim=1)  # [B]
@@ -584,8 +600,8 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         logits = self(x_pre, x_post)  # [B, C, H, W]
         y_float = y.float()
-        logits_no_nan = torch.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=0.0)
-        num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
+        logits_no_nan = torch.nan_to_num(logits, nan=1e15, posinf=1.0, neginf=0.0)
+        num_classes = self.changed_num_classes
 
         # Vérifier les logits (NaN résiduel)
         if not torch.isfinite(logits).all():
@@ -604,11 +620,9 @@ class ChangeDetectionChangeFormer(LightningModule):
 
             return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, batch_size
 
-
-
         # Préparation du one-hot
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
-        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1) # clamp aussi les 255 → num_classes-1
+        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1)  # clamp aussi les 255 → num_classes-1
         one_hot = torch.nn.functional.one_hot(y_one_hot.long(), num_classes=num_classes)
         one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
 
@@ -631,8 +645,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             # Eviter NaN si la loss divise par le nombre de pixels
             main_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
             ce_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
-            loss = main_loss
-            return x_pre, x_post, y_float, one_hot, logits_no_nan, loss, main_loss, ce_loss, batch_size
+            return x_pre, x_post, y_float, one_hot, logits_no_nan, main_loss, main_loss, ce_loss, batch_size
 
         w_ml, w_sl = self.loss_ratio
 
@@ -643,12 +656,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Losses ---
         ce_loss = self.secondary_loss(masked_logits.contiguous(), masked_one_hot)
         loss = self.main_loss(masked_logits.contiguous(), masked_one_hot)
-        burned_fn_penalty = self._burned_false_negative_penalty(
-            logits=logits_no_nan,
-            one_hot=one_hot,
-            valid_mask=common_data_mask,
-        )
-        main_loss = w_sl * ce_loss + w_ml * loss + burned_fn_penalty
+        # burned_fn_penalty = self._burned_false_negative_penalty(
+        #     logits=logits_no_nan,
+        #     one_hot=one_hot,
+        #     valid_mask=common_data_mask,
+        # )
+        main_loss = w_sl * ce_loss + w_ml * loss # + burned_fn_penalty
 
         # Dernière vérification
         if not torch.isfinite(main_loss):
@@ -896,7 +909,6 @@ class ChangeDetectionChangeFormer(LightningModule):
             output_dir / predictions / EVENT_ID / PREDICTION_DATE / merged.tif
         """
         from collections import defaultdict
-        from rasterio.merge import merge as rio_merge
         predictions = self.trainer.predict_loop.predictions
         if not predictions:
             logger.warning("No predictions to save.")
@@ -967,7 +979,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                 pred_np = y_pred[i, :orig_h, :orig_w].cpu().numpy().astype(np.uint16)
 
                 # --- Reconstruire le profil rasterio ---
-                crs_val = batch_profiles["crs"][i] if isinstance(batch_profiles["crs"], (list, tuple)) else batch_profiles["crs"]
+                crs_val = batch_profiles["crs"][i] if isinstance(batch_profiles["crs"], (list, tuple)) else \
+                batch_profiles["crs"]
 
                 transform_raw = batch_profiles["transform"]
 
@@ -979,7 +992,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "driver": "GTiff",
                     "dtype": "uint16",
                     "count": 1,
-                    "nodata" : 32767,
+                    "nodata": 32767,
                     "height": orig_h,  # ← dimensions ORIGINALES, pas paddées
                     "width": orig_w,  # ← dimensions ORIGINALES, pas paddées
                     "crs": crs_val,
@@ -990,7 +1003,6 @@ class ChangeDetectionChangeFormer(LightningModule):
                 tile_dir = event_date_dir / cell_id
                 tile_dir.mkdir(parents=True, exist_ok=True)
                 out_path = tile_dir / f"{pair_id}-{sample_name}.tif"
-
 
                 with rio.open(str(out_path), "w", **profile_i) as dst:
                     dst.write(pred_np[np.newaxis, :, :])
