@@ -2,7 +2,6 @@ services:
   geo-deep-learning:
     build:
       dockerfile: Dockerfile
-      target: runtime
     environment:
       - PYTORCH_ALLOC_CONF=expandable_segments:True
       - NVIDIA_VISIBLE_DEVICES=all
