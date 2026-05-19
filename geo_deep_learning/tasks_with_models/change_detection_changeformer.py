@@ -353,10 +353,14 @@ class ChangeDetectionChangeFormer(LightningModule):
             valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
 
             # On accumule les prédictions pour calculer les métriques à la fin
-            self.train_iou.update(valid_preds, valid_targets)
-            self.train_f1.update(valid_preds, valid_targets)
-            self.train_precision.update(valid_preds, valid_targets)
-            self.train_recall.update(valid_preds, valid_targets)
+            valid_mask = valid_preds != IGNORE_MASK_INDEX
+            if valid_mask.any():
+                vp = valid_preds[valid_mask]
+                vt = valid_targets[valid_mask]
+                self.train_iou.update(vp, vt)
+                self.train_f1.update(vp, vt)
+                self.train_precision.update(vp, vt)
+                self.train_recall.update(vp, vt)
 
         return main_loss
 
@@ -436,14 +440,17 @@ class ChangeDetectionChangeFormer(LightningModule):
             valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
 
             if valid_preds.numel() > 0:
-                # MeanIoU n'a pas d'ignore_index : filtrer les pixels valides uniquement
+                # Filtrer les pixels valides (exclure IGNORE_MASK_INDEX)
+                # car BinaryJaccardIndex et MeanIoU n'acceptent pas de valeurs hors [0, num_classes-1]
                 valid_mask = valid_preds != IGNORE_MASK_INDEX
                 if valid_mask.any():
-                    self.val_iou_classwise.update(valid_preds[valid_mask], valid_targets[valid_mask])
-                self.val_iou(valid_preds, valid_targets)
-                self.val_f1(valid_preds, valid_targets)
-                self.val_precision(valid_preds, valid_targets)
-                self.val_recall(valid_preds, valid_targets)
+                    vp = valid_preds[valid_mask]
+                    vt = valid_targets[valid_mask]
+                    self.val_iou_classwise.update(vp, vt)
+                    self.val_iou(vp, vt)
+                    self.val_f1(vp, vt)
+                    self.val_precision(vp, vt)
+                    self.val_recall(vp, vt)
 
         return logits
 
@@ -495,14 +502,15 @@ class ChangeDetectionChangeFormer(LightningModule):
             valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
 
             if valid_preds.numel() > 0:
-                # MeanIoU n'a pas d'ignore_index : filtrer les pixels valides uniquement
                 valid_mask = valid_preds != IGNORE_MASK_INDEX
                 if valid_mask.any():
-                    self.test_iou_classwise.update(valid_preds[valid_mask], valid_targets[valid_mask])
-                self.test_iou.update(valid_preds, valid_targets)
-                self.test_f1.update(valid_preds, valid_targets)
-                self.test_precision.update(valid_preds, valid_targets)
-                self.test_recall.update(valid_preds, valid_targets)
+                    vp = valid_preds[valid_mask]
+                    vt = valid_targets[valid_mask]
+                    self.test_iou_classwise.update(vp, vt)
+                    self.test_iou.update(vp, vt)
+                    self.test_f1.update(vp, vt)
+                    self.test_precision.update(vp, vt)
+                    self.test_recall.update(vp, vt)
 
         # --- Log test loss (epoch-aggregated) ---
         self.log(
