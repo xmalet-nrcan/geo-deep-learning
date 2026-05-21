@@ -103,7 +103,7 @@ def band_names_to_indices(band_names: Optional[List[Any]]) -> Optional[List[int]
     """
     if band_names is None:
         return None
-
+    logger.info(f"TREATING BANDS : {band_names}")
     indices = []
     for name in band_names:
         if isinstance(name, BandName):
@@ -119,7 +119,7 @@ def band_names_to_indices(band_names: Optional[List[Any]]) -> Optional[List[int]
 
 
 NO_DATA = 32767
-IGNORE_INDEX = 255
+IGNORE_INDEX = 0
 
 
 class RCMChangeDetectionDataset(ChangeDetectionDataset):
