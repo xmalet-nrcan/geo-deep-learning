@@ -4,7 +4,7 @@ trainer:
   accelerator: "gpu"
   devices: 1                  # predict ne supporte qu'un seul device
   strategy: auto
-  precision: "bf16-mixed"
+  precision: "32-true"
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
@@ -18,7 +18,7 @@ model:
   init_args:
     change_detection_model: "changeformer"
     image_size: [256, 256]
-    in_channels: 11
+    in_channels: 9 # ===================================== LEN[BAND_NAMES] + 4
     max_samples: 10
     num_classes: 1
     # Les losses sont requises par le constructeur, même si elles ne servent pas en predict
@@ -55,7 +55,8 @@ model:
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
     #weights_from_checkpoint_path: /app/model_checkpoints/2026_3_A_mask_water_10pct_changeformer_focal-lovasz_fire_id_cosinewarm_mchi_rr_rl-epoch=78-val_loss=0.361.ckpt
-    weights_from_checkpoint_path: /app/model_checkpoints/2026_3_A_mask_water_10pct_changeformer_focal-lovasz_fire_id_cosinewarm_mchi_rr_rl-epoch=78-val_loss=0.361.ckpt
+    #weights_from_checkpoint_path: /app/model_checkpoints/2026_3_A_mask_water_10pct_changeformer_focal-lovasz_fire_id_cosinewarm_mchi_rr_rl-epoch=78-val_loss=0.361.ckpt
+    weights_from_checkpoint_path: /app/model_checkpoints/2026_6_A_2023_2025_mask_water_changeformer_focal-lovasz_fire_id_cosw_mchi-epoch=164-val_loss=0.383.ckpt
     predict_output_dir: /mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
 
 data:
@@ -73,7 +74,8 @@ data:
     # Le split n'est pas utilisé en predict, mais il faut quand même le passer
     #split_on_columns: db_nbac_fire_id
     #split_ratios: [0.8, 0.1, 0.1]
-    band_names: ['LOCALINCANGLE', 'PDN', 'PSN', 'PVN', 'S0', 'RL', 'RR']
+    #band_names: ['LOCALINCANGLE', 'PDN', 'PSN', 'PVN', 'S0', 'RL', 'RR']
+    band_names:  [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' ]
     beams:
       - 'A'
     satellite_pass:  # null = pas de filtre

@@ -17,7 +17,7 @@ services:
       # MOUNT THE DATASET REPO
       - "/mnt/geospatial/projet_RCM_scanfire:/mnt/geospatial/projet_RCM_scanfire:rw"
       # MOUNT THE CONFIG
-      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection.yaml:/app/configs/model_conf.yaml"
+      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection_all.yaml:/app/configs/model_conf.yaml"
       # MOUNT THE MODEL CHECKPOINTS AND LOGS
       - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/model_checkpoints:rw"
       - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
@@ -69,7 +69,7 @@ services:
       # - "../firescan/firescan_modules/module_specific/orchestrator/orchestrator.py:/app/orchestrator.py:ro"
       # Module d'ingestion firescan (Phase 2)
       - "../scanfire/scanfire_modules:/app/scanfire_modules:ro"
-    entrypoint: [ "python", "/app/scanfire_modules/module_specific/orchestrator/segmentation_orchestrator.py" ]
+    entrypoint: [ "python", "/app/scanfire_modules/pipeline/orchestrator/segmentation_orchestrator.py" ]
     deploy:
       resources:
         reservations:
