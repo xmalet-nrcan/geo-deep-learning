@@ -119,7 +119,7 @@ def band_names_to_indices(band_names: Optional[List[Any]]) -> Optional[List[int]
 
 
 NO_DATA = 32767
-IGNORE_INDEX = 0
+IGNORE_INDEX = 255
 
 
 class RCMChangeDetectionDataset(ChangeDetectionDataset):
