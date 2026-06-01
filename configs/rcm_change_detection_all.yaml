@@ -73,7 +73,7 @@ model:
     # 1 for BITMASK
     # 1 for SAT_PASS encoding
     # 1 for BEAM encoding
-    in_channels: 8 # Should be the length of data.band_names + 4
+    in_channels: 9 # Should be the length of data.band_names + 4
     max_samples: 50
     num_classes: 1  # binary change detection
     burned_class_weight: 5.0  # >1 penalizes false negatives on class burn (1)
@@ -149,7 +149,8 @@ data:
 
     # band_names: [ 'LOCALINCANGLE', 'RL','RR' ] # RCM INPUT (non-polarimetric intensity)
     # MCHI + LIA = S0, Pdn, Psn Pvn + LIA
-    band_names: [ 'LOCALINCANGLE', 'PSN','PVN', 'S0' ] # MCHI-DECOMP ==> 5 bands
+    #band_names: [ 'LOCALINCANGLE', 'PSN','PVN', 'S0' ] # MCHI-DECOMP - PDN ==> 4 bands
+    band_names: ['LOCALINCANGLE', 'PDN','PSN','PVN', 'S0'] # MCHI-DECOMP ==> 5 bands
     #band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'NDSV','RFDI', 'RR','RL']
     # band_names: [ 'LOCALINCANGLE','M', 'S0','SP1','SP2', 'RL','RR'  ]
     # RCM bands AVAILABLE
@@ -174,3 +175,5 @@ data:
     #- 'B'
     #- 'C'
     satellite_pass:   # AVAILABLE: ['Ascending','Descending']
+    dataset_years:
+    - 2023
