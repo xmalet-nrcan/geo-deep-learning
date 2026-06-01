@@ -236,6 +236,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
         logger.info("BEAM FILTER: {}".format(self.beams))
         logger.info("SATELLITE PASS FILTER: {}".format(self.satellite_pass))
+        logger.info("DATASET YEARS FILTER: {}".format(self._dataset_years))
         df_csv['sat_pass'] = df_csv['sat_pass'].apply(lambda x: SatellitePass.from_str(x))
         df_csv['beam'] = df_csv['beam'].apply(lambda x: Beams[str(x).upper()])
 
