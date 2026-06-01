@@ -241,6 +241,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
         if self._dataset_years is not  None or len(self._dataset_years) > 0 :
             self._dataset_years = [int(y) for y in self._dataset_years]
+            df_csv['fire_start_date'] = pd.to_datetime(df_csv['fire_start_date'], format='%Y-%m-%d')
             df_csv = df_csv[df_csv['fire_start_date'].dt.year.isin(self._dataset_years)]
             if df_csv.empty:
                 logger.warning(f"No entries found for Fire Year(s) : {self._dataset_years}")
