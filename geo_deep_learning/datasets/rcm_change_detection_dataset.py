@@ -130,7 +130,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                  bands: Optional[List[int]] = None,
                  band_names: Optional[List[str]] = None,
                  satellite_pass: Optional[str | SatellitePass] = None,
-                 beams: Optional[List[str]] = None
+                 beams: Optional[List[str]] = None,
+                 dataset_years : Optional[list[int]] = None
                  ) -> None:
         # Set bands index and band names
         if band_names is not None:
@@ -164,6 +165,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         self.beams = [] if beams is None else [i.upper() for i in beams]
         if norm_stats is None:
             norm_stats = bands_stats
+        self._dataset_years = [int(y) for y in dataset_years if dataset_years is not None and len(dataset_years) > 0]
         super().__init__(csv_root_folder=csv_root_folder, patches_root_folder=patches_root_folder,
                          split_or_csv_file_name=split_or_csv_file_name, norm_stats=norm_stats)
 
@@ -237,6 +239,11 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         df_csv['sat_pass'] = df_csv['sat_pass'].apply(lambda x: SatellitePass.from_str(x))
         df_csv['beam'] = df_csv['beam'].apply(lambda x: Beams[str(x).upper()])
 
+        if self._dataset_years is not  None or len(self._dataset_years) > 0 :
+            self._dataset_years = [int(y) for y in self._dataset_years]
+            df_csv = df_csv[df_csv['fire_start_date'].dt.year.isin(self._dataset_years)]
+            if df_csv.empty:
+                logger.warning(f"No entries found for Fire Year(s) : {self._dataset_years}")
         if self.satellite_pass is not None:
             df_csv = df_csv[df_csv['sat_pass'] == self.satellite_pass]
             if df_csv.empty:

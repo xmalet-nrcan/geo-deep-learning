@@ -50,6 +50,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             band_names: Optional[List[str]] = None,
             satellite_pass: Optional[str] = None,
             beams: Optional[List[str]] = None,
+            dataset_years : Optional[list[int]] = None,
             split_ratios=(0.70, 0.15, 0.15),
             split_on_columns: Optional[str | list] = None,
             data_type_max: Optional[int] = None,
@@ -76,6 +77,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self.beams = beams
         self.split_ratios = split_ratios
         self.dataset_class = dataset_class
+        self._dataset_years = dataset_years
 
         self.dataset: RCMChangeDetectionDataset = None
         if split_on_columns is None:
@@ -95,7 +97,8 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             bands=self.bands,
             band_names=self.band_names,
             satellite_pass=self.satellite_pass,
-            beams=self.beams
+            beams=self.beams,
+            dataset_years=self._dataset_years,
         )
 
         if stage != "predict":
