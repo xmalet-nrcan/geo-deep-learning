@@ -1,19 +1,18 @@
-import logging
-import re
-from enum import Enum
 from pathlib import Path
+
+import logging
+import torch
+from enum import Enum
+from pandas import DataFrame
+from torch import Tensor
 from typing import Optional, List, Any
 
 import numpy as np
 import pandas as pd
 import rasterio as rio
-import torch
-from numpy import ndarray, dtype
-from pandas import DataFrame
-from torch import Tensor
-
 from geo_deep_learning.datasets.change_detection_dataset import ChangeDetectionDataset
-from geo_deep_learning.utils.tensors import normalization, standardization, manage_bands
+from geo_deep_learning.utils.tensors import manage_bands
+from numpy import ndarray, dtype
 
 logger = logging.getLogger("RCM-PrePost ChangeDetectionDataset")
 ch = logging.StreamHandler()
@@ -72,28 +71,18 @@ class Beams(Enum):
 BEAM_BAND_NAME = "BEAM"
 SATELLITE_PASS_BAND_NAME = "SATELLITE_PASS"
 
-bands_stats = {'mean': [1.0088686544882763,
-                        22.678325648034726,
-                        4820.030168929148,
-                        -578.1138439754548,
-                        174.35119966169816,
-                      4645.179761547494,
-                        5178.970253993203,
-                        4074.12440505587,
-                        1427.3155618129722,
-                        517.5479435073069,
-                      1945.2480656061873,
-                        514.8092047489475,
-                        425.98675130681056,
-                        8939.542957169055],
-               'std': [0.17514777918322952,
-                       4.602293040200134,
-                       np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
-                     np.nan],
-               'min': [1.0, 0.0, 446.0, -9810.0, 0.0, 81.0, 14.0, 93.0, 2.0, 2.0, 5.0, -9340.0, -9584.0, -8947.0],
-               'max': [9.0, 112.0, 9985.0, 9969.0, 6358.0, 9971.0, 9553.0, 9979.0, 32766.0, 32766.0, 32766.0, 9484.0,
-                     9901.0, 9999.0]
-               }
+bands_stats = {
+    'mean': [1.0671012440715284, 26.133220506930545, 4282.53025830744, -1762.5102994669658, 238.6081335327169,
+             4043.3150312687353, 5716.365492395923, 3587.3789677071168, 1366.3266999839548, 606.6409300828175,
+             1972.7496275401488, 662.1524939064722, 585.9621173767042, 8360.947639324142],
+    'std': [0.5140239082593165, 7.776109811847935, 2096.273627364101, 4390.274997471279, 337.8120308539174,
+            2197.621407866461, 2096.399549952241, 2099.0776151168197, 965.7990528898996, 395.7478935818052,
+            1149.0959360818918, 2805.261797215982, 3114.6516936980624, 2463.9644096193365],
+    'min': [1.0, 0.0, 0.0, -9998.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -9999.0, -9998.0, -9995.0],
+    'max': [17.0, 122.0, 9999.0, 9998.0, 9967.0, 9998.0, 9964.0, 9999.0, 32766.0, 32766.0, 32766.0, 9999.0, 9999.0,
+            10000.0]
+    }
+
 
 def band_names_to_indices(band_names: Optional[List[Any]]) -> Optional[List[int]]:
     """
@@ -131,7 +120,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                  band_names: Optional[List[str]] = None,
                  satellite_pass: Optional[str | SatellitePass] = None,
                  beams: Optional[List[str]] = None,
-                 dataset_years : Optional[list[int]] = None
+                 dataset_years: Optional[list[int]] = None
                  ) -> None:
         # Set bands index and band names
         if band_names is not None:
@@ -241,7 +230,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         df_csv['sat_pass'] = df_csv['sat_pass'].apply(lambda x: SatellitePass.from_str(x))
         df_csv['beam'] = df_csv['beam'].apply(lambda x: Beams[str(x).upper()])
 
-        if len(self._dataset_years) > 0 :
+        if  len(self._dataset_years) > 0:
+            
             df_csv['fire_start_date'] = pd.to_datetime(df_csv['fire_start_date'], format='%Y-%m-%d')
             df_csv = df_csv[df_csv['fire_start_date'].dt.year.isin(self._dataset_years)]
             if df_csv.empty:
@@ -414,8 +404,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         # Per-patch min-max normalization per band, without torch.nanmin / nanmax
         eps = 1e-6
 
-        self._norm_image(image_pre, eps )
-        self._norm_image(image_post, eps )
+        self._norm_image(image_pre, eps)
+        self._norm_image(image_post, eps)
 
         image_pre = torch.clamp(torch.nan_to_num(image_pre, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
         image_post = torch.clamp(torch.nan_to_num(image_post, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
@@ -424,7 +414,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         return image_post, image_pre, dummy, dummy, dummy, dummy
 
     @staticmethod
-    def _norm_image( input_image: Tensor, eps: float,):
+    def _norm_image(input_image: Tensor, eps: float, ):
         for i in range(input_image.shape[0]):
             curr_band = input_image[i]
 
@@ -471,7 +461,7 @@ if __name__ == '__main__':
 
     print(sample['profile'])
     print(sample['image_name'])
-    data : Tensor = sample['image']
+    data: Tensor = sample['image']
 
     with rio.open(r"C:\Users\xmalet\PycharmProjects\geo-deep-learning\data\image_post.tiff", 'w',
                   **sample['profile']) as src:
