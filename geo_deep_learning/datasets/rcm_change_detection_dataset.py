@@ -407,11 +407,11 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         self._norm_image(image_pre, eps)
         self._norm_image(image_post, eps)
 
-        image_pre = torch.clamp(torch.nan_to_num(image_pre, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
-        image_post = torch.clamp(torch.nan_to_num(image_post, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+        image_post, image_pre , mean, std = super()._normalize_and_standardize(image_post=image_post, image_pre=image_pre)
+
 
         dummy = torch.zeros((image_pre.shape[0], 1, 1), dtype=torch.float32, device=image_pre.device)
-        return image_post, image_pre, dummy, dummy, dummy, dummy
+        return  image_post, image_pre , mean, std, dummy, dummy
 
     @staticmethod
     def _norm_image(input_image: Tensor, eps: float, ):
