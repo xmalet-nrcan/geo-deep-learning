@@ -28,7 +28,7 @@ class ChangeDetectionModel(BaseSegmentationModel):
                           'changeformer_6': 'changeformer',
                           }
 
-        model_parameters = {'changeformer': {'decoder_softmax': True, 'embed_dim': 256}}
+        model_parameters = {'changeformer': {'decoder_softmax': False, 'embed_dim': 256}}
         model_kwargs = model_parameters.get(model_sub_name.get(change_detection_model))
         if model_kwargs is None:
             model_kwargs = {}
