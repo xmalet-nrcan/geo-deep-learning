@@ -165,7 +165,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         self.beams = [] if beams is None else [i.upper() for i in beams]
         if norm_stats is None:
             norm_stats = bands_stats
-        self._dataset_years = [int(y) for y in dataset_years if dataset_years is not None and len(dataset_years) > 0]
+        logger.debug(f'dataset_years ==> {dataset_years}' )
+        self._dataset_years = [] if dataset_years is None else [ int(y) for y in dataset_years]
         super().__init__(csv_root_folder=csv_root_folder, patches_root_folder=patches_root_folder,
                          split_or_csv_file_name=split_or_csv_file_name, norm_stats=norm_stats)
 
@@ -240,8 +241,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         df_csv['sat_pass'] = df_csv['sat_pass'].apply(lambda x: SatellitePass.from_str(x))
         df_csv['beam'] = df_csv['beam'].apply(lambda x: Beams[str(x).upper()])
 
-        if self._dataset_years is not  None or len(self._dataset_years) > 0 :
-            self._dataset_years = [int(y) for y in self._dataset_years]
+        if len(self._dataset_years) > 0 :
             df_csv['fire_start_date'] = pd.to_datetime(df_csv['fire_start_date'], format='%Y-%m-%d')
             df_csv = df_csv[df_csv['fire_start_date'].dt.year.isin(self._dataset_years)]
             if df_csv.empty:
