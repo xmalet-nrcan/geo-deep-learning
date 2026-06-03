@@ -402,16 +402,30 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         Tensor, Tensor, Tensor, Tensor, Tensor, Tensor
     ]:
         # Per-patch min-max normalization per band, without torch.nanmin / nanmax
-        eps = 1e-6
+        mean = torch.tensor(
+                self.norm_stats["mean"],
+                dtype=torch.float32,
+                device=image_pre.device,
+            ).view(-1, 1, 1)
 
-        self._norm_image(image_pre, eps)
-        self._norm_image(image_post, eps)
+        std = torch.tensor(
+                self.norm_stats["std"],
+                dtype=torch.float32,
+                device=image_pre.device,
+            ).view(-1, 1, 1)
 
-        image_post, image_pre , mean, std = super()._normalize_and_standardize(image_post=image_post, image_pre=image_pre)
+        std = std.clamp_min(1e-6)
 
+        image_pre = (image_pre - mean) / std
+        image_post = (image_post - mean) / std
 
-        dummy = torch.zeros((image_pre.shape[0], 1, 1), dtype=torch.float32, device=image_pre.device)
-        return  image_post, image_pre , mean, std, dummy, dummy
+        dummy = torch.zeros(
+                (image_pre.shape[0], 1, 1),
+                dtype=torch.float32,
+                device=image_pre.device,
+            )
+
+        return image_post, image_pre, mean, std, dummy, dummy
 
     @staticmethod
     def _norm_image(input_image: Tensor, eps: float, ):
