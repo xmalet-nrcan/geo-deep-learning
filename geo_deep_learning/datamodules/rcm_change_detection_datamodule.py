@@ -33,8 +33,6 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             batch_size: int = 16,
             num_workers: int = 8,
             patch_size: tuple[int, int] = (256, 256),
-            mean: list[float] | None = None,
-            std: list[float] | None = None,
             bands: Optional[List[int]] = None,
             band_names: Optional[List[str]] = None,
             satellite_pass: Optional[str] = None,
@@ -42,11 +40,10 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             dataset_years : Optional[list[int]] = None,
             split_ratios=(0.70, 0.15, 0.15),
             split_on_columns: Optional[str | list] = None,
-            data_type_max: Optional[int] = None,
             dataset_class: Type[RCMChangeDetectionDataset] = RCMChangeDetectionDataset,
 
     ) -> None:
-        """Initialize CSVDataModule."""
+        """Initialize RcmChangeDetectionDataModule."""
         super().__init__()
 
         self.test_dataset = None
@@ -226,59 +223,3 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             prefetch_factor=2,
             shuffle=False,
         )
-
-
-if __name__ == "__main__":
-    in_csv_root_folder = r"C:\Users\xmalet\PycharmProjects\geo-deep-learning\data"
-    in_patches_root_folder = r"C:\Users\xmalet\PycharmProjects\geo-deep-learning\data\raw"
-    dataset = RcmChangeDetectionDataModule(
-        csv_root_folder=in_csv_root_folder,
-        patches_root_folder=in_patches_root_folder,
-        csv_file_name=r"pre_post_datasets_all.csv",
-        patch_size=(256, 256),
-        band_names=['M', 'RL', 'RR', 'S0'],
-        beams=['A'],
-        split_on_columns=['db_nbac_fire_id'],
-    split_ratios=(0.8, 0.1, 0.1))
-    dataset.setup()
-
-    tdl = dataset.train_dataset
-    val = dataset.val_dataset
-    test = dataset.test_dataset
-
-    print(f"Final split counts: "
-          f"train={len(tdl)} ({len(tdl) / len(dataset.dataset.files):.2%}), "
-          f"val={len(val)} ({len(val) / len(dataset.dataset.files):.2%}), "
-          f"test={len(test)} ({len(test) / len(dataset.dataset.files):.2%})")
-
-    print("cells, fires, group_pre, group_post")
-
-    for n, d in (['train', tdl], ['val', val], ['test', test]):
-        cells, fires, group_pre, group_post = set(), set(), set(), set()
-        print("creating for ", n)
-        for i in d:
-            cells.add(i['cell_id'])
-            fires.add(i['db_nbac_fire_id'])
-            group_pre.add(i['group_id_pre'])
-            group_post.add(i['group_id_post'])
-        print(f"{len(cells)}, {len(fires)}, {len(group_pre)}, {len(group_post)}")
-        with open(f'C:\\Users\\xmalet\\PycharmProjects\\geo-deep-learning\\data\\{n}_cells.txt', 'w') as f:
-            f.write('"cell_id" in (')
-            for c in cells:
-                f.write(f"'{str(c)}'" + ', ')
-            f.write(")")
-        with open(f'C:\\Users\\xmalet\\PycharmProjects\\geo-deep-learning\\data\\{n}_fires.txt', 'w') as f:
-            f.write('"db_nbac_fire_id" in (')
-            for c in fires:
-                f.write(str(c) + ', ')
-            f.write(')')
-        with open(f'C:\\Users\\xmalet\\PycharmProjects\\geo-deep-learning\\data\\{n}_group_pre.txt', 'w') as f:
-            f.write('"group_id" in (')
-            for c in group_pre:
-                f.write(f"{str(c)}" + ', ')
-            f.write(')')
-        with open(f'C:\\Users\\xmalet\\PycharmProjects\\geo-deep-learning\\data\\{n}_group_post.txt', 'w') as f:
-            f.write('"group_id" in (')
-            for c in group_post:
-                f.write(f"{str(c)}" + ', ')
-            f.write(')')
