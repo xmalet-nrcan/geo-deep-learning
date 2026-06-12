@@ -227,8 +227,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         logger.info("BEAM FILTER: {}".format(self.beams))
         logger.info("SATELLITE PASS FILTER: {}".format(self.satellite_pass))
         logger.info("DATASET YEARS FILTER: {}".format(self._dataset_years))
-        df_csv['sat_pass'] = df_csv['sat_pass'].apply(lambda x: SatellitePass.from_str(x))
-        df_csv['beam'] = df_csv['beam'].apply(lambda x: Beams[str(x).upper()])
+        df_csv['sat_pass'] = df_csv['sat_pass'].map(lambda x: SatellitePass.from_str(x))  # type: ignore[arg-type]
+        df_csv['beam'] = df_csv['beam'].map(lambda x: Beams[str(x).upper()])  # type: ignore[arg-type]
 
         if  len(self._dataset_years) > 0:
             
@@ -305,8 +305,15 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         # --- Water mask (optionnel) ---
         water_mask_path = data.get("water_mask")
         if water_mask_path is not None:
-            water_mask, _ = self._load_water_mask(index)
-            no_water_mask = (water_mask == 0)  # True = pas d'eau = garder
+            try:
+                water_mask, _ = self._load_water_mask(index)
+                no_water_mask = (water_mask == 0)  # True = pas d'eau = garder
+            except Exception as e:
+                logger.warning("Failed to read water mask for index %d (%s): %s. Skipping water mask.",
+                               index, water_mask_path, e)
+                H, W = image_pre.shape[1], image_pre.shape[2]
+                water_mask = torch.ones((1, H, W), dtype=torch.float32)
+                no_water_mask = torch.ones((1, H, W), dtype=torch.bool)
         else:
             H, W = image_pre.shape[1], image_pre.shape[2]
             water_mask = torch.ones((1, H, W), dtype=torch.float32)
@@ -388,7 +395,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             "db_nbac_fire_id": data["db_nbac_fire_id"],
         }
 
-    def _get_pre_post_name(self, data: dict[str, str]) -> str:
+    def _get_pre_post_name(self, data: dict[str, Any]) -> str:
         pre_post_name = (
             f"{data['cell_id']}|"
             f"{'ASC' if data['sat_pass'] == SatellitePass.ASCENDING else 'DESC'}-{data['beam'].name}|"
