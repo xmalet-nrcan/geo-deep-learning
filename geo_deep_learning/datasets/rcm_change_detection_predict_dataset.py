@@ -12,14 +12,15 @@ ch.setFormatter(formatter)
 logger.addHandler(ch)
 logger.setLevel(logging.DEBUG)
 
-
 class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
     def __init__(self, csv_root_folder: str, patches_root_folder: str, split_or_csv_file_name: str = None,
                  norm_stats: dict[str, list[float]] | None = None, bands: Optional[List[int]] = None,
                  band_names: Optional[List[str]] = None, satellite_pass: Optional[str | SatellitePass] = None,
-                 beams: Optional[List[str]] = None) -> None:
+                 beams: Optional[List[str]] = None,
+                 dataset_years: Optional[list[int]] = None
+                 ) -> None:
         super().__init__(csv_root_folder, patches_root_folder, split_or_csv_file_name, norm_stats, bands, band_names,
-                         satellite_pass, beams)
+                         satellite_pass, beams, dataset_years)
 
     def _load_files(self) -> list[dict[str, str]]:
         df_csv = self._get_input_dataset_as_dataframe()
