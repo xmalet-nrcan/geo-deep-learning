@@ -8,7 +8,7 @@ trainer:
   strategy: auto
 
   gradient_clip_val: 1.0
-  precision: "16-mixed"
+  precision: "bf16-mixed"  # bf16: no GradScaler needed, no overflow (same exponent as fp32)
   sync_batchnorm: true
   gradient_clip_algorithm: "norm"
   logger:
@@ -48,18 +48,16 @@ trainer:
 
     - class_path: lightning.pytorch.callbacks.StochasticWeightAveraging
       init_args:
-        swa_lrs: 1e-3
+        swa_lrs: 5e-5         # must be ≤ base lr (1e-4) for AdamW; 1e-3 was 10× too high
         annealing_epochs: 10
         swa_epoch_start: 0.75
     - class_path: lightning.pytorch.callbacks.GradientAccumulationScheduler
       init_args:
         scheduling:
-          0: 8
-          20: 4    # 16*8 = 128 effective batch size at start
-          50: 2    # to epoch 20, accumule 8 batchs 16*8 = 128 effective batch size
-          100: 1    # to epoch 40, accumule 4 batchs 16*4 = 64 effective batch size
-          #150: 2    # to epoch 50, accumule 2 batchs 16*2 = 32 effective batch size
-          #175: 1    # then normal training with 16 batch size
+          0: 8      # epochs 0-19:   8×8 = 64 effective batch size (smooth start)
+          20: 4     # epochs 20-49:  8×4 = 32 effective batch size
+          50: 2     # epochs 50-99:  8×2 = 16 effective batch size
+          100: 1    # epochs 100+:   8×1 = 8  effective batch size (max stochasticity)
   max_epochs: 240
   check_val_every_n_epoch: 1
 
@@ -116,9 +114,8 @@ model:
     scheduler:
       class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
       init_args:
-        #        T_max: 150
-        T_0: 10
-        T_mult: 2
+        T_0: 10       # first cycle = 10 epochs
+        T_mult: 2     # each subsequent cycle doubles: 10→20→40→80 epochs
         eta_min: 1e-6
 
       #class_path: torch.optim.lr_scheduler.OneCycleLR
@@ -128,7 +125,7 @@ model:
       #  pct_start: 0.1
       #  anneal_strategy: "cos"
     scheduler_config:
-      interval: "step"
+      interval: "epoch"   # epoch-based: unaffected by GradientAccumulationScheduler changes
       frequency: 1
 
     class_labels: [ "unburn", "burn" ]
