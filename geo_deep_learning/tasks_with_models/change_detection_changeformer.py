@@ -70,6 +70,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             deep_supervision: bool = True,
             deep_supervision_weights: list[float] | None = None,
             speckle_noise_std: float = 0.15,
+            use_metadata_film: bool = False,
+            film_embed_dim: int = 32,
             **kwargs: object,  # noqa: ARG002
     ) -> None:
         """Initialize the model.
@@ -82,6 +84,11 @@ class ChangeDetectionChangeFormer(LightningModule):
                 output count, typically 5). Defaults to DEEP_SUPERVISION_WEIGHTS.
             speckle_noise_std: Std-dev of multiplicative SAR speckle noise augmentation.
                 Set to 0 to disable. Only applied during training.
+            use_metadata_film: When True, SAT_PASS and BEAM are NOT expected as
+                image bands.  Instead they are read from ``batch["sat_pass_value"]``
+                and ``batch["beam_value"]`` and used for FiLM conditioning.
+                Requires ``separate_metadata=True`` on the DataModule.
+            film_embed_dim: Embedding dimension for the FiLM conditioner.
         """
         super().__init__()
         self.save_hyperparameters()
@@ -113,6 +120,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.deep_supervision = deep_supervision
         self.deep_supervision_weights = deep_supervision_weights or DEEP_SUPERVISION_WEIGHTS
         self.speckle_noise_std = speckle_noise_std
+        self.use_metadata_film = use_metadata_film
+        self.film_embed_dim = film_embed_dim
 
         self.changed_num_classes = num_classes + 1 if num_classes == 1 else num_classes
         self.labels = (
@@ -268,6 +277,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             change_detection_model=self.change_detection_model,
             in_channels=self.in_channels,
             out_channels=self.num_classes + 1 if self.num_classes == 1 else self.num_classes,
+            use_metadata_film=self.use_metadata_film,
+            film_embed_dim=self.film_embed_dim,
         )
 
         if self.weights_from_checkpoint_path:
@@ -340,8 +351,20 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
 
-    def forward(self, image_pre: Tensor, image_post: Tensor) -> Tensor | list[Tensor]:
+    def forward(
+            self,
+            image_pre: Tensor,
+            image_post: Tensor,
+            sat_pass: Tensor | None = None,
+            beam: Tensor | None = None,
+    ) -> Tensor | list[Tensor]:
         """Forward pass.
+
+        Args:
+            image_pre: Pre-event image [B, C, H, W].
+            image_post: Post-event image [B, C, H, W].
+            sat_pass: [B] satellite pass index (only when use_metadata_film=True).
+            beam: [B] beam index (only when use_metadata_film=True).
 
         Returns:
             When ``deep_supervision`` is enabled **and** the model is in
@@ -349,7 +372,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             (one per scale + final).  Otherwise returns only the final
             prediction tensor.
         """
-        outputs = self.model(image_pre, image_post)
+        outputs = self.model(image_pre, image_post, sat_pass=sat_pass, beam=beam)
         # ChangeFormer decoder returns a list: [p_c4, p_c3, p_c2, p_c1, final]
         if self.deep_supervision and self.training:
             return outputs  # list[Tensor]
@@ -669,7 +692,12 @@ class ChangeDetectionChangeFormer(LightningModule):
                 common_data_mask[idx] = 0.0
                 y[idx] = 0
 
-        raw_output = self(x_pre, x_post)
+        raw_output = self(
+            x_pre,
+            x_post,
+            sat_pass=batch.get("sat_pass_value"),
+            beam=batch.get("beam_value"),
+        )
 
         # Deep supervision: raw_output is a list during training, single Tensor otherwise
         if isinstance(raw_output, list):
@@ -862,12 +890,15 @@ class ChangeDetectionChangeFormer(LightningModule):
             num_logged = 0
 
             # Determine which bands to use for RGB visualization.
-            # Skip band 0 (COMMON_MASK) and last 2 (SAT_PASS, BEAM).
-            # Pick up to 3 data bands from the middle for a meaningful composite.
             num_bands = image_batch.shape[1]
-            data_band_start = 1  # skip COMMON_MASK
-            data_band_end = max(num_bands - 2, data_band_start + 1)  # skip SAT_PASS, BEAM
-            available = list(range(data_band_start, data_band_end))
+            if self.use_metadata_film:
+                # No metadata bands in image — all bands are data
+                available = list(range(num_bands))
+            else:
+                # Legacy: skip band 0 (COMMON_MASK) and last 2 (SAT_PASS, BEAM).
+                data_band_start = 1  # skip COMMON_MASK
+                data_band_end = max(num_bands - 2, data_band_start + 1)  # skip SAT_PASS, BEAM
+                available = list(range(data_band_start, data_band_end))
             # Take 3 evenly spaced bands (or fewer if not enough)
             if len(available) >= 3:
                 step = max(1, len(available) // 3)
@@ -961,7 +992,11 @@ class ChangeDetectionChangeFormer(LightningModule):
         x_post = batch["image"]
 
         with torch.no_grad():
-            logits = self._tta_forward(x_pre, x_post)
+            logits = self._tta_forward(
+                x_pre, x_post,
+                sat_pass=batch.get("sat_pass_value"),
+                beam=batch.get("beam_value"),
+            )
 
         # Convertir en probabilités et en classes prédites
         if self.num_classes == 1:
@@ -1013,7 +1048,13 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         return result
 
-    def _tta_forward(self, x_pre: Tensor, x_post: Tensor) -> Tensor:
+    def _tta_forward(
+            self,
+            x_pre: Tensor,
+            x_post: Tensor,
+            sat_pass: Tensor | None = None,
+            beam: Tensor | None = None,
+    ) -> Tensor:
         """Test-Time Augmentation: average softmax over geometric transforms.
 
         Applies the original image + horizontal flip + vertical flip + 180°
@@ -1030,7 +1071,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         for fwd_fn, inv_fn in transforms:
             aug_pre = fwd_fn(x_pre)
             aug_post = fwd_fn(x_post)
-            out = self(aug_pre, aug_post)
+            out = self(aug_pre, aug_post, sat_pass=sat_pass, beam=beam)
             if isinstance(out, list):
                 out = out[-1]
             p = torch.softmax(out, dim=1)

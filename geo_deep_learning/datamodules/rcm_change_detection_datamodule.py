@@ -41,9 +41,16 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             split_ratios=(0.70, 0.15, 0.15),
             split_on_columns: Optional[str | list] = None,
             dataset_class: Type[RCMChangeDetectionDataset] = RCMChangeDetectionDataset,
+            separate_metadata: bool = False,
 
     ) -> None:
-        """Initialize RcmChangeDetectionDataModule."""
+        """Initialize RcmChangeDetectionDataModule.
+
+        Args:
+            separate_metadata: When True, the dataset will NOT concatenate
+                COMMON_MASK / SAT_PASS / BEAM to the image tensors.  Instead
+                they are returned as separate dict entries for FiLM conditioning.
+        """
         super().__init__()
 
         self.test_dataset = None
@@ -64,6 +71,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self.split_ratios = split_ratios
         self.dataset_class = dataset_class
         self._dataset_years = dataset_years
+        self.separate_metadata = separate_metadata
 
         self.dataset: RCMChangeDetectionDataset = None
         if split_on_columns is None:
@@ -85,6 +93,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             satellite_pass=self.satellite_pass,
             beams=self.beams,
             dataset_years=self._dataset_years,
+            separate_metadata=self.separate_metadata,
         )
 
         if stage != "predict":

@@ -120,8 +120,21 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                  band_names: Optional[List[str]] = None,
                  satellite_pass: Optional[str | SatellitePass] = None,
                  beams: Optional[List[str]] = None,
-                 dataset_years: Optional[list[int]] = None
+                 dataset_years: Optional[list[int]] = None,
+                 separate_metadata: bool = False,
                  ) -> None:
+        """Initialize RCM Change Detection Dataset.
+
+        Args:
+            separate_metadata: When True, COMMON_MASK / SAT_PASS / BEAM are NOT
+                concatenated to the image tensors.  Instead they are returned as
+                separate dict entries (``sat_pass_value``, ``beam_value``).
+                COMMON_MASK is always available as ``mask-common``.
+                This reduces ``in_channels`` by 3 and allows the model to use
+                learned embeddings (FiLM) instead of wasting encoder capacity on
+                constant spatial bands.
+        """
+        self.separate_metadata = separate_metadata
         # Set bands index and band names
         if band_names is not None:
             self.bands = band_names_to_indices(band_names)
@@ -343,14 +356,32 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             image_pre = manage_bands(image_pre, bands_index)
             image_post = manage_bands(image_post, bands_index)
 
-        # Add common mask as first band + sat_pass/beam bands
-        image_pre = torch.cat([common_mask_tensor, image_pre], dim=0)
-        image_post = torch.cat([common_mask_tensor, image_post], dim=0)
-        image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
+        if self.separate_metadata:
+            # ── NEW MODE: metadata as separate dict entries ──────────────
+            # Images contain ONLY data bands (no COMMON_MASK, SAT_PASS, BEAM).
+            # The model receives them via FiLM conditioning instead.
+            band_names = (
+                [BandName(i + 1).name for i in bands_index]
+                if bands_index is not None
+                else [i.name for i in BandName]
+            )
+            sat_pass_value = data["sat_pass"].value  # int: 0=ASC, 1=DESC
+            beam_value = data["beam"].value  # int: 0=A, 1=B, 2=C, 3=D
+        else:
+            # ── LEGACY MODE: concatenate metadata bands ─────────────────
+            # Add common mask as first band + sat_pass/beam bands
+            image_pre = torch.cat([common_mask_tensor, image_pre], dim=0)
+            image_post = torch.cat([common_mask_tensor, image_post], dim=0)
+            image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
 
-        band_names = [BandName(i + 1).name for i in bands_index] if bands_index is not None else [i.name for i in
-                                                                                                  BandName]
-        band_names = ['COMMON_MASK'] + band_names + [SATELLITE_PASS_BAND_NAME, BEAM_BAND_NAME]
+            band_names = (
+                [BandName(i + 1).name for i in bands_index]
+                if bands_index is not None
+                else [i.name for i in BandName]
+            )
+            band_names = ['COMMON_MASK'] + band_names + [SATELLITE_PASS_BAND_NAME, BEAM_BAND_NAME]
+            sat_pass_value = None
+            beam_value = None
 
         image_profile = None
         with rio.open(data['image']) as src:
@@ -383,6 +414,12 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             "original_height": image_post.shape[1],
             "original_width": image_post.shape[2],
         }
+
+        # Metadata as scalars (only when separate_metadata=True)
+        if sat_pass_value is not None:
+            sample["sat_pass_value"] = sat_pass_value
+        if beam_value is not None:
+            sample["beam_value"] = beam_value
 
         sample.update(self._get_metadata(data))
 

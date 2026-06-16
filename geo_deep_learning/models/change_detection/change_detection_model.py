@@ -2,20 +2,37 @@
 import torch
 from torch import Tensor
 
+from geo_deep_learning.models.change_detection.metadata_film_conditioner import MetadataFiLMConditioner
 from geo_deep_learning.models.change_detection.sub_models.changeformer.original_change_former import ChangeFormerV6, \
     ChangeFormerV5
 from geo_deep_learning.models.segmentation.base import BaseSegmentationModel
 
 
 class ChangeDetectionModel(BaseSegmentationModel):
-    """Change Detection segmentation model."""
+    """Change Detection segmentation model.
+
+    When ``use_metadata_film=True``, SAT_PASS and BEAM are no longer fed as
+    constant spatial bands.  Instead a lightweight FiLM layer modulates the
+    input channels *before* the Transformer encoder, letting the network learn
+    acquisition-specific adjustments without wasting encoder capacity.
+    """
     # TODO : For now, only use ChangeFormer. Add more models later.
     #  ChangeFormer: https://github.com/wgcban/ChangeFormer.git
     def __init__(self, change_detection_model: str = "changeformer",
                  in_channels: int = 3,
                  out_channels: int = 2,
+                 use_metadata_film: bool = False,
+                 film_embed_dim: int = 32,
                  **kwargs) -> None:
-        """Initialize Change Detection segmentation model."""
+        """Initialize Change Detection segmentation model.
+
+        Args:
+            change_detection_model: Model variant key ('changeformer', 'changeformer_5', 'changeformer_6').
+            in_channels: Number of *data-only* input channels (excluding metadata bands).
+            out_channels: Number of output classes.
+            use_metadata_film: If True, create a FiLM conditioner for SAT_PASS/BEAM metadata.
+            film_embed_dim: Embedding dimension for the FiLM conditioner.
+        """
         super().__init__()
 
         model_selection = {'changeformer': ChangeFormerV6,
@@ -39,23 +56,58 @@ class ChangeDetectionModel(BaseSegmentationModel):
                                             output_nc=out_channels,
                                             **model_kwargs)
 
-    def forward(self, x1: Tensor, x2: Tensor) -> Tensor:
+        # FiLM conditioner for acquisition metadata
+        self.use_metadata_film = use_metadata_film
+        self.film_conditioner: MetadataFiLMConditioner | None = None
+        if use_metadata_film:
+            self.film_conditioner = MetadataFiLMConditioner(
+                in_channels=in_channels,
+                embed_dim=film_embed_dim,
+            )
+
+    def forward(
+        self,
+        x1: Tensor,
+        x2: Tensor,
+        sat_pass: Tensor | None = None,
+        beam: Tensor | None = None,
+    ) -> Tensor:
         """Forward pass of the model.
-        Because it's a change detection model, it takes two inputs as PRE / POST or X1 / X2.
+
         Args:
-            x1 (Tensor): First input tensor.
-            x2 (Tensor): Second input tensor.
+            x1: Pre-image tensor [B, C, H, W].
+            x2: Post-image tensor [B, C, H, W].
+            sat_pass: [B] integer tensor for satellite pass (0=ASC, 1=DESC).
+                      Required when ``use_metadata_film=True``.
+            beam: [B] integer tensor for beam (0=A, 1=B, 2=C, 3=D).
+                  Required when ``use_metadata_film=True``.
+
         Returns:
-            Tensor: Output tensor.
+            List of output tensors (one per decoder head + final).
         """
+        if self.film_conditioner is not None and sat_pass is not None and beam is not None:
+            x1 = self.film_conditioner(x1, sat_pass, beam)
+            x2 = self.film_conditioner(x2, sat_pass, beam)
+
         return self.change_detection_model(x1, x2)
 
 
 
 if __name__ == '__main__':
+    # Test without FiLM
     model = ChangeDetectionModel(change_detection_model='changeformer_6', in_channels=9, out_channels=2)
     x1 = torch.randn(5, 9, 512, 512)
     x2 = torch.randn(5, 9, 512, 512)
     outputs = model(x1, x2)[-1]
-    print(f"outputs.shape: {outputs.shape}")
+    print(f"Without FiLM - outputs.shape: {outputs.shape}")  # noqa: T201
+
+    # Test with FiLM
+    model_film = ChangeDetectionModel(
+        change_detection_model='changeformer_6', in_channels=9, out_channels=2,
+        use_metadata_film=True,
+    )
+    sat_pass = torch.tensor([0, 1, 0, 1, 0])
+    beam = torch.tensor([0, 1, 2, 3, 0])
+    outputs_film = model_film(x1, x2, sat_pass=sat_pass, beam=beam)[-1]
+    print(f"With FiLM    - outputs.shape: {outputs_film.shape}")  # noqa: T201
 
