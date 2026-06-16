@@ -8,14 +8,14 @@ trainer:
   strategy: auto
 
   gradient_clip_val: 1.0
-  precision: "32-true"
+  precision: "16-mixed"
   sync_batchnorm: true
   gradient_clip_algorithm: "norm"
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: &log_dir ./lightning_logs
-      name: &run_name 2026_7_A_2023_2025_mask_water_rel_orbs_changeformer_focal-lovasz_fire_id_cosw_all
+      name: &run_name 2026_8_A_2023_2025_mask_water_rel_orbs_changeformer_focal-lovasz_fire_id_cosw_all_test
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
