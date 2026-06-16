@@ -8,14 +8,14 @@ trainer:
   strategy: auto
 
   gradient_clip_val: 1.0
-  precision: "16-mixed"
+  precision: "32-true"
   sync_batchnorm: true
   gradient_clip_algorithm: "norm"
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: &log_dir ./lightning_logs
-      name: &run_name 2026_8_A_2023_2025_mask_water_rel_orbs_changeformer_focal-lovasz_fire_id_cosw_all_test
+      name: &run_name 2026_7_A_2023_2025_mask_water_rel_orbs_changeformer_focal-lovasz_fire_id_cosw_all
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -69,18 +69,14 @@ model:
     change_detection_model: "changeformer"
     image_size: [256,256]
     # set to; it will be set to the number of band_names in the datamodule +
-    # 1 for BITMASK_CROPPED (always loaded)
-    # With separate_metadata=true, COMMON_MASK / SAT_PASS / BEAM are NOT
-    # counted as image channels — they use FiLM conditioning instead.
-    in_channels: 10 # len(band_names) + 1 (BITMASK_CROPPED)
+    # 1 for COMMON MASK
+    # 1 for BITMASK
+    # 1 for SAT_PASS encoding
+    # 1 for BEAM encoding
+    in_channels: 13 # Should be the length of data.band_names + 4
     max_samples: 50
     num_classes: 1  # binary change detection
     burned_class_weight: 5.0  # >1 penalizes false negatives on class burn (1)
-    deep_supervision: true  # use all ChangeFormer decoder heads for loss
-    # deep_supervision_weights: [0.1, 0.1, 0.15, 0.2, 1.0]  # per-head weights (c4→c1→final)
-    speckle_noise_std: 0.15  # SAR-specific multiplicative speckle augmentation
-    use_metadata_film: true   # encode SAT_PASS/BEAM via FiLM instead of constant bands
-    film_embed_dim: 32        # embedding dimension for FiLM conditionerl
 
 
     main_loss:
@@ -88,16 +84,14 @@ model:
       class_path: segmentation_models_pytorch.losses.FocalLoss
       init_args:
         mode: "binary"
+        alpha: 0.65
         gamma: 1.5
-        ignore_index: 255
-        # alpha removed: ineffective in 2-channel one-hot mode (symmetric weighting)
         # smooth_factor: 0.05
     secondary_loss:
       #class_path: segmentation_models_pytorch.losses.FocalLoss
       class_path: segmentation_models_pytorch.losses.LovaszLoss
       init_args:
         mode: "binary"
-        ignore_index: 255
         #smooth: 0.05
         #gamma: 2.0
         #normalized: 1
@@ -141,7 +135,6 @@ data:
     batch_size: 8
     num_workers: 10
     #data_type_max: 1
-    separate_metadata: true  # SAT_PASS/BEAM as scalars, not image bands
     patch_size:
     - 256
     - 256

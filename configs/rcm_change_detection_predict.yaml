@@ -18,7 +18,7 @@ model:
   init_args:
     change_detection_model: "changeformer"
     image_size: [256, 256]
-    in_channels: 9 # ===================================== LEN[BAND_NAMES] + 4
+    in_channels: 13 # ===================================== LEN[BAND_NAMES] + 4
     max_samples: 10
     num_classes: 1
     # Les losses sont requises par le constructeur, même si elles ne servent pas en predict
@@ -56,7 +56,7 @@ model:
     class_colors: ["#000000", "#FF0000"]
     #weights_from_checkpoint_path: /app/model_checkpoints/2026_3_A_mask_water_10pct_changeformer_focal-lovasz_fire_id_cosinewarm_mchi_rr_rl-epoch=78-val_loss=0.361.ckpt
     #weights_from_checkpoint_path: /app/model_checkpoints/2026_3_A_mask_water_10pct_changeformer_focal-lovasz_fire_id_cosinewarm_mchi_rr_rl-epoch=78-val_loss=0.361.ckpt
-    weights_from_checkpoint_path: /app/model_checkpoints/2026_6_A_2023_2025_mask_water_changeformer_focal-lovasz_fire_id_cosw_mchi-epoch=164-val_loss=0.383.ckpt
+    weights_from_checkpoint_path: /app/model_checkpoints/2026_7_A_2023_2025_mask_water_rel_orbs_changeformer_focal-lovasz_fire_id_cosw_all-epoch=71-val_loss=0.354.ckpt
     predict_output_dir: /mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
 
 data:
@@ -65,7 +65,7 @@ data:
     dataset_class: datasets.rcm_change_detection_predict_dataset.RCMChangeDetectionOnPredictDataset
     batch_size: 16
     num_workers: 20
-    data_type_max: 1
+#    data_type_max: 1
     patch_size: [256, 256]
     # IMPORTANT : CSV contenant les données à prédire (peut être le même ou un nouveau)
     csv_root_folder:  &data_root /mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
@@ -75,10 +75,11 @@ data:
     #split_on_columns: db_nbac_fire_id
     #split_ratios: [0.8, 0.1, 0.1]
     #band_names: ['LOCALINCANGLE', 'PDN', 'PSN', 'PVN', 'S0', 'RL', 'RR']
-    band_names:  [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' ]
+    #band_names:  [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' ]
+    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'NDSV','RFDI', 'RR','RL']
     beams:
       - 'A'
     satellite_pass:  # null = pas de filtre
-
+    dataset_years:
 # Chemin du checkpoint à charger pour la prédiction
 #ckpt_path: /app/model_checkpoints/2026_changeformer_focal-jaccard_fire_id_cosinewarm_mchi_rr_rl-epoch=56-val_loss=0.273.ckpt
