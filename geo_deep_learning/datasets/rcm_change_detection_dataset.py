@@ -367,8 +367,9 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             )
             sat_pass_value = data["sat_pass"].value  # int: 0=ASC, 1=DESC
             beam_value = data["beam"].value  # int: 0=A, 1=B, 2=C, 3=D
-            # Season from post-image date (0=DJF, 1=MAM, 2=JJA, 3=SON)
-            season_value = self._extract_season(data.get("group_date_post"))
+            # Season from pre and post image dates (0=DJF, 1=MAM, 2=JJA, 3=SON)
+            pre_season_value = self._extract_season(data.get("group_date_pre"))
+            post_season_value = self._extract_season(data.get("group_date_post"))
             # Time delta between pre and post groups, discretized into bins
             time_delta_bin = self._extract_time_delta_bin(
                 data.get("group_date_pre"), data.get("group_date_post"),
@@ -427,8 +428,9 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         if beam_value is not None:
             sample["beam_value"] = beam_value
         if beam_value is not None:
-            # season_value and time_delta_bin are always set when separate_metadata=True
-            sample["season_value"] = season_value  # type: ignore[possibly-undefined]
+            # These are always set when separate_metadata=True
+            sample["pre_season"] = pre_season_value  # type: ignore[possibly-undefined]
+            sample["post_season"] = post_season_value  # type: ignore[possibly-undefined]
             sample["time_delta_bin"] = time_delta_bin  # type: ignore[possibly-undefined]
 
         sample.update(self._get_metadata(data))

@@ -279,10 +279,11 @@ class ChangeDetectionChangeFormer(LightningModule):
         film_metadata_fields = None
         if self.use_metadata_film:
             film_metadata_fields = {
-                "sat_pass": 2,      # ASC / DESC
-                "beam": 4,          # A / B / C / D
-                "season": 4,        # DJF=0 / MAM=1 / JJA=2 / SON=3
-                "time_delta": 5,    # 0-4d / 4-12d / 12-24d / 24-48d / 48d+
+                "sat_pass": 2,       # ASC / DESC
+                "beam": 4,           # A / B / C / D
+                "pre_season": 4,     # DJF=0 / MAM=1 / JJA=2 / SON=3
+                "post_season": 4,    # DJF=0 / MAM=1 / JJA=2 / SON=3
+                "time_delta": 5,     # 0-4d / 4-12d / 12-24d / 24-48d / 48d+
             }
 
         self.model = ChangeDetectionModel(
@@ -712,7 +713,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             x_post,
             sat_pass=batch.get("sat_pass_value"),
             beam=batch.get("beam_value"),
-            season=batch.get("season_value"),
+            pre_season=batch.get("pre_season"),
+            post_season=batch.get("post_season"),
             time_delta=batch.get("time_delta_bin"),
         )
 
@@ -1013,7 +1015,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                 x_pre, x_post,
                 sat_pass=batch.get("sat_pass_value"),
                 beam=batch.get("beam_value"),
-                season=batch.get("season_value"),
+                pre_season=batch.get("pre_season"),
+                post_season=batch.get("post_season"),
                 time_delta=batch.get("time_delta_bin"),
             )
 
