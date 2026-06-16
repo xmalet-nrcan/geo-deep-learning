@@ -15,7 +15,7 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: &log_dir ./lightning_logs
-      name: &run_name 2026_6_A_2023_2025_mask_water_changeformer_focal-lovasz_fire_id_cosw_mchi_no_psn
+      name: &run_name 2026_7_A_2023_2025_mask_water_rel_orbs_changeformer_focal-lovasz_fire_id_cosw_all
 #  logger:
 #    class_path: lightning.pytorch.loggers.mlflow.MLFlowLogger
 #    init_args:
@@ -73,10 +73,13 @@ model:
     # 1 for BITMASK
     # 1 for SAT_PASS encoding
     # 1 for BEAM encoding
-    in_channels: 9 # Should be the length of data.band_names + 4
+    in_channels: 13 # Should be the length of data.band_names + 4
     max_samples: 50
     num_classes: 1  # binary change detection
     burned_class_weight: 5.0  # >1 penalizes false negatives on class burn (1)
+    deep_supervision: true  # use all ChangeFormer decoder heads for loss
+    # deep_supervision_weights: [0.1, 0.1, 0.15, 0.2, 1.0]  # per-head weights (c4→c1→final)
+    speckle_noise_std: 0.15  # SAR-specific multiplicative speckle augmentation
 
 
     main_loss:
@@ -102,7 +105,7 @@ model:
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
-        lr: 1e-5
+        lr: 1e-4
         weight_decay: 0.01
         betas:
         - 0.9
@@ -127,14 +130,14 @@ model:
 
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
-    #weights_from_checkpoint_path: /app/model_checkpoints/2026_3_A_mask_water_10pct_changeformer_focal-lovasz_fire_id_cosinewarm_mchi_rr_rl-epoch=78-val_loss=0.361.ckpt
+    # weights_from_checkpoint_path: /app/model_checkpoints/2026_7_A_2023_mask_water_rel_orbs_changeformer_focal-lovasz_fire_id_cosw_all-epoch=29-val_loss=0.334.ckpt
 
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
   init_args:
     batch_size: 8
     num_workers: 10
-    data_type_max: 1
+    #data_type_max: 1
     patch_size:
     - 256
     - 256
@@ -147,16 +150,14 @@ data:
     #csv_file_name: pre_post_datasets.csv
     split_ratios: [0.8 ,0.1, 0.1]
 
-    # INTENSITY
-    # band_names: [ 'LOCALINCANGLE', 'RL','RR' ] # RCM INPUT (non-polarimetric intensity)
-
+    #band_names: [ 'LOCALINCANGLE', 'RL','RR' ] # RCM INPUT (non-polarimetric intensity)
     # MCHI + LIA = S0, Pdn, Psn Pvn + LIA
-    # band_names: ['LOCALINCANGLE', 'PDN','PSN','PVN', 'S0'] # MCHI-DECOMP ==> 5 bands
-    # band_names: [ 'LOCALINCANGLE', 'PSN','PVN', 'S0' ] # MCHI-DECOMP - PDN ==> 4 bands
-
-    # MCHI + LIA + INDICES + INTENSITY
-    #band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'NDSV','RFDI', 'RR','RL'] # 9 bands
-
+    #band_names: [ 'LOCALINCANGLE', 'PSN','PVN', 'S0' ] # MCHI-DECOMP - PDN ==> 4 bands
+    # band_names: ['LOCALINCANGLE', 'PDN','PSN','PVN', 'S0', 'RR','RL'] # MCHI-DECOMP ==> 5 bands
+    #band_names: ['LOCALINCANGLE','S0','SP1','SP2', 'SP3']   # STOKES VECTOR
+    # band_names: ['LOCALINCANGLE', 'PDN','PSN','PVN' ]
+    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'NDSV','RFDI', 'RR','RL']
+    # band_names: [ 'LOCALINCANGLE','M', 'S0','SP1','SP2', 'RL','RR'  ]
     # RCM bands AVAILABLE
     # -------------------
     #    BITMASK_CROPPED
@@ -166,7 +167,7 @@ data:
     #    PDN
     #    PSN
     #    PVN
-    #    RFDI
+    #    RFDI     #
     #    RL
     #    RR
     #    S0
@@ -180,6 +181,4 @@ data:
     #- 'C'
     satellite_pass:   # AVAILABLE: ['Ascending','Descending']
     dataset_years:
-    #- 2023
-    #- 2024
     #- 2025

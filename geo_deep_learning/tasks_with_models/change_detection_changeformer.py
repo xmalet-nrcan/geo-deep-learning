@@ -1,4 +1,4 @@
-"""Segmentation SegFormer model."""
+"""Change Detection with ChangeFormer model for RCM SAR data."""
 
 from pathlib import Path
 
@@ -37,7 +37,11 @@ warnings.filterwarnings(
 )
 
 logger = logging.getLogger(__name__)
-IGNORE_MASK_INDEX=255
+IGNORE_MASK_INDEX = 255
+
+# Deep supervision weights for ChangeFormer's 5 output heads (c4→c1→final).
+# Intermediate heads get decreasing weight; the final head gets the most.
+DEEP_SUPERVISION_WEIGHTS = [0.1, 0.1, 0.15, 0.2, 1.0]
 
 class ChangeDetectionChangeFormer(LightningModule):
     """Change Detection with ChangeFormer V6 model."""
@@ -63,9 +67,22 @@ class ChangeDetectionChangeFormer(LightningModule):
             in_channels: int | None = None,
             threshold: float = 0.5,
             predict_output_dir: str | None = None,  # For Outputs
+            deep_supervision: bool = True,
+            deep_supervision_weights: list[float] | None = None,
+            speckle_noise_std: float = 0.15,
             **kwargs: object,  # noqa: ARG002
     ) -> None:
-        """Initialize the model."""
+        """Initialize the model.
+
+        Args:
+            deep_supervision: Use all ChangeFormer decoder heads for loss computation.
+                The decoder produces 5 outputs (4 intermediate + 1 final); when enabled,
+                losses from intermediate heads are weighted and summed.
+            deep_supervision_weights: Per-head loss weights (length must match decoder
+                output count, typically 5). Defaults to DEEP_SUPERVISION_WEIGHTS.
+            speckle_noise_std: Std-dev of multiplicative SAR speckle noise augmentation.
+                Set to 0 to disable. Only applied during training.
+        """
         super().__init__()
         self.save_hyperparameters()
         self.change_detection_model = change_detection_model
@@ -92,11 +109,29 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.class_colors = class_colors
         self.threshold = threshold
 
+        # Deep supervision (use all ChangeFormer decoder heads)
+        self.deep_supervision = deep_supervision
+        self.deep_supervision_weights = deep_supervision_weights or DEEP_SUPERVISION_WEIGHTS
+        self.speckle_noise_std = speckle_noise_std
+
         self.changed_num_classes = num_classes + 1 if num_classes == 1 else num_classes
         self.labels = (
             [str(i) for i in range(self.changed_num_classes)]
             if class_labels is None
             else class_labels
+        )
+
+        # --- Cache augmentation modules (avoid re-creating each batch) ---
+        self._geo_aug = self._build_geo_aug()
+        self._intensity_aug = self._build_intensity_aug()
+        self._pad_aug = AugmentationSequential(
+            krn.augmentation.PadTo(
+                size=self.image_size,
+                pad_mode='constant',
+                pad_value=0,
+                keepdim=False,
+            ),
+            data_keys=None,
         )
         # ----- Validation -----
         self.val_iou_metric = MeanIoU(
@@ -160,7 +195,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         self.predict_output_dir = predict_output_dir
 
-    def _apply_geo_aug(self) -> AugmentationSequential:
+    def _build_geo_aug(self) -> AugmentationSequential:
         """Geometric augmentations (applied to images + masks)."""
         return AugmentationSequential(
             krn.augmentation.RandomHorizontalFlip(p=0.5, keepdim=True),
@@ -174,32 +209,43 @@ class ChangeDetectionChangeFormer(LightningModule):
             data_keys=None,
         )
 
-    def _apply_intensity_aug(self) -> AugmentationSequential:
-        """Intensity augmentations (applied to images only)."""
+    def _build_intensity_aug(self) -> AugmentationSequential:
+        """Intensity augmentations for SAR data (applied to images only).
+
+        Key difference from optical: SAR speckle is *multiplicative*, so the
+        primary noise augmentation multiplies by (1 + N(0, std)) instead of
+        adding Gaussian noise.  We also keep a small additive Gaussian term and
+        random erasing for robustness.
+        """
         return AugmentationSequential(
-            krn.augmentation.RandomGaussianNoise(mean=0.0, std=0.05, p=0.3, keepdim=True),
+            krn.augmentation.RandomGaussianNoise(mean=0.0, std=0.03, p=0.2, keepdim=True),
             krn.augmentation.RandomGaussianBlur(
-                kernel_size=(3, 3), sigma=(0.1, 2.0), p=0.3, keepdim=True
+                kernel_size=(3, 3), sigma=(0.1, 1.5), p=0.2, keepdim=True
             ),
             krn.augmentation.RandomErasing(
-                scale=(0.02, 0.1), ratio=(0.3, 3.3), p=0.3, keepdim=True
+                scale=(0.02, 0.08), ratio=(0.3, 3.3), p=0.2, keepdim=True
             ),
             data_keys=None,
         )
+
+    @staticmethod
+    def _apply_speckle_noise(image: Tensor, std: float) -> Tensor:
+        """Apply multiplicative speckle noise typical of SAR imagery.
+
+        Speckle in SAR is modelled as multiplicative: I_noisy = I * (1 + ε)
+        where ε ~ N(0, std).  This preserves the sign and scale of the signal
+        while adding realistic radiometric variation.
+        """
+        if std <= 0:
+            return image
+        noise = 1.0 + torch.randn_like(image) * std
+        return image * noise
 
     def on_before_batch_transfer(
             self,
             batch: dict[str, Any],
             dataloader_idx: int,  # noqa: ARG002
     ) -> dict[str, Any]:
-        aug = AugmentationSequential(
-            krn.augmentation.PadTo(size=self.image_size,
-                                   pad_mode='constant',
-                                   pad_value=0,
-                                   keepdim=False),
-            data_keys=None,
-        )
-
         keys_to_pad = {"image_pre": batch["image_pre"],
                        "image": batch["image"]}
 
@@ -212,7 +258,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 else:
                     keys_to_pad[mask_names] = batch[mask_names].to(torch.float32)
 
-        transformed = aug(keys_to_pad)
+        transformed = self._pad_aug(keys_to_pad)
         batch.update(transformed)
         return batch
 
@@ -294,9 +340,20 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
 
-    def forward(self, image_pre: Tensor, image_post: Tensor) -> Tensor:
-        """Forward pass."""
-        return self.model(image_pre, image_post)[-1]  # Because ChangeFormer output a list in its forward pass.
+    def forward(self, image_pre: Tensor, image_post: Tensor) -> Tensor | list[Tensor]:
+        """Forward pass.
+
+        Returns:
+            When ``deep_supervision`` is enabled **and** the model is in
+            training/validation mode, returns the full list of decoder outputs
+            (one per scale + final).  Otherwise returns only the final
+            prediction tensor.
+        """
+        outputs = self.model(image_pre, image_post)
+        # ChangeFormer decoder returns a list: [p_c4, p_c3, p_c2, p_c1, final]
+        if self.deep_supervision and self.training:
+            return outputs  # list[Tensor]
+        return outputs[-1]  # Tensor [B, C, H, W]
 
     def on_after_batch_transfer(self, batch, dataloader_idx):
         if not self.trainer.training:
@@ -304,7 +361,6 @@ class ChangeDetectionChangeFormer(LightningModule):
         device = batch["image"].device
 
         # 1. Geometric augmentations on images + masks together
-        geo_aug = self._apply_geo_aug()
         keys_to_aug = {
             "image_pre": batch["image_pre"],
             "image": batch["image"],
@@ -314,14 +370,21 @@ class ChangeDetectionChangeFormer(LightningModule):
         if "mask" in batch:
             keys_to_aug["mask"] = batch["mask"]
 
-        transformed = geo_aug(keys_to_aug)
+        transformed = self._geo_aug(keys_to_aug)
         for key in transformed:
             batch[key] = transformed[key].to(device, non_blocking=True)
 
-        # 2. Intensity augmentations on images only
-        intensity_aug = self._apply_intensity_aug()
+        # 2. Intensity augmentations on images only (generic)
         for img_key in ["image_pre", "image"]:
-            batch[img_key] = intensity_aug({img_key: batch[img_key]})[img_key]
+            batch[img_key] = self._intensity_aug({img_key: batch[img_key]})[img_key]
+
+        # 3. SAR-specific: multiplicative speckle noise
+        if self.speckle_noise_std > 0:
+            for img_key in ["image_pre", "image"]:
+                batch[img_key] = self._apply_speckle_noise(
+                    batch[img_key], self.speckle_noise_std
+                )
+
         return batch
 
     # TODO : Modifier pour avoir image pre/post
@@ -559,7 +622,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.test_precision.reset()
         self.test_recall.reset()
 
-    def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[ Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, int]:
+    def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, int]:
         x_pre, x_post = batch["image_pre"], batch["image"]
         y = batch["mask"]
         common_data_mask = batch["mask-common"]
@@ -587,7 +650,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Remplacer les images quasi-vides par du bruit faible ---
         # pour éviter NaN dans LayerNorm (variance ~ 0 → gradient explose)
         valid_ratio = common_data_mask.flatten(1).mean(dim=1)  # [B]
-        min_valid_ratio = 0.05  # au moins 10% de pixels valides
+        min_valid_ratio = 0.05  # au moins 5% de pixels valides
         bad_mask = valid_ratio < min_valid_ratio  # [B] booléen
         if bad_mask.any():
             n_bad = bad_mask.sum().item()
@@ -606,7 +669,16 @@ class ChangeDetectionChangeFormer(LightningModule):
                 common_data_mask[idx] = 0.0
                 y[idx] = 0
 
-        logits = self(x_pre, x_post)  # [B, C, H, W]
+        raw_output = self(x_pre, x_post)
+
+        # Deep supervision: raw_output is a list during training, single Tensor otherwise
+        if isinstance(raw_output, list):
+            all_outputs = raw_output  # [p_c4, p_c3, p_c2, p_c1, final]
+            logits = all_outputs[-1]  # final prediction for metrics
+        else:
+            all_outputs = [raw_output]
+            logits = raw_output
+
         y_float = y.float()
         logits_no_nan = torch.nan_to_num(logits, nan=1e15, posinf=1.0, neginf=0.0)
         num_classes = self.changed_num_classes
@@ -642,11 +714,6 @@ class ChangeDetectionChangeFormer(LightningModule):
         else:
             loss_mask_expanded = loss_mask.unsqueeze(1).expand_as(logits_no_nan)
 
-        # Appliquer le masque : mettre à 0 les logits et targets pour les pixels invalides
-        # afin qu'ils ne contribuent pas à la loss
-        masked_logits = logits_no_nan * loss_mask_expanded
-        masked_one_hot = one_hot * loss_mask_expanded
-
         # Vérifier qu'il reste des pixels valides
         valid_sum = common_data_mask.sum()
         if valid_sum == 0:
@@ -661,15 +728,49 @@ class ChangeDetectionChangeFormer(LightningModule):
         if not torch.isfinite(one_hot).all():
             raise RuntimeError("One-hot targets contain non-finite values (NaN/Inf).")
 
-        # --- Losses ---
-        ce_loss = self.secondary_loss(masked_logits.contiguous(), masked_one_hot)
-        loss = self.main_loss(masked_logits.contiguous(), masked_one_hot)
-        # burned_fn_penalty = self._burned_false_negative_penalty(
-        #     logits=logits_no_nan,
-        #     one_hot=one_hot,
-        #     valid_mask=common_data_mask,
-        # )
-        main_loss = w_sl * ce_loss + w_ml * loss # + burned_fn_penalty
+        # --- Deep supervision: compute loss on every decoder head ---
+        target_h, target_w = logits_no_nan.shape[2], logits_no_nan.shape[3]
+
+        if self.deep_supervision and len(all_outputs) > 1 and self.training:
+            ds_weights = self.deep_supervision_weights
+            # Ensure we have a weight for each head
+            if len(ds_weights) < len(all_outputs):
+                ds_weights = ds_weights + [1.0] * (len(all_outputs) - len(ds_weights))
+
+            total_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            total_ce = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            weight_sum = sum(ds_weights[:len(all_outputs)])
+
+            for head_idx, head_output in enumerate(all_outputs):
+                head_logits = torch.nan_to_num(head_output, nan=1e15, posinf=1.0, neginf=0.0)
+                # Resize intermediate heads to final resolution
+                if head_logits.shape[2] != target_h or head_logits.shape[3] != target_w:
+                    head_logits = F.interpolate(
+                        head_logits, size=(target_h, target_w),
+                        mode='bilinear', align_corners=False,
+                    )
+                head_mask = loss_mask_expanded if head_logits.shape == logits_no_nan.shape else loss_mask.expand_as(head_logits)
+                masked_head = head_logits * head_mask
+                masked_target = one_hot * head_mask
+
+                head_ce = self.secondary_loss(masked_head.contiguous(), masked_target)
+                head_main = self.main_loss(masked_head.contiguous(), masked_target)
+                head_loss = w_sl * head_ce + w_ml * head_main
+
+                total_loss = total_loss + ds_weights[head_idx] * head_loss
+                total_ce = total_ce + ds_weights[head_idx] * head_ce
+
+            main_loss = total_loss / weight_sum
+            ce_loss = total_ce / weight_sum
+            loss = main_loss  # combined
+        else:
+            # Standard single-head loss (original behaviour)
+            masked_logits = logits_no_nan * loss_mask_expanded
+            masked_one_hot = one_hot * loss_mask_expanded
+
+            ce_loss = self.secondary_loss(masked_logits.contiguous(), masked_one_hot)
+            loss = self.main_loss(masked_logits.contiguous(), masked_one_hot)
+            main_loss = w_sl * ce_loss + w_ml * loss
 
         # Dernière vérification
         if not torch.isfinite(main_loss):
@@ -848,16 +949,19 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,
             dataloader_idx: int = 0,
     ) -> dict[str, Any]:
-        """Run prediction step (inference only, no loss/metrics)."""
+        """Run prediction step with optional Test-Time Augmentation (TTA).
 
-        # TODO : Masquer l'eau
+        TTA applies geometric transforms (flips, 90° rotations), runs inference
+        on each, inverts the transform, and averages the softmax probabilities.
+        This reduces noise-related false positives — particularly important for
+        SAR data where speckle can cause spurious detections.
+        """
 
         x_pre = batch["image_pre"]
         x_post = batch["image"]
 
-        # Forward pass → logits [B, C, H, W]
         with torch.no_grad():
-            logits = self(x_pre, x_post)
+            logits = self._tta_forward(x_pre, x_post)
 
         # Convertir en probabilités et en classes prédites
         if self.num_classes == 1:
@@ -908,6 +1012,36 @@ class ChangeDetectionChangeFormer(LightningModule):
             result["mask"] = batch["mask"]
 
         return result
+
+    def _tta_forward(self, x_pre: Tensor, x_post: Tensor) -> Tensor:
+        """Test-Time Augmentation: average softmax over geometric transforms.
+
+        Applies the original image + horizontal flip + vertical flip + 180°
+        rotation, computes softmax for each, and averages the results.
+        Returns averaged logits (log of mean probabilities).
+        """
+        transforms = [
+            (lambda t: t, lambda t: t),  # identity
+            (lambda t: torch.flip(t, [-1]), lambda t: torch.flip(t, [-1])),  # hflip
+            (lambda t: torch.flip(t, [-2]), lambda t: torch.flip(t, [-2])),  # vflip
+            (lambda t: torch.flip(t, [-2, -1]), lambda t: torch.flip(t, [-2, -1])),  # rot180
+        ]
+        probs_sum = None
+        for fwd_fn, inv_fn in transforms:
+            aug_pre = fwd_fn(x_pre)
+            aug_post = fwd_fn(x_post)
+            out = self(aug_pre, aug_post)
+            if isinstance(out, list):
+                out = out[-1]
+            p = torch.softmax(out, dim=1)
+            p = inv_fn(p)
+            if probs_sum is None:
+                probs_sum = p
+            else:
+                probs_sum = probs_sum + p
+        avg_probs = probs_sum / len(transforms)
+        # Convert back to logits for consistency with the rest of the pipeline
+        return torch.log(avg_probs.clamp_min(1e-7))
 
     def on_predict_end(self) -> None:
         """Appelé après que tous les predict_step soient terminés.
@@ -994,7 +1128,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
                 t_list = [transform_raw[k][i].item() for k in range(6)]
 
-                print(t_list)
+                logger.debug("Transform coefficients: %s", t_list)
 
                 profile_i = {
                     "driver": "GTiff",
@@ -1033,11 +1167,12 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "tif_path": str(out_path),
                 })
 
-                manifest_path = base_dir / "manifest.json"
-                import json
-                with open(manifest_path, "w") as f:
-                    json.dump(manifest, f, indent=2, default=str)
-                logger.info("Saved prediction manifest to %s", manifest_path)
+        # Write manifest once after all batches are processed
+        manifest_path = base_dir / "manifest.json"
+        import json
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2, default=str)
+        logger.info("Saved prediction manifest to %s", manifest_path)
 
         self._merge_predictions(group_tile_paths, event_all_tile_paths)
         logger.info("All predictions saved to %s", base_dir)
