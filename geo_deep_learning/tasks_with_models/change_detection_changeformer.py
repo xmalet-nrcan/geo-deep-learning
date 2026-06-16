@@ -433,7 +433,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> Tensor:
         """Run training step."""
-        x_pre, x_post, y, one_hot, logits, main_loss, loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
+        x_pre, x_post, y, one_hot, logits, main_loss, focal_loss_val, lovasz_loss_val, final_head_loss, batch_size = self._forward_and_get_loss(batch)
         # --- Logging ---
         self.log(
             "train_loss",
@@ -447,7 +447,10 @@ class ChangeDetectionChangeFormer(LightningModule):
         )
 
         self.log("main_loss", main_loss, on_epoch=True, sync_dist=True, batch_size=batch_size)
-        self.log("ce_loss", ce_loss, on_epoch=True, sync_dist=True, batch_size=batch_size)
+        self.log("focal_loss", focal_loss_val, on_epoch=True, sync_dist=True, batch_size=batch_size)
+        self.log("lovasz_loss", lovasz_loss_val, on_epoch=True, sync_dist=True, batch_size=batch_size)
+        # Final-head-only loss: comparable to val_loss (which always uses the final head)
+        self.log("train_loss_final_head", final_head_loss, on_epoch=True, sync_dist=True, batch_size=batch_size)
 
         # --- Calcul des métriques différé (pour éviter de casser autograd) ---
         with torch.no_grad():
@@ -523,7 +526,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         has_mask = batch.get("has_mask", torch.tensor([True]))
         if not has_mask.any():
             return None  # skip ce batch
-        x_pre, x_post, y, one_hot, logits, main_loss, loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
+        x_pre, x_post, y, one_hot, logits, main_loss, _focal, _lovasz, _final_head, batch_size = self._forward_and_get_loss(batch)
 
         self.log(
             "val_loss",
@@ -593,8 +596,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         if not has_mask.any():
             return None
 
-        x_pre, x_post, y, one_hot, logits, main_loss, loss, ce_loss, batch_size = self._forward_and_get_loss(batch)
-        # Convert logits to class predictions
+        x_pre, x_post, y, one_hot, logits, main_loss, _focal, _lovasz, _final_head, batch_size = self._forward_and_get_loss(batch)
         y_pred = torch.argmax(logits, dim=1)
         y_true = torch.argmax(one_hot, dim=1)
 
@@ -661,7 +663,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.test_precision.reset()
         self.test_recall.reset()
 
-    def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, int]:
+    def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, int]:
         x_pre, x_post = batch["image_pre"], batch["image"]
         y = batch["mask"]
         common_data_mask = batch["mask-common"]
@@ -745,7 +747,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 (batch_size, num_classes, x_post.shape[2], x_post.shape[3]),
                 device=logits.device, dtype=logits.dtype, )
 
-            return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, batch_size
+            return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, zero_loss, batch_size
 
         # Préparation du one-hot
         y_one_hot = y.squeeze(1) if y.dim() == 4 else y
@@ -753,21 +755,20 @@ class ChangeDetectionChangeFormer(LightningModule):
         one_hot = torch.nn.functional.one_hot(y_one_hot.long(), num_classes=num_classes)
         one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
 
-        # common_data_mask : [B, 1, H, W], 1=valide, 0=invalide (eau, no-data, padding)
-        # Expand le masque pour matcher les dimensions des logits et du one-hot
-        loss_mask = common_data_mask.to(dtype=torch.float32)
-        if loss_mask.dim() == 4 and loss_mask.shape[1] == 1:
-            loss_mask_expanded = loss_mask.expand_as(logits_no_nan)  # [B, C, H, W]
-        else:
-            loss_mask_expanded = loss_mask.unsqueeze(1).expand_as(logits_no_nan)
+        # Mark invalid pixels with IGNORE_MASK_INDEX in targets.
+        # Both FocalLoss and LovaszLoss support ignore_index=255 natively,
+        # avoiding the previous mask-multiplication approach which:
+        #   - biased Lovász sorting (invalid pixels got error=1, distorting gradients)
+        #   - added phantom class-0 contributions to FocalLoss
+        invalid_pixels = (common_data_mask < 0.5)  # [B, 1, H, W], True=invalid
+        one_hot_for_loss = one_hot.clone()
+        one_hot_for_loss.masked_fill_(invalid_pixels.expand_as(one_hot), IGNORE_MASK_INDEX)
 
         # Vérifier qu'il reste des pixels valides
         valid_sum = common_data_mask.sum()
         if valid_sum == 0:
-            # Eviter NaN si la loss divise par le nombre de pixels
-            main_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
-            ce_loss = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
-            return x_pre, x_post, y_float, one_hot, logits_no_nan, main_loss, main_loss, ce_loss, batch_size
+            zero = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
+            return x_pre, x_post, y_float, one_hot, logits_no_nan, zero, zero, zero, zero, batch_size
 
         w_ml, w_sl = self.loss_ratio
 
@@ -785,9 +786,11 @@ class ChangeDetectionChangeFormer(LightningModule):
                 ds_weights = ds_weights + [1.0] * (len(all_outputs) - len(ds_weights))
 
             total_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-            total_ce = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            total_focal = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+            total_lovasz = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
             weight_sum = sum(ds_weights[:len(all_outputs)])
 
+            final_head_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
             for head_idx, head_output in enumerate(all_outputs):
                 head_logits = torch.nan_to_num(head_output, nan=1e15, posinf=1.0, neginf=0.0)
                 # Resize intermediate heads to final resolution
@@ -796,38 +799,44 @@ class ChangeDetectionChangeFormer(LightningModule):
                         head_logits, size=(target_h, target_w),
                         mode='bilinear', align_corners=False,
                     )
-                head_mask = loss_mask_expanded if head_logits.shape == logits_no_nan.shape else loss_mask.expand_as(head_logits)
-                masked_head = head_logits * head_mask
-                masked_target = one_hot * head_mask
 
-                head_ce = self.secondary_loss(masked_head.contiguous(), masked_target)
-                head_main = self.main_loss(masked_head.contiguous(), masked_target)
-                head_loss = w_sl * head_ce + w_ml * head_main
+                head_lovasz = self.secondary_loss(head_logits.contiguous(), one_hot_for_loss)
+                head_focal = self.main_loss(head_logits.contiguous(), one_hot_for_loss)
+                head_loss = w_sl * head_lovasz + w_ml * head_focal
 
                 total_loss = total_loss + ds_weights[head_idx] * head_loss
-                total_ce = total_ce + ds_weights[head_idx] * head_ce
+                total_focal = total_focal + ds_weights[head_idx] * head_focal
+                total_lovasz = total_lovasz + ds_weights[head_idx] * head_lovasz
+
+                # Save final head loss for fair train/val comparison
+                if head_idx == len(all_outputs) - 1:
+                    final_head_loss = head_loss
 
             main_loss = total_loss / weight_sum
-            ce_loss = total_ce / weight_sum
-            loss = main_loss  # combined
+            focal_loss_val = total_focal / weight_sum
+            lovasz_loss_val = total_lovasz / weight_sum
         else:
-            # Standard single-head loss (original behaviour)
-            masked_logits = logits_no_nan * loss_mask_expanded
-            masked_one_hot = one_hot * loss_mask_expanded
+            # Standard single-head loss (final_head_loss == main_loss)
+            lovasz_loss_val = self.secondary_loss(logits_no_nan.contiguous(), one_hot_for_loss)
+            focal_loss_val = self.main_loss(logits_no_nan.contiguous(), one_hot_for_loss)
+            main_loss = w_sl * lovasz_loss_val + w_ml * focal_loss_val
+            final_head_loss = main_loss
 
-            ce_loss = self.secondary_loss(masked_logits.contiguous(), masked_one_hot)
-            loss = self.main_loss(masked_logits.contiguous(), masked_one_hot)
-            main_loss = w_sl * ce_loss + w_ml * loss
+        # Burned-class false-negative penalty (uses burned_class_weight)
+        burn_penalty = self._burned_false_negative_penalty(logits_no_nan, one_hot, common_data_mask)
+        main_loss = main_loss + burn_penalty
+        final_head_loss = final_head_loss + burn_penalty
 
         # Dernière vérification
         if not torch.isfinite(main_loss):
             raise RuntimeError(
                 f"Computed loss is NaN/Inf. "
-                f"ce_loss={ce_loss.detach().cpu().item()}, "
-                f"loss={loss.detach().cpu().item()}"
+                f"focal_loss={focal_loss_val.detach().cpu().item()}, "
+                f"lovasz_loss={lovasz_loss_val.detach().cpu().item()}, "
+                f"burn_penalty={burn_penalty.detach().cpu().item()}"
             )
 
-        return x_pre, x_post, y_float, one_hot, logits_no_nan, main_loss, loss, ce_loss, batch_size
+        return x_pre, x_post, y_float, one_hot, logits_no_nan, main_loss, focal_loss_val, lovasz_loss_val, final_head_loss, batch_size
 
     def _burned_false_negative_penalty(
             self,
