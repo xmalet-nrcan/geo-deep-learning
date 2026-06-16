@@ -88,14 +88,16 @@ model:
       class_path: segmentation_models_pytorch.losses.FocalLoss
       init_args:
         mode: "binary"
-        alpha: 0.65
         gamma: 1.5
+        ignore_index: 255
+        # alpha removed: ineffective in 2-channel one-hot mode (symmetric weighting)
         # smooth_factor: 0.05
     secondary_loss:
       #class_path: segmentation_models_pytorch.losses.FocalLoss
       class_path: segmentation_models_pytorch.losses.LovaszLoss
       init_args:
         mode: "binary"
+        ignore_index: 255
         #smooth: 0.05
         #gamma: 2.0
         #normalized: 1
