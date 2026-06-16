@@ -23,6 +23,7 @@ class ChangeDetectionModel(BaseSegmentationModel):
                  out_channels: int = 2,
                  use_metadata_film: bool = False,
                  film_embed_dim: int = 32,
+                 film_metadata_fields: dict[str, int] | None = None,
                  **kwargs) -> None:
         """Initialize Change Detection segmentation model.
 
@@ -30,8 +31,11 @@ class ChangeDetectionModel(BaseSegmentationModel):
             change_detection_model: Model variant key ('changeformer', 'changeformer_5', 'changeformer_6').
             in_channels: Number of *data-only* input channels (excluding metadata bands).
             out_channels: Number of output classes.
-            use_metadata_film: If True, create a FiLM conditioner for SAT_PASS/BEAM metadata.
+            use_metadata_film: If True, create a FiLM conditioner for metadata.
             film_embed_dim: Embedding dimension for the FiLM conditioner.
+            film_metadata_fields: Dict mapping field name to num categories.
+                Example: {"sat_pass": 2, "beam": 4, "season": 4}
+                If None, defaults to {"sat_pass": 2, "beam": 4}.
         """
         super().__init__()
 
@@ -63,6 +67,7 @@ class ChangeDetectionModel(BaseSegmentationModel):
             self.film_conditioner = MetadataFiLMConditioner(
                 in_channels=in_channels,
                 embed_dim=film_embed_dim,
+                metadata_fields=film_metadata_fields,
             )
 
     def forward(
@@ -71,6 +76,7 @@ class ChangeDetectionModel(BaseSegmentationModel):
         x2: Tensor,
         sat_pass: Tensor | None = None,
         beam: Tensor | None = None,
+        **metadata_kwargs: Tensor,
     ) -> Tensor:
         """Forward pass of the model.
 
@@ -78,16 +84,15 @@ class ChangeDetectionModel(BaseSegmentationModel):
             x1: Pre-image tensor [B, C, H, W].
             x2: Post-image tensor [B, C, H, W].
             sat_pass: [B] integer tensor for satellite pass (0=ASC, 1=DESC).
-                      Required when ``use_metadata_film=True``.
             beam: [B] integer tensor for beam (0=A, 1=B, 2=C, 3=D).
-                  Required when ``use_metadata_film=True``.
+            **metadata_kwargs: Additional metadata fields (e.g. season=[B]).
 
         Returns:
             List of output tensors (one per decoder head + final).
         """
         if self.film_conditioner is not None and sat_pass is not None and beam is not None:
-            x1 = self.film_conditioner(x1, sat_pass, beam)
-            x2 = self.film_conditioner(x2, sat_pass, beam)
+            x1 = self.film_conditioner(x1, sat_pass, beam, **metadata_kwargs)
+            x2 = self.film_conditioner(x2, sat_pass, beam, **metadata_kwargs)
 
         return self.change_detection_model(x1, x2)
 

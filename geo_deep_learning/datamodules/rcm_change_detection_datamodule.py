@@ -41,15 +41,16 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             split_ratios=(0.70, 0.15, 0.15),
             split_on_columns: Optional[str | list] = None,
             dataset_class: Type[RCMChangeDetectionDataset] = RCMChangeDetectionDataset,
-            separate_metadata: bool = False,
+            separate_metadata: bool = True,
 
     ) -> None:
         """Initialize RcmChangeDetectionDataModule.
 
         Args:
-            separate_metadata: When True, the dataset will NOT concatenate
-                COMMON_MASK / SAT_PASS / BEAM to the image tensors.  Instead
-                they are returned as separate dict entries for FiLM conditioning.
+            separate_metadata: When True (default), the dataset will NOT
+                concatenate COMMON_MASK / SAT_PASS / BEAM to the image tensors.
+                Instead they are returned as separate dict entries for FiLM
+                conditioning.  Set to False for legacy 13-channel behaviour.
         """
         super().__init__()
 

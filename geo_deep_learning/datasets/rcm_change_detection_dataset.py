@@ -121,7 +121,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                  satellite_pass: Optional[str | SatellitePass] = None,
                  beams: Optional[List[str]] = None,
                  dataset_years: Optional[list[int]] = None,
-                 separate_metadata: bool = False,
+                 separate_metadata: bool = True,
                  ) -> None:
         """Initialize RCM Change Detection Dataset.
 
@@ -367,6 +367,12 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             )
             sat_pass_value = data["sat_pass"].value  # int: 0=ASC, 1=DESC
             beam_value = data["beam"].value  # int: 0=A, 1=B, 2=C, 3=D
+            # Season from post-image date (0=DJF, 1=MAM, 2=JJA, 3=SON)
+            season_value = self._extract_season(data.get("group_date_post"))
+            # Time delta between pre and post groups, discretized into bins
+            time_delta_bin = self._extract_time_delta_bin(
+                data.get("group_date_pre"), data.get("group_date_post"),
+            )
         else:
             # ── LEGACY MODE: concatenate metadata bands ─────────────────
             # Add common mask as first band + sat_pass/beam bands
@@ -420,6 +426,10 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             sample["sat_pass_value"] = sat_pass_value
         if beam_value is not None:
             sample["beam_value"] = beam_value
+        if beam_value is not None:
+            # season_value and time_delta_bin are always set when separate_metadata=True
+            sample["season_value"] = season_value  # type: ignore[possibly-undefined]
+            sample["time_delta_bin"] = time_delta_bin  # type: ignore[possibly-undefined]
 
         sample.update(self._get_metadata(data))
 
@@ -493,6 +503,62 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
     def _load_water_mask(self, index: int) -> tuple[Tensor, str]:
         """Load water mask."""
         return self._load_image_by_name(index, "water_mask")
+
+    @staticmethod
+    def _extract_season(date_str: str | None) -> int:
+        """Extract meteorological season from a date string (YYYY-MM-DD or YYYYMMDD).
+
+        Returns:
+            0 = DJF (Dec-Jan-Feb, winter)
+            1 = MAM (Mar-Apr-May, spring)
+            2 = JJA (Jun-Jul-Aug, summer)
+            3 = SON (Sep-Oct-Nov, autumn)
+        """
+        if date_str is None:
+            return 2  # default to summer (fire season)
+        try:
+            # Handle both 'YYYY-MM-DD' and 'YYYYMMDD' formats
+            clean = str(date_str).replace("-", "")
+            month = int(clean[4:6])
+        except (ValueError, IndexError):
+            return 2  # default
+        # Meteorological seasons: DJF=0, MAM=1, JJA=2, SON=3
+        return (month % 12) // 3
+
+    # Time-delta bin boundaries in days (upper bound exclusive).
+    # Bin 0: 0-4 days   (same repeat cycle, ~4 days for RCM)
+    # Bin 1: 4-12 days  (1-3 repeat cycles)
+    # Bin 2: 12-24 days (3-6 repeat cycles)
+    # Bin 3: 24-48 days (~1-2 months)
+    # Bin 4: 48+ days   (long gap)
+    TIME_DELTA_BINS = [4, 12, 24, 48]
+
+    @staticmethod
+    def _extract_time_delta_bin(
+        date_pre: str | None,
+        date_post: str | None,
+    ) -> int:
+        """Compute time delta between pre and post dates, discretized into bins.
+
+        Returns:
+            Integer bin index (0-4). See TIME_DELTA_BINS for boundaries.
+        """
+        if date_pre is None or date_post is None:
+            return 2  # default to mid-range
+        try:
+            from datetime import datetime
+            clean_pre = str(date_pre).replace("-", "").strip()[:8]
+            clean_post = str(date_post).replace("-", "").strip()[:8]
+            dt_pre = datetime.strptime(clean_pre, "%Y%m%d")
+            dt_post = datetime.strptime(clean_post, "%Y%m%d")
+            delta_days = abs((dt_post - dt_pre).days)
+        except (ValueError, IndexError):
+            return 2  # default
+
+        for i, upper in enumerate(RCMChangeDetectionDataset.TIME_DELTA_BINS):
+            if delta_days < upper:
+                return i
+        return len(RCMChangeDetectionDataset.TIME_DELTA_BINS)  # last bin
 
 
 if __name__ == '__main__':

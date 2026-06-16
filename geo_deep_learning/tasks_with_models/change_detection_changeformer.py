@@ -70,7 +70,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             deep_supervision: bool = True,
             deep_supervision_weights: list[float] | None = None,
             speckle_noise_std: float = 0.15,
-            use_metadata_film: bool = False,
+            use_metadata_film: bool = True,
             film_embed_dim: int = 32,
             **kwargs: object,  # noqa: ARG002
     ) -> None:
@@ -204,7 +204,8 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         self.predict_output_dir = predict_output_dir
 
-    def _build_geo_aug(self) -> AugmentationSequential:
+    @staticmethod
+    def _build_geo_aug() -> AugmentationSequential:
         """Geometric augmentations (applied to images + masks)."""
         return AugmentationSequential(
             krn.augmentation.RandomHorizontalFlip(p=0.5, keepdim=True),
@@ -218,7 +219,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             data_keys=None,
         )
 
-    def _build_intensity_aug(self) -> AugmentationSequential:
+    @staticmethod
+    def _build_intensity_aug() -> AugmentationSequential:
         """Intensity augmentations for SAR data (applied to images only).
 
         Key difference from optical: SAR speckle is *multiplicative*, so the
@@ -273,12 +275,23 @@ class ChangeDetectionChangeFormer(LightningModule):
 
     def configure_model(self) -> None:
         """Configure model."""
+        # Define metadata fields for FiLM conditioning
+        film_metadata_fields = None
+        if self.use_metadata_film:
+            film_metadata_fields = {
+                "sat_pass": 2,      # ASC / DESC
+                "beam": 4,          # A / B / C / D
+                "season": 4,        # DJF=0 / MAM=1 / JJA=2 / SON=3
+                "time_delta": 5,    # 0-4d / 4-12d / 12-24d / 24-48d / 48d+
+            }
+
         self.model = ChangeDetectionModel(
             change_detection_model=self.change_detection_model,
             in_channels=self.in_channels,
             out_channels=self.num_classes + 1 if self.num_classes == 1 else self.num_classes,
             use_metadata_film=self.use_metadata_film,
             film_embed_dim=self.film_embed_dim,
+            film_metadata_fields=film_metadata_fields,
         )
 
         if self.weights_from_checkpoint_path:
@@ -357,6 +370,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             image_post: Tensor,
             sat_pass: Tensor | None = None,
             beam: Tensor | None = None,
+            **metadata_kwargs: Tensor,
     ) -> Tensor | list[Tensor]:
         """Forward pass.
 
@@ -365,6 +379,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             image_post: Post-event image [B, C, H, W].
             sat_pass: [B] satellite pass index (only when use_metadata_film=True).
             beam: [B] beam index (only when use_metadata_film=True).
+            **metadata_kwargs: Additional FiLM metadata (e.g. season=[B]).
 
         Returns:
             When ``deep_supervision`` is enabled **and** the model is in
@@ -372,7 +387,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             (one per scale + final).  Otherwise returns only the final
             prediction tensor.
         """
-        outputs = self.model(image_pre, image_post, sat_pass=sat_pass, beam=beam)
+        outputs = self.model(image_pre, image_post, sat_pass=sat_pass, beam=beam, **metadata_kwargs)
         # ChangeFormer decoder returns a list: [p_c4, p_c3, p_c2, p_c1, final]
         if self.deep_supervision and self.training:
             return outputs  # list[Tensor]
@@ -697,6 +712,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             x_post,
             sat_pass=batch.get("sat_pass_value"),
             beam=batch.get("beam_value"),
+            season=batch.get("season_value"),
+            time_delta=batch.get("time_delta_bin"),
         )
 
         # Deep supervision: raw_output is a list during training, single Tensor otherwise
@@ -996,6 +1013,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                 x_pre, x_post,
                 sat_pass=batch.get("sat_pass_value"),
                 beam=batch.get("beam_value"),
+                season=batch.get("season_value"),
+                time_delta=batch.get("time_delta_bin"),
             )
 
         # Convertir en probabilités et en classes prédites
@@ -1054,6 +1073,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             x_post: Tensor,
             sat_pass: Tensor | None = None,
             beam: Tensor | None = None,
+            **metadata_kwargs: Tensor,
     ) -> Tensor:
         """Test-Time Augmentation: average softmax over geometric transforms.
 
@@ -1071,7 +1091,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         for fwd_fn, inv_fn in transforms:
             aug_pre = fwd_fn(x_pre)
             aug_post = fwd_fn(x_post)
-            out = self(aug_pre, aug_post, sat_pass=sat_pass, beam=beam)
+            out = self(aug_pre, aug_post, sat_pass=sat_pass, beam=beam, **metadata_kwargs)
             if isinstance(out, list):
                 out = out[-1]
             p = torch.softmax(out, dim=1)
