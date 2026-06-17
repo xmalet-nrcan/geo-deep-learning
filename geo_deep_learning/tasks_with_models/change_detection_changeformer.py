@@ -934,7 +934,33 @@ class ChangeDetectionChangeFormer(LightningModule):
             else:
                 rgb_indices = available[:3]
 
-            for i in range(num_samples):
+            # Minimum burned pixel ratio to include a sample in visualizations
+            min_burned_ratio = 0.30
+
+            for i in range(len(image_batch)):
+                if num_logged >= num_samples:
+                    break
+
+                # --- Filter: only visualize samples with ≥30% burned pixels ---
+                has_real_mask = has_mask_flags[i] if isinstance(
+                    has_mask_flags, (list, torch.Tensor)) else has_mask_flags
+                if not has_real_mask:
+                    continue  # no ground truth → skip
+
+                mask_i_for_filter = mask_batch[i]  # [H, W], values: 0=unburn, 1=burn, 255=ignore
+                if common_mask is not None:
+                    valid_pixels = (common_mask[i].squeeze(0) > 0.5)  # [H, W]
+                else:
+                    valid_pixels = (mask_i_for_filter != IGNORE_MASK_INDEX)
+
+                valid_count = valid_pixels.sum()
+                if valid_count == 0:
+                    continue
+
+                burned_count = ((mask_i_for_filter == 1) & valid_pixels).sum()
+                burned_ratio = burned_count.float() / valid_count.float()
+                if burned_ratio < min_burned_ratio:
+                    continue
                 image_post = image_batch[i]
                 image_pre = pre_image_batch[i]
                 image_name = batch_image_name[i].replace('\n', '')
@@ -942,6 +968,13 @@ class ChangeDetectionChangeFormer(LightningModule):
                 # Compute absolute difference on selected bands
                 image_diff = torch.abs(image_post - image_pre)
                 vis_image = image_diff[rgb_indices, :, :]  # [3, H, W] or fewer
+                # Normalize to [0, 1] for matplotlib (avoids clipping warning)
+                vmin = vis_image.min()
+                vmax = vis_image.max()
+                if vmax - vmin > 1e-6:
+                    vis_image = (vis_image - vmin) / (vmax - vmin)
+                else:
+                    vis_image = torch.zeros_like(vis_image)
 
                 # Prediction with water/no-data masking
                 pred = torch.argmax(outputs[i], dim=0)  # [H, W]
@@ -952,10 +985,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                     effective_num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
                     pred[invalid] = effective_num_classes  # = 2 → index du gris dans la colormap
 
-                # Ground truth mask
-                has_real_mask = has_mask_flags[i] if isinstance(
-                    has_mask_flags, (list, torch.Tensor)) else has_mask_flags
-                mask_i = mask_batch[i] if has_real_mask else None
+                # Ground truth mask (always present here — filtered above)
+                mask_i = mask_batch[i]
 
                 fig = visualize_prediction(
                     image=vis_image,
