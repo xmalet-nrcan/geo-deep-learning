@@ -281,8 +281,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             film_metadata_fields = {
                 "sat_pass": 2,       # ASC / DESC
                 "beam": 4,           # A / B / C / D
-                "pre_season": 4,     # DJF=0 / MAM=1 / JJA=2 / SON=3
-                "post_season": 4,    # DJF=0 / MAM=1 / JJA=2 / SON=3
+                "pre_season": 13,     # 13 , month number + 0 if undefined
+                "post_season": 13,    # 13 , month number + 0 if undefined
                 "time_delta": 5,     # 0-4d / 4-12d / 12-24d / 24-48d / 48d+
             }
 
