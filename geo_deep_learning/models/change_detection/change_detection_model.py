@@ -7,7 +7,7 @@ from geo_deep_learning.models.change_detection.channel_dropout import ChannelDro
 from geo_deep_learning.models.change_detection.difference_feature_attention import DifferenceFeatureAttention
 from geo_deep_learning.models.change_detection.metadata_film_conditioner import MetadataFiLMConditioner
 from geo_deep_learning.models.change_detection.sub_models.changeformer.original_change_former import ChangeFormerV6, \
-    ChangeFormerV5
+    ChangeFormerV5, ChangeFormerV7
 from geo_deep_learning.models.segmentation.base import BaseSegmentationModel
 
 
@@ -60,11 +60,13 @@ class ChangeDetectionModel(BaseSegmentationModel):
         model_selection = {'changeformer': ChangeFormerV6,
                            'changeformer_5': ChangeFormerV5,
                            'changeformer_6': ChangeFormerV6,
+                           'changeformer_7': ChangeFormerV7,
                            }
 
         model_sub_name = {'changeformer': 'changeformer',
                           'changeformer_5': 'changeformer',
                           'changeformer_6': 'changeformer',
+                          'changeformer_7': 'changeformer',
                           }
 
         model_parameters = {'changeformer': {'decoder_softmax': False, 'embed_dim': 256}}
