@@ -1143,9 +1143,10 @@ class EncoderTransformer_x2(nn.Module):
 def conv_diff(in_channels, out_channels):
     return nn.Sequential(
         nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-        nn.ReLU(),
         nn.BatchNorm2d(out_channels),
+        nn.ReLU(),
         nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+        nn.BatchNorm2d(out_channels),
         nn.ReLU()
     )
 
@@ -1154,8 +1155,8 @@ def conv_diff(in_channels, out_channels):
 def make_prediction(in_channels, out_channels):
     return nn.Sequential(
         nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-        nn.ReLU(),
         nn.BatchNorm2d(out_channels),
+        nn.ReLU(),
         nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
     )
 
@@ -1535,6 +1536,9 @@ class DecoderTransformer_v3(nn.Module):
             nn.BatchNorm2d(self.embedding_dim)
         )
 
+        # Decoder dropout (regularization after fusion)
+        self.dropout = nn.Dropout2d(p=0.1)
+
         # Final predction head
         self.convd2x = UpsampleConvLayer(self.embedding_dim, self.embedding_dim, kernel_size=4, stride=2)
         self.dense_2x = nn.Sequential(ResidualBlock(self.embedding_dim))
@@ -1542,9 +1546,9 @@ class DecoderTransformer_v3(nn.Module):
         self.dense_1x = nn.Sequential(ResidualBlock(self.embedding_dim))
         self.change_probability = ConvLayer(self.embedding_dim, self.output_nc, kernel_size=3, stride=1, padding=1)
 
-        # Final activation
-        self.output_softmax = decoder_softmax
-        self.active = nn.Sigmoid()
+        # Final activation (applied only when decoder_softmax=True)
+        self.apply_output_activation = decoder_softmax
+        self.active = nn.Softmax(dim=1)
 
     def _transform_inputs(self, inputs):
         """Transform inputs for decoder.
@@ -1618,11 +1622,8 @@ class DecoderTransformer_v3(nn.Module):
         # Linear Fusion of difference image from all scales
         _c = self.linear_fuse(torch.cat((_c4_up, _c3_up, _c2_up, _c1), dim=1))
 
-        # #Dropout
-        # if dropout_ratio > 0:
-        #     self.dropout = nn.Dropout2d(dropout_ratio)
-        # else:
-        #     self.dropout = None
+        # Decoder dropout (regularization)
+        _c = self.dropout(_c)
 
         # Upsampling x2 (x1/2 scale)
         x = self.convd2x(_c)
@@ -1638,7 +1639,7 @@ class DecoderTransformer_v3(nn.Module):
 
         outputs.append(cp)
 
-        if self.output_softmax:
+        if self.apply_output_activation:
             temp = outputs
             outputs = []
             for pred in temp:
@@ -1694,13 +1695,13 @@ class ChangeFormerV6(nn.Module):
         super(ChangeFormerV6, self).__init__()
         # Transformer Encoder
         self.embed_dims = [64, 128, 320, 512]
-        self.depths = [3, 3, 4, 3]  # [3, 3, 6, 18, 3]
+        self.depths = [3, 4, 6, 3]  # balanced: more capacity than [3,3,4,3], lighter than V5's [3,6,16,3]
         self.embedding_dim = embed_dim
         self.drop_rate = 0.1
         self.attn_drop = 0.1
         self.drop_path_rate = 0.1
 
-        self.Tenc_x2 = EncoderTransformer_v3(img_size=256, patch_size=7, in_chans=input_nc, num_classes=output_nc,
+        self.Tenc_x2 = EncoderTransformer_v3(img_size=256, patch_size=3, in_chans=input_nc, num_classes=output_nc,
                                              embed_dims=self.embed_dims,
                                              num_heads=[1, 2, 4, 8], mlp_ratios=[4, 4, 4, 4], qkv_bias=True,
                                              qk_scale=None, drop_rate=self.drop_rate,
@@ -1713,7 +1714,8 @@ class ChangeFormerV6(nn.Module):
                                              align_corners=False,
                                              in_channels=self.embed_dims, embedding_dim=self.embedding_dim,
                                              output_nc=output_nc,
-                                             decoder_softmax=decoder_softmax, feature_strides=[2, 4, 8, 16])
+                                             decoder_softmax=decoder_softmax,
+                                             feature_strides=[4, 8, 16, 32])
 
     def forward(self, x1, x2):
         [fx1, fx2] = [self.Tenc_x2(x1), self.Tenc_x2(x2)]

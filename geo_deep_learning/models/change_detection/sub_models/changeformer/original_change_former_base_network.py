@@ -121,11 +121,13 @@ class ResidualBlock(torch.nn.Module):
         self.conv1 = ConvLayer(channels, channels, kernel_size=3, stride=1, padding=1)
         self.conv2 = ConvLayer(channels, channels, kernel_size=3, stride=1, padding=1)
         self.relu = nn.ReLU()
+        # Learnable residual scaling (initialized at 0.1 for stability, adapts during training)
+        self.res_scale = nn.Parameter(torch.tensor(0.1))
 
     def forward(self, x):
         residual = x
         out = self.relu(self.conv1(x))
-        out = self.conv2(out) * 0.1
+        out = self.conv2(out) * self.res_scale
         out = torch.add(out, residual)
         return out
 
