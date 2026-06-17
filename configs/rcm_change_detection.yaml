@@ -130,7 +130,7 @@ model:
 
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
-    # weights_from_checkpoint_path: /app/model_checkpoints/2026_7_A_2023_mask_water_rel_orbs_changeformer_focal-lovasz_fire_id_cosw_all-epoch=29-val_loss=0.334.ckpt
+    weights_from_checkpoint_path: /app/model_checkpoints/2026_8_A_2023_2025_mask_water_rel_orbs_changeformer_focal-lovasz_fire_id_cosw_all_test-epoch=01-val_loss=0.389.ckpt
 
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
@@ -182,4 +182,5 @@ data:
     #- 'C'
     satellite_pass:   # AVAILABLE: ['Ascending','Descending']
     dataset_years:
-    #- 2025
+    - 2025
+    - 2023
