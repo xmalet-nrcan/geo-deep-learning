@@ -1577,8 +1577,8 @@ class DecoderTransformer_v3(nn.Module):
 
     def forward(self, inputs1, inputs2):
         # Transforming encoder features (select layers)
-        x_1 = self._transform_inputs(inputs1)  # len=4, 1/2, 1/4, 1/8, 1/16
-        x_2 = self._transform_inputs(inputs2)  # len=4, 1/2, 1/4, 1/8, 1/16
+        x_1 = self._transform_inputs(inputs1)  # len=4, 1/4, 1/8, 1/16, 1/32
+        x_2 = self._transform_inputs(inputs2)  # len=4, 1/4, 1/8, 1/16, 1/32
 
         # img1 and img2 features
         c1_1, c2_1, c3_1, c4_1 = x_1
@@ -1596,31 +1596,32 @@ class DecoderTransformer_v3(nn.Module):
         outputs.append(p_c4)
         _c4_up = resize(_c4, size=c1_2.size()[2:], mode='bilinear', align_corners=False)
 
-        # Stage 3: x1/16 scale
+        # Stage 3: x1/16 scale (use c3's size as target instead of scale_factor=2)
         _c3_1 = self.linear_c3(c3_1).permute(0, 2, 1).reshape(n, -1, c3_1.shape[2], c3_1.shape[3])
         _c3_2 = self.linear_c3(c3_2).permute(0, 2, 1).reshape(n, -1, c3_2.shape[2], c3_2.shape[3])
-        _c3 = self.diff_c3(torch.cat((_c3_1, _c3_2), dim=1)) + F.interpolate(_c4, scale_factor=2, mode="bilinear")
+        _c3 = self.diff_c3(torch.cat((_c3_1, _c3_2), dim=1)) + F.interpolate(_c4, size=c3_1.shape[2:], mode="bilinear", align_corners=False)
         p_c3 = self.make_pred_c3(_c3)
         outputs.append(p_c3)
         _c3_up = resize(_c3, size=c1_2.size()[2:], mode='bilinear', align_corners=False)
 
-        # Stage 2: x1/8 scale
+        # Stage 2: x1/8 scale (use c2's size as target)
         _c2_1 = self.linear_c2(c2_1).permute(0, 2, 1).reshape(n, -1, c2_1.shape[2], c2_1.shape[3])
         _c2_2 = self.linear_c2(c2_2).permute(0, 2, 1).reshape(n, -1, c2_2.shape[2], c2_2.shape[3])
-        _c2 = self.diff_c2(torch.cat((_c2_1, _c2_2), dim=1)) + F.interpolate(_c3, scale_factor=2, mode="bilinear")
+        _c2 = self.diff_c2(torch.cat((_c2_1, _c2_2), dim=1)) + F.interpolate(_c3, size=c2_1.shape[2:], mode="bilinear", align_corners=False)
         p_c2 = self.make_pred_c2(_c2)
         outputs.append(p_c2)
         _c2_up = resize(_c2, size=c1_2.size()[2:], mode='bilinear', align_corners=False)
 
-        # Stage 1: x1/4 scale
+        # Stage 1: x1/4 scale (use c1's size as target)
         _c1_1 = self.linear_c1(c1_1).permute(0, 2, 1).reshape(n, -1, c1_1.shape[2], c1_1.shape[3])
         _c1_2 = self.linear_c1(c1_2).permute(0, 2, 1).reshape(n, -1, c1_2.shape[2], c1_2.shape[3])
-        _c1 = self.diff_c1(torch.cat((_c1_1, _c1_2), dim=1)) + F.interpolate(_c2, scale_factor=2, mode="bilinear")
+        _c1 = self.diff_c1(torch.cat((_c1_1, _c1_2), dim=1)) + F.interpolate(_c2, size=c1_1.shape[2:], mode="bilinear", align_corners=False)
         p_c1 = self.make_pred_c1(_c1)
         outputs.append(p_c1)
 
         # Linear Fusion of difference image from all scales
         _c = self.linear_fuse(torch.cat((_c4_up, _c3_up, _c2_up, _c1), dim=1))
+        _c = F.relu(_c)  # Activation after BN (standard BN→ReLU pattern)
 
         # Decoder dropout (regularization)
         _c = self.dropout(_c)
