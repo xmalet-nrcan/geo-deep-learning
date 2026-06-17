@@ -1,6 +1,8 @@
 """RcmChangeDetectionDataModule."""
+import csv
 import logging
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Optional, List, Iterable, Type
 
 import numpy as np
@@ -184,6 +186,78 @@ class RcmChangeDetectionDataModule(LightningDataModule):
                 self.dataset, self.split_ratios,
                 generator=torch.Generator().manual_seed(42)
             )
+        self._log_split_contents()
+
+    def _log_split_contents(self) -> None:
+        """Log and save to CSV the unique fire IDs and group IDs in each split.
+
+        Produces one CSV per split (train/val/test) with columns:
+            split, db_nbac_fire_id, group_id_pre, group_id_post, cell_id, beam, sat_pass
+
+        Files are saved to the current working directory as:
+            split_contents_train.csv, split_contents_val.csv, split_contents_test.csv
+        """
+        splits = {
+            "train": self.train_dataset,
+            "val": self.val_dataset,
+            "test": self.test_dataset,
+        }
+
+        for split_name, subset in splits.items():
+            if subset is None:
+                continue
+
+            # Extract indices from Subset or RandomSplit
+            if hasattr(subset, "indices"):
+                indices = subset.indices
+            else:
+                indices = range(len(subset))
+
+            # Collect unique identifiers
+            fire_ids = set()
+            group_ids = set()
+            rows = []
+            for idx in indices:
+                sample = self.dataset.files[idx]
+                fire_id = sample.get("db_nbac_fire_id", sample.get("event_id", "N/A"))
+                gid_pre = sample.get("group_id_pre", "N/A")
+                gid_post = sample.get("group_id_post", "N/A")
+                cell_id = sample.get("cell_id", "N/A")
+                beam = sample.get("beam", "N/A")
+                sat_pass = sample.get("sat_pass", "N/A")
+
+                fire_ids.add(str(fire_id))
+                group_ids.add((str(gid_pre), str(gid_post)))
+                rows.append({
+                    "split": split_name,
+                    "db_nbac_fire_id": fire_id,
+                    "group_id_pre": gid_pre,
+                    "group_id_post": gid_post,
+                    "cell_id": cell_id,
+                    "beam": beam.name if hasattr(beam, "name") else beam,
+                    "sat_pass": sat_pass.name if hasattr(sat_pass, "name") else sat_pass,
+                })
+
+            # Log summary
+            logger.info(
+                "Split %-5s: %d samples, %d unique fires, %d unique group pairs",
+                split_name, len(indices), len(fire_ids), len(group_ids),
+            )
+            logger.info(
+                "  Fire IDs (%s): %s",
+                split_name, sorted(fire_ids),
+            )
+
+            # Save CSV
+            csv_path = Path(self.csv_root_folder) / f"split_contents_{split_name}.csv"
+            fieldnames = ["split", "db_nbac_fire_id", "group_id_pre", "group_id_post",
+                          "cell_id", "beam", "sat_pass"]
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+
+            logger.info("  Saved split details to %s", csv_path.resolve())
 
     def train_dataloader(self) -> DataLoader[Any]:
         """Dataloader for training."""
