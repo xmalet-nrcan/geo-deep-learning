@@ -381,6 +381,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             time_delta_bin = self._extract_time_delta_bin(
                 data.get("group_date_pre"), data.get("group_date_post"),
             )
+            decoded_year = self._decode_year_processing(data.get("group_date_pre"))
         else:
             # ── LEGACY MODE: concatenate metadata bands ─────────────────
             # Add common mask as first band + sat_pass/beam bands
@@ -439,6 +440,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             sample["pre_season"] = pre_month_value  # type: ignore[possibly-undefined]
             sample["post_season"] = post_month_value  # type: ignore[possibly-undefined]
             sample["time_delta_bin"] = time_delta_bin  # type: ignore[possibly-undefined]
+            sample["processing_year"] = decoded_year    # type: ignore[possibly-undefined]
 
         sample.update(self._get_metadata(data))
 
@@ -515,7 +517,7 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
     @staticmethod
     def _extract_month(date_str: str | None) -> int:
-        """Extract meteorological season from a date string (YYYY-MM-DD or YYYYMMDD).
+        """Extract month from a date string (YYYY-MM-DD or YYYYMMDD).
 
         Returns:
             month number
@@ -531,7 +533,28 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         # Meteorological seasons: DJF=0, MAM=1, JJA=2, SON=3
         return month
 
+    @staticmethod
+    def _decode_year_processing(date_str: str | None) -> int:
+        """Extract meteorological season from a date string (YYYY-MM-DD or YYYYMMDD).
 
+        Returns:
+            month number
+        """
+        if date_str is None:
+            return 0  # default to summer (fire season)
+        try:
+            # Handle both 'YYYY-MM-DD' and 'YYYYMMDD' formats
+            from datetime import datetime
+
+            clean = str(date_str).replace("-", "")
+            dt_cleaned = datetime.strptime(clean, "%Y%m%d")
+        except (ValueError, IndexError):
+            return 0  # default
+        # Meteorological seasons: DJF=0, MAM=1, JJA=2, SON=3
+        if dt_cleaned.year == 2023:
+            return 1
+        else:
+            return 2
 
     @staticmethod
     def _extract_time_delta_bin(

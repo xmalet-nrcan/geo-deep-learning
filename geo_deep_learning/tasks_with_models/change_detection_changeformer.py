@@ -284,6 +284,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 "pre_season": 13,     # 13 , month number + 0 if undefined
                 "post_season": 13,    # 13 , month number + 0 if undefined
                 "time_delta": 5,     # 0-4d / 4-12d / 12-24d / 24-48d / 48d+
+                "processing_year" : 3   #0 : undefined, 1: 2023, 2: <> 2023
             }
 
         self.model = ChangeDetectionModel(
