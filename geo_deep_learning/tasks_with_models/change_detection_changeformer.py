@@ -936,7 +936,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 rgb_indices = available[:3]
 
             # Minimum burned pixel ratio to include a sample in visualizations
-            min_burned_ratio = 0.30
+            min_burned_ratio = 0.1
 
             for i in range(len(image_batch)):
                 if num_logged >= num_samples:

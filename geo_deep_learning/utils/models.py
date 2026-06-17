@@ -30,7 +30,14 @@ def load_weights_from_checkpoint(
     logger.info("Loading weights from checkpoint: %s", checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location=map_location)
     state_dict = checkpoint.get("state_dict", checkpoint)
-    state_dict = {k.removeprefix("model."): v for k, v in state_dict.items()}
+    # Lightning checkpoints store the full LightningModule state: model weights,
+    # augmentation modules (_geo_aug, _pad_aug), metrics, etc.
+    # Keep only keys belonging to the inner model (prefix "model.") and strip it.
+    state_dict = {
+        k.removeprefix("model."): v
+        for k, v in state_dict.items()
+        if k.startswith("model.")
+    }
     if load_parts is not None:
         if isinstance(load_parts, str):
             load_parts = [load_parts]
