@@ -77,8 +77,18 @@ model:
     deep_supervision: true  # use all ChangeFormer decoder heads for loss
     # deep_supervision_weights: [0.1, 0.1, 0.15, 0.2, 1.0]  # per-head weights (c4→c1→final)
     speckle_noise_std: 0.15  # SAR-specific multiplicative speckle augmentation
-    use_metadata_film: true   # encode SAT_PASS/BEAM via FiLM instead of constant bands
-    film_embed_dim: 32        # embedding dimension for FiLM conditionerl
+    # --- Conditioning & regularization modules ---
+    use_metadata_film: true       # encode SAT_PASS/BEAM via FiLM instead of constant bands
+    film_embed_dim: 32            # embedding dimension for FiLM conditionerl
+
+    use_cbam: true                # Channel + Spatial Attention (après FiLM)
+    cbam_reduction: 4             # ratio de réduction (4 = par défaut)
+
+    use_channel_dropout: true     # Drop aléatoire de bandes SAR (train only)
+    channel_dropout_prob: 0.1     # prob de drop par canal (0.1 = conservateur)
+
+    use_dfa: true                 # Difference Feature Attention (decoder)
+    dfa_gate_hidden: 16           # taille du MLP de gating
 
 
     main_loss:
