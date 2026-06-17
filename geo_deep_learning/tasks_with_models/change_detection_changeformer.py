@@ -72,6 +72,12 @@ class ChangeDetectionChangeFormer(LightningModule):
             speckle_noise_std: float = 0.15,
             use_metadata_film: bool = True,
             film_embed_dim: int = 32,
+            use_cbam: bool = False,
+            cbam_reduction: int = 4,
+            use_channel_dropout: bool = False,
+            channel_dropout_prob: float = 0.1,
+            use_dfa: bool = False,
+            dfa_gate_hidden: int = 16,
             **kwargs: object,  # noqa: ARG002
     ) -> None:
         """Initialize the model.
@@ -89,6 +95,15 @@ class ChangeDetectionChangeFormer(LightningModule):
                 and ``batch["beam_value"]`` and used for FiLM conditioning.
                 Requires ``separate_metadata=True`` on the DataModule.
             film_embed_dim: Embedding dimension for the FiLM conditioner.
+            use_cbam: Apply CBAM (Channel & Spatial Attention) after FiLM.
+                Helps focus on relevant bands and spatial regions.
+            cbam_reduction: Channel attention reduction ratio for CBAM.
+            use_channel_dropout: Randomly drop input channels during training.
+                Improves robustness to noisy SAR bands.
+            channel_dropout_prob: Probability of dropping each channel.
+            use_dfa: Apply Difference Feature Attention on decoder outputs.
+                Gates unreliable intermediate predictions.
+            dfa_gate_hidden: Hidden dim for DFA gating MLP.
         """
         super().__init__()
         self.save_hyperparameters()
@@ -122,6 +137,14 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.speckle_noise_std = speckle_noise_std
         self.use_metadata_film = use_metadata_film
         self.film_embed_dim = film_embed_dim
+
+        # Additional conditioning / regularization modules
+        self.use_cbam = use_cbam
+        self.cbam_reduction = cbam_reduction
+        self.use_channel_dropout = use_channel_dropout
+        self.channel_dropout_prob = channel_dropout_prob
+        self.use_dfa = use_dfa
+        self.dfa_gate_hidden = dfa_gate_hidden
 
         self.changed_num_classes = num_classes + 1 if num_classes == 1 else num_classes
         self.labels = (
@@ -294,6 +317,12 @@ class ChangeDetectionChangeFormer(LightningModule):
             use_metadata_film=self.use_metadata_film,
             film_embed_dim=self.film_embed_dim,
             film_metadata_fields=film_metadata_fields,
+            use_cbam=self.use_cbam,
+            cbam_reduction=self.cbam_reduction,
+            use_channel_dropout=self.use_channel_dropout,
+            channel_dropout_prob=self.channel_dropout_prob,
+            use_dfa=self.use_dfa,
+            dfa_gate_hidden=self.dfa_gate_hidden,
         )
 
         if self.weights_from_checkpoint_path:
