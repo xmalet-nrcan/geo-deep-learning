@@ -518,6 +518,10 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.train_precision.reset()
         self.train_recall.reset()
 
+    def on_validation_epoch_start(self) -> None:
+        """Reset visualization counter at the start of each validation epoch."""
+        self._total_samples_visualized = 0
+
     def validation_step(
             self,
             batch: dict[str, Any],
@@ -558,6 +562,19 @@ class ChangeDetectionChangeFormer(LightningModule):
                     self.val_precision(vp, vt)
                     self.val_recall(vp, vt)
 
+        # --- Visualisations en validation ---
+        if self._total_samples_visualized < self.max_samples:
+            remaining = self.max_samples - self._total_samples_visualized
+            samples_to_visualize = min(remaining, len(x_post))
+            self._total_samples_visualized += self._log_visualizations(
+                trainer=self.trainer,
+                batch=batch,
+                outputs=logits,
+                max_samples=samples_to_visualize,
+                artifact_prefix="val",
+                epoch_suffix=True,
+            )
+
         return logits
 
     def on_validation_epoch_end(self):
@@ -585,6 +602,10 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.val_f1.reset()
         self.val_precision.reset()
         self.val_recall.reset()
+
+    def on_test_epoch_start(self) -> None:
+        """Reset visualization counter at the start of each test epoch."""
+        self._total_samples_visualized = 0
 
     def test_step(
             self,
