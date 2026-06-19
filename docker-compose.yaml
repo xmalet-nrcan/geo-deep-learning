@@ -1,81 +1,60 @@
+x-gpu-service: &gpu-defaults
+  build:
+    dockerfile: Dockerfile
+  runtime: nvidia
+  user: '9005'
+  shm_size: '32gb'
+  environment: &gpu-env
+    - PYTORCH_ALLOC_CONF=expandable_segments:True
+    - NVIDIA_VISIBLE_DEVICES=all
+    - CUDA_LAUNCH_BLOCKING=1
+    - TORCH_USE_CUDA_DSA=1
+    - CLI_COMMAND=fit
+  volumes: &train-volumes
+    - "/mnt/geospatial/projet_RCM_scanfire:/mnt/geospatial/projet_RCM_scanfire:rw"
+    - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/model_checkpoints:rw"
+    - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
+  entrypoint: &train-entrypoint >
+    sh -c '
+      echo "Running in mode $$CLI_COMMAND";
+      export CMD="python /app/geo_deep_learning/train.py $$CLI_COMMAND --config /app/configs/model_conf.yaml";
+      echo "Running: $$CMD";
+      exec $$CMD;
+    '
+  deploy: &gpu-deploy
+    resources:
+      reservations:
+        devices:
+        - driver: nvidia
+          count: 1
+          capabilities: [gpu]
+
 services:
+  # === Training: ChangeFormer (default) ===
   geo-deep-learning:
-    build:
-      dockerfile: Dockerfile
-    environment:
-      - PYTORCH_ALLOC_CONF=expandable_segments:True
-      - NVIDIA_VISIBLE_DEVICES=all
-      - CUDA_LAUNCH_BLOCKING=1
-      - TORCH_USE_CUDA_DSA=1
-      # --- Sous-commande Lightning CLI : fit | validate | test | predict ---
-      - CLI_COMMAND=fit
-    runtime: nvidia
-    user: '9005'
-    shm_size: '32gb'
+    <<: *gpu-defaults
     container_name: geo-deep-learning
     volumes:
-      # MOUNT THE DATASET REPO
       - "/mnt/geospatial/projet_RCM_scanfire:/mnt/geospatial/projet_RCM_scanfire:rw"
-      # MOUNT THE CONFIG
-      #- "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection.yaml:/app/configs/model_conf.yaml"
-      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection_changestar2.yaml:/app/configs/model_conf.yaml"
-      # MOUNT THE MODEL CHECKPOINTS AND LOGS
+      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection.yaml:/app/configs/model_conf.yaml"
       - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/model_checkpoints:rw"
       - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
-    entrypoint: >
-      sh -c '
-        echo "Running in mode $$CLI_COMMAND";
-        export CMD="python /app/geo_deep_learning/train.py $$CLI_COMMAND --config /app/configs/model_conf.yaml";
-        echo "Running: $$CMD";
-        exec $$CMD;
-      '
-    deploy:
-      resources:
-        reservations:
-          devices:
-          - driver: nvidia
-            count: 1
-            capabilities: [gpu]
 
-  # === Second training job: ChangeStar2 ===
+  # === Training: ChangeStar2 ===
   geo-deep-learning-cs2:
-    build:
-      dockerfile: Dockerfile
-    environment:
-      - PYTORCH_ALLOC_CONF=expandable_segments:True
-      - NVIDIA_VISIBLE_DEVICES=all
-      - CUDA_LAUNCH_BLOCKING=1
-      - TORCH_USE_CUDA_DSA=1
-      - CLI_COMMAND=fit
-    runtime: nvidia
-    user: '9005'
-    shm_size: '32gb'
+    <<: *gpu-defaults
     container_name: geo-deep-learning-cs2
     volumes:
       - "/mnt/geospatial/projet_RCM_scanfire:/mnt/geospatial/projet_RCM_scanfire:rw"
-
       - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection_changestar2.yaml:/app/configs/model_conf.yaml"
       - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/model_checkpoints:rw"
       - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
-    entrypoint: >
-      sh -c '
-        echo "Running in mode $$CLI_COMMAND";
-        export CMD="python /app/geo_deep_learning/train.py $$CLI_COMMAND --config /app/configs/model_conf.yaml";
-        echo "Running: $$CMD";
-        exec $$CMD;
-      '
-    deploy:
-      resources:
-        reservations:
-          devices:
-          - driver: nvidia
-            count: 1
-            capabilities: [gpu]
 
+  # === Event Detection Orchestrator ===
   event_detection_orchestrator:
     build:
       context: .
-      dockerfile: orchestrator.Dockerfile    # ← [3] Dockerfile dédié avec deps firescan
+      dockerfile: orchestrator.Dockerfile
     runtime: nvidia
     shm_size: '32gb'
     container_name: event_detection_orchestrator
@@ -86,30 +65,15 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - PYTORCH_ALLOC_CONF=expandable_segments:True
-      # ← [1] DATABASE_URL MANQUANT — AJOUTÉ
       - POLL_INTERVAL_SECONDS=30
       - LOGGER_LEVEL=INFO
-      #- CSV_OUTPUT_DIR=/mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
-      # ← [6] PREDICTIONS_DIR doit matcher predict_output_dir du YAML (sans trailing slash)
-      #- PREDICTIONS_DIR=/mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
       - PREDICT_CONFIG=/app/configs/model_conf.yaml
     volumes:
-      # Données RCM
       - "/mnt/geospatial/projet_RCM_scanfire:/mnt/geospatial/projet_RCM_scanfire:rw"
-      # Config du modèle
       - "./configs/rcm_change_detection_predict.yaml:/app/configs/model_conf.yaml:ro"
-      # Checkpoints
       - "./models_checkpoints:/app/model_checkpoints:rw"
       - "./lightning_logs:/app/lightning_logs:rw"
-      # L'orchestrateur lui-même
-      # - "../firescan/firescan_modules/module_specific/orchestrator/orchestrator.py:/app/orchestrator.py:ro"
-      # Module d'ingestion firescan (Phase 2)
       - "../scanfire/scanfire_modules:/app/scanfire_modules:ro"
     entrypoint: [ "python", "/app/scanfire_modules/pipeline/orchestrator/segmentation_orchestrator.py" ]
     deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [ gpu ]
+      <<: *gpu-deploy
