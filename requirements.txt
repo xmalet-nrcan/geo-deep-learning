@@ -21,4 +21,4 @@ hydra-colorlog
 tensorboard
 tensorboardX
 rich
-ever-beta
+#ever-beta
