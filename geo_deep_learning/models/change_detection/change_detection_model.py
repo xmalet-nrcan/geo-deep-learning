@@ -28,8 +28,7 @@ class ChangeDetectionModel(BaseSegmentationModel):
     input channels *before* the Transformer encoder, letting the network learn
     acquisition-specific adjustments without wasting encoder capacity.
     """
-    # TODO : For now, only use ChangeFormer. Add more models later.
-    #  ChangeFormer: https://github.com/wgcban/ChangeFormer.git
+
     def __init__(self, change_detection_model: str = "changeformer",
                  in_channels: int = 3,
                  out_channels: int = 2,
