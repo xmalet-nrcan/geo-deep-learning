@@ -47,10 +47,8 @@ trainer:
     - class_path: lightning.pytorch.callbacks.GradientAccumulationScheduler
       init_args:
         scheduling:
-          0: 8      # epochs 0-19:   8×8 = 64 effective batch size (smooth start)
-          20: 4     # epochs 20-49:  8×4 = 32 effective batch size
-          50: 2     # epochs 50-99:  8×2 = 16 effective batch size
-          100: 1    # epochs 100+:   8×1 = 8  effective batch size (max stochasticity)
+          0: 4      # epochs 0-19:   8×8 = 64 effective batch size (smooth start)
+
   max_epochs: 240
   check_val_every_n_epoch: 1
 
@@ -114,25 +112,18 @@ model:
         - 0.9
         - 0.999
     scheduler:
-      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
+      class_path: torch.optim.lr_scheduler.CosineAnnealingLR
       init_args:
-        T_0: 10       # first cycle = 10 epochs
-        T_mult: 2     # each subsequent cycle doubles: 10→20→40→80 epochs
+        T_max: 240
         eta_min: 1e-6
 
-      #class_path: torch.optim.lr_scheduler.OneCycleLR
-      #init_args:
-      #  max_lr: 1e-4
-      #  epochs: 20
-      #  pct_start: 0.1
-      #  anneal_strategy: "cos"
     scheduler_config:
       interval: "epoch"   # epoch-based: unaffected by GradientAccumulationScheduler changes
       frequency: 1
 
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
-    # weights_from_checkpoint_path: /app/model_checkpoints/2026_8_A_2023_2025_mask_water_rel_orbs_changeformer_focal-lovasz_fire_id_cosw_all_test-epoch=01-val_loss=0.389.ckpt
+    weights_from_checkpoint_path: /app/model_checkpoints/2026_8_A_2023_2025_mask_water_rel_orbs_changeformer7_focal-lovasz_fire_id_cosw_all_attention-epoch=49-val_loss=0.248.ckpt
 
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
@@ -152,6 +143,12 @@ data:
     #csv_file_name:  pre_post_datasets_all.csv
     #csv_file_name: pre_post_datasets.csv
     split_ratios: [0.8 ,0.1, 0.1]
+
+    # --- Tiling (for high-resolution data, e.g. 20m → 1000×1000 pixels) ---
+    # Uncomment to split large images into overlapping patches.
+    # Images smaller than tile_size are returned as-is (backward compatible).
+    # tile_size: [512, 512]       # crop size per tile; null = no tiling
+    # tile_stride: [256, 256]     # stride < tile_size → overlap; null = same as tile_size
 
     #band_names: [ 'LOCALINCANGLE', 'RL','RR' ] # RCM INPUT (non-polarimetric intensity)
     # MCHI + LIA = S0, Pdn, Psn Pvn + LIA
