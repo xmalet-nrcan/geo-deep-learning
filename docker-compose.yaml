@@ -37,6 +37,41 @@ services:
             count: 1
             capabilities: [gpu]
 
+  # === Second training job: ChangeStar2 ===
+  geo-deep-learning-cs2:
+    build:
+      dockerfile: Dockerfile
+    environment:
+      - PYTORCH_ALLOC_CONF=expandable_segments:True
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_LAUNCH_BLOCKING=1
+      - TORCH_USE_CUDA_DSA=1
+      - CLI_COMMAND=fit
+    runtime: nvidia
+    user: '9005'
+    shm_size: '32gb'
+    container_name: geo-deep-learning-cs2
+    volumes:
+      - "/mnt/geospatial/projet_RCM_scanfire:/mnt/geospatial/projet_RCM_scanfire:rw"
+
+      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection_changestar2.yaml:/app/configs/model_conf.yaml"
+      - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/model_checkpoints:rw"
+      - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
+    entrypoint: >
+      sh -c '
+        echo "Running in mode $$CLI_COMMAND";
+        export CMD="python /app/geo_deep_learning/train.py $$CLI_COMMAND --config /app/configs/model_conf.yaml";
+        echo "Running: $$CMD";
+        exec $$CMD;
+      '
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
   event_detection_orchestrator:
     build:
       context: .
