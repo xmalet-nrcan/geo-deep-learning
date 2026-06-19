@@ -6,7 +6,7 @@ seed_everything: true
   model_dir: &model_dir ./model_checkpoints/2026/changestar2
   data_dir: &data_dir /mnt/geospatial/projet_RCM_scanfire/
   patches_dir: &patches_dir /mnt/geospatial/projet_RCM_scanfire/grided_folder
-  run_name: &run_name 2026/changestar2/cs2base_A_y23-25_water_film-chdrop_focal-lovasz_cosw240
+  run_name: &run_name 2026/changestar2/cs2base_A_y23-25_water_film-chdrop_focal-lovasz_1cycle
 
 trainer:
 #  detect_anomaly: true
@@ -105,19 +105,23 @@ model:
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
-        lr: 1e-4
+        lr: 1e-4              # base lr (OneCycleLR uses this as initial, ramps to max_lr)
         weight_decay: 0.01
         betas:
         - 0.9
         - 0.999
     scheduler:
-      class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+      class_path: torch.optim.lr_scheduler.OneCycleLR
       init_args:
-        T_max: 240
-        eta_min: 1e-6
+        max_lr: 6e-4          # peak lr (~6× base lr is a good default)
+        pct_start: 0.3        # 30% warmup, 70% cosine decay
+        anneal_strategy: cos  # cosine annealing (smoother than linear)
+        div_factor: 6         # initial lr = max_lr / div_factor = 6e-4 / 6 = 1e-4
+        final_div_factor: 100 # final lr = max_lr / (div_factor × final_div_factor) ≈ 1e-6
+        total_steps: null     # auto-computed by Lightning from trainer config
 
     scheduler_config:
-      interval: "epoch"   # epoch-based: unaffected by GradientAccumulationScheduler changes
+      interval: "step"        # OneCycleLR MUST step per batch, not per epoch
       frequency: 1
 
     class_labels: [ "unburn", "burn" ]
