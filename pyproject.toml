@@ -1,7 +1,7 @@
 [project]
 name = "geo-deep-learning"
 version = "0.9.0"
-requires-python = ">=3.12.0,<3.13"
+requires-python = ">=3.12.0,<3.20"
 dependencies = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
@@ -19,6 +19,7 @@ dependencies = [
     "colorlog>=6.7.0",
     "PyYAML>=6.0",
     "jsonargparse[all]>=4.27.7",
+    "ever-beta"
     ]
 
 [project.optional-dependencies]
