@@ -12,6 +12,7 @@ def load_weights_from_checkpoint(
     checkpoint_path: str,
     load_parts: str | list[str] | None = None,
     map_location: torch.device | None = None,
+    strict: bool = False,
 ) -> tuple[list[str], list[str]] | None:
     """
     Load weights from a checkpoint into a model.
@@ -21,6 +22,10 @@ def load_weights_from_checkpoint(
         checkpoint_path: Path to the checkpoint file
         load_parts: List of model parts to load (e.g., ["encoder", "neck"])
         map_location: Optional device mapping for loading the checkpoint
+        strict: If True, raises on mismatched keys. If False (default),
+            loads compatible weights and logs warnings for the rest.
+            Use strict=False when transferring between model variants
+            (e.g. ChangeFormerV6 → V7).
 
     Returns:
         Tuple of (missing_keys, unexpected_keys) if selective loading,
@@ -69,5 +74,22 @@ def load_weights_from_checkpoint(
         logger.info("Unexpected keys: %s", len(result.unexpected_keys))
         return result
 
-    model.load_state_dict(state_dict)
-    return None
+    result = model.load_state_dict(state_dict, strict=strict)
+    n_loaded = len(state_dict) - len(result.unexpected_keys)
+    n_total = len(dict(model.named_parameters())) + len(dict(model.named_buffers()))
+    logger.info(
+        "Loaded %d/%d parameters from checkpoint.", n_loaded, n_total,
+    )
+    if result.missing_keys:
+        logger.warning(
+            "Missing keys (%d) — these layers will be randomly initialized: %s",
+            len(result.missing_keys),
+            result.missing_keys[:10],
+        )
+    if result.unexpected_keys:
+        logger.warning(
+            "Unexpected keys (%d) — these checkpoint weights were ignored: %s",
+            len(result.unexpected_keys),
+            result.unexpected_keys[:10],
+        )
+    return result

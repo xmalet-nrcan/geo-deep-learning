@@ -44,6 +44,8 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             split_on_columns: Optional[str | list] = None,
             dataset_class: Type[RCMChangeDetectionDataset] = RCMChangeDetectionDataset,
             separate_metadata: bool = True,
+            tile_size: tuple[int, int] | None = None,
+            tile_stride: tuple[int, int] | None = None,
 
     ) -> None:
         """Initialize RcmChangeDetectionDataModule.
@@ -53,6 +55,11 @@ class RcmChangeDetectionDataModule(LightningDataModule):
                 concatenate COMMON_MASK / SAT_PASS / BEAM to the image tensors.
                 Instead they are returned as separate dict entries for FiLM
                 conditioning.  Set to False for legacy 13-channel behaviour.
+            tile_size: Crop size for tiling large images (e.g. ``(512, 512)``).
+                Images smaller than this are returned as-is.
+                ``None`` (default) disables tiling entirely.
+            tile_stride: Step between tile origins.  Defaults to *tile_size*
+                (no overlap).  Use a smaller value for overlapping tiles.
         """
         super().__init__()
 
@@ -75,6 +82,8 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self.dataset_class = dataset_class
         self._dataset_years = dataset_years
         self.separate_metadata = separate_metadata
+        self.tile_size = tile_size
+        self.tile_stride = tile_stride
 
         self.dataset: RCMChangeDetectionDataset = None
         if split_on_columns is None:
@@ -97,6 +106,8 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             beams=self.beams,
             dataset_years=self._dataset_years,
             separate_metadata=self.separate_metadata,
+            tile_size=self.tile_size,
+            tile_stride=self.tile_stride,
         )
 
         if stage != "predict":

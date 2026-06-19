@@ -10,6 +10,7 @@ from typing import Optional, List, Any
 import numpy as np
 import pandas as pd
 import rasterio as rio
+from rasterio.transform import Affine
 from geo_deep_learning.datasets.change_detection_dataset import ChangeDetectionDataset
 from geo_deep_learning.utils.tensors import manage_bands
 from numpy import ndarray, dtype
@@ -129,6 +130,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                  beams: Optional[List[str]] = None,
                  dataset_years: Optional[list[int]] = None,
                  separate_metadata: bool = True,
+                 tile_size: tuple[int, int] | None = None,
+                 tile_stride: tuple[int, int] | None = None,
                  ) -> None:
         """Initialize RCM Change Detection Dataset.
 
@@ -140,8 +143,20 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
                 This reduces ``in_channels`` by 3 and allows the model to use
                 learned embeddings (FiLM) instead of wasting encoder capacity on
                 constant spatial bands.
+            tile_size: When set (e.g. ``(512, 512)``), source images larger
+                than this are split into a grid of tiles at load time.
+                Images that already fit within *tile_size* are returned
+                unchanged.  Set to ``None`` (default) to disable tiling and
+                preserve the current behaviour.
+            tile_stride: Step between tile origins.  Defaults to *tile_size*
+                (no overlap).  Set smaller than *tile_size* for overlap
+                (e.g. ``(256, 256)`` with ``tile_size=(512, 512)``).
         """
         self.separate_metadata = separate_metadata
+        # Tiling parameters — must be set before super().__init__() because
+        # it triggers _load_files() → _expand_files_with_tiles().
+        self.tile_size = tile_size
+        self.tile_stride = tile_stride if tile_stride is not None else tile_size
         # Set bands index and band names
         if band_names is not None:
             self.bands = band_names_to_indices(band_names)
@@ -217,6 +232,9 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             sum(1 for f in files if f["mask"] is None),
         )
 
+        if self.tile_size is not None:
+            files = self._expand_files_with_tiles(files)
+
         return files
 
     def _get_water_mask_path(self, cell_id) -> Path | Any:
@@ -229,6 +247,97 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             logger.debug("Water mask not found, setting to None: %s", water_mask_path)
             water_mask_path = None
         return water_mask_path
+
+    # ------------------------------------------------------------------
+    # Tiling helpers
+    # ------------------------------------------------------------------
+
+    def _expand_files_with_tiles(self, files: list[dict]) -> list[dict]:
+        """Expand file entries into per-tile entries for images larger than *tile_size*.
+
+        Images that already fit within *tile_size* are returned unchanged (no
+        ``_tile_*`` keys added).  Larger images are split into a grid of tiles
+        that guarantees full coverage; edge tiles are shifted inward so every
+        tile has exactly *tile_size* dimensions.
+
+        This method is called at the end of :meth:`_load_files` and is a no-op
+        when ``self.tile_size is None``.
+        """
+        tile_h, tile_w = self.tile_size
+        stride_h, stride_w = self.tile_stride
+        n_files = len(files)
+
+        expanded: list[dict] = []
+        for entry in files:
+            with rio.open(entry["image"]) as src:
+                img_h, img_w = src.height, src.width
+
+            if img_h <= tile_h and img_w <= tile_w:
+                # Image fits in one tile — keep original entry untouched.
+                expanded.append(entry)
+                continue
+
+            # Build row / col start positions, ensuring all tiles are full-sized.
+            rows = sorted(set(
+                list(range(0, max(img_h - tile_h, 0) + 1, stride_h))
+                + ([max(0, img_h - tile_h)] if img_h > tile_h else [0])
+            ))
+            cols = sorted(set(
+                list(range(0, max(img_w - tile_w, 0) + 1, stride_w))
+                + ([max(0, img_w - tile_w)] if img_w > tile_w else [0])
+            ))
+
+            for r in rows:
+                for c in cols:
+                    tile_entry = entry.copy()
+                    tile_entry["_tile_row"] = r
+                    tile_entry["_tile_col"] = c
+                    tile_entry["_source_h"] = img_h
+                    tile_entry["_source_w"] = img_w
+                    expanded.append(tile_entry)
+
+        if len(expanded) != n_files:
+            logger.info(
+                "Tile expansion: %d files → %d tiles (tile_size=%s, stride=%s)",
+                n_files, len(expanded), self.tile_size, self.tile_stride,
+            )
+        return expanded
+
+    def _apply_tile_crop(self, sample: dict, data: dict) -> dict:
+        """Crop all spatial tensors and adjust the GeoTIFF profile for a tile.
+
+        No-op when tiling is inactive (``_tile_row`` absent from *data*).
+        """
+        if "_tile_row" not in data:
+            return sample
+
+        r, c = data["_tile_row"], data["_tile_col"]
+        th, tw = self.tile_size
+
+        # Crop spatial tensors [C, H, W] → [C, th, tw]
+        for key in ("image", "image_post", "image_pre", "mask", "mask-common", "water_mask"):
+            t = sample.get(key)
+            if t is not None and isinstance(t, Tensor) and t.dim() >= 3:
+                sample[key] = t[:, r:r + th, c:c + tw]
+
+        # Adjust GeoTIFF profile so each tile writes to the correct location
+        if sample.get("profile") is not None:
+            transform_list = sample["profile"]["transform"]
+            orig_transform = Affine(*transform_list[:6])
+            sample["profile"]["transform"] = list(
+                orig_transform * Affine.translation(c, r)
+            )
+
+        # Update dimensions to reflect the tile (used by PadTo / predict crop)
+        sample["original_height"] = sample["image"].shape[1]
+        sample["original_width"] = sample["image"].shape[2]
+
+        # Tile metadata for prediction reconstruction
+        sample["tile_row_start"] = r
+        sample["tile_col_start"] = c
+        sample["source_height"] = data["_source_h"]
+        sample["source_width"] = data["_source_w"]
+        return sample
 
     def _get_mask_path(self, cell_id, group_date_post) -> Path | Any:
         mask_path = (
@@ -444,6 +553,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
 
         sample.update(self._get_metadata(data))
 
+        sample = self._apply_tile_crop(sample, data)
+
         return sample
 
     def _get_metadata(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -461,6 +572,8 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             f"({data['group_id_post']}){data['group_date_post']}|"
             f"fire_({data['db_nbac_fire_id']})_{data['fire_start_date']}_{data['fire_end_date']}"
         )
+        if "_tile_row" in data:
+            pre_post_name += f"|tile_r{data['_tile_row']}_c{data['_tile_col']}"
         return pre_post_name
 
     def _normalize_and_standardize(self, image_post: Tensor, image_pre: Tensor) -> tuple[
