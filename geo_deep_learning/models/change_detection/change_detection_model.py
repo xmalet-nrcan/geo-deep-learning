@@ -8,6 +8,15 @@ from geo_deep_learning.models.change_detection.difference_feature_attention impo
 from geo_deep_learning.models.change_detection.metadata_film_conditioner import MetadataFiLMConditioner
 from geo_deep_learning.models.change_detection.sub_models.changeformer.original_change_former import ChangeFormerV6, \
     ChangeFormerV5, ChangeFormerV7
+from geo_deep_learning.models.change_detection.sub_models.hdanet import (
+    HDANet, HDANetSmall, HDANetBase, HDANetLarge,
+)
+from geo_deep_learning.models.change_detection.sub_models.changemask import (
+    ChangeMask, ChangeMask18, ChangeMask34, ChangeMask50,
+)
+from geo_deep_learning.models.change_detection.sub_models.changestar2 import (
+    ChangeStar2, ChangeStar2Small, ChangeStar2Base, ChangeStar2Large,
+)
 from geo_deep_learning.models.segmentation.base import BaseSegmentationModel
 
 
@@ -61,15 +70,42 @@ class ChangeDetectionModel(BaseSegmentationModel):
                            'changeformer_5': ChangeFormerV5,
                            'changeformer_6': ChangeFormerV6,
                            'changeformer_7': ChangeFormerV7,
+                           'hdanet': HDANetBase,
+                           'hdanet_small': HDANetSmall,
+                           'hdanet_base': HDANetBase,
+                           'hdanet_large': HDANetLarge,
+                           'changemask': ChangeMask18,
+                           'changemask_18': ChangeMask18,
+                           'changemask_34': ChangeMask34,
+                           'changemask_50': ChangeMask50,
+                           'changestar2': ChangeStar2Base,
+                           'changestar2_small': ChangeStar2Small,
+                           'changestar2_base': ChangeStar2Base,
+                           'changestar2_large': ChangeStar2Large,
                            }
 
         model_sub_name = {'changeformer': 'changeformer',
                           'changeformer_5': 'changeformer',
                           'changeformer_6': 'changeformer',
                           'changeformer_7': 'changeformer',
+                          'hdanet': 'hdanet',
+                          'hdanet_small': 'hdanet',
+                          'hdanet_base': 'hdanet',
+                          'hdanet_large': 'hdanet',
+                          'changemask': 'changemask',
+                          'changemask_18': 'changemask',
+                          'changemask_34': 'changemask',
+                          'changemask_50': 'changemask',
+                          'changestar2': 'changestar2',
+                          'changestar2_small': 'changestar2',
+                          'changestar2_base': 'changestar2',
+                          'changestar2_large': 'changestar2',
                           }
 
-        model_parameters = {'changeformer': {'decoder_softmax': False, 'embed_dim': 256}}
+        model_parameters = {'changeformer': {'decoder_softmax': False, 'embed_dim': 256},
+                            'hdanet': {'decoder_softmax': False, 'embed_dim': 256},
+                            'changemask': {'decoder_softmax': False, 'embed_dim': 256},
+                            'changestar2': {'decoder_softmax': False, 'embed_dim': 256}}
         model_kwargs = model_parameters.get(model_sub_name.get(change_detection_model))
         if model_kwargs is None:
             model_kwargs = {}
@@ -178,6 +214,13 @@ if __name__ == '__main__':
     x2 = torch.randn(5, 9, 512, 512)
     outputs = model(x1, x2)[-1]
     print(f"Without extras    - outputs.shape: {outputs.shape}")  # noqa: T201
+
+    # Test HDANet
+    model_hda = ChangeDetectionModel(change_detection_model='hdanet', in_channels=9, out_channels=2)
+    x1_sm = torch.randn(2, 9, 256, 256)
+    x2_sm = torch.randn(2, 9, 256, 256)
+    outputs_hda = model_hda(x1_sm, x2_sm)[-1]
+    print(f"HDANet            - outputs.shape: {outputs_hda.shape}")  # noqa: T201
 
     # Test with FiLM
     model_film = ChangeDetectionModel(

@@ -1151,7 +1151,11 @@ class ChangeDetectionChangeFormer(LightningModule):
                     'group_date_pre',
                     'group_date_post',
                     'group_id_pre',
-                    'group_id_post'):
+                    'group_id_post',
+                    'tile_row_start',
+                    'tile_col_start',
+                    'source_height',
+                    'source_width'):
             if key in batch:
                 result[key] = batch[key]
 
