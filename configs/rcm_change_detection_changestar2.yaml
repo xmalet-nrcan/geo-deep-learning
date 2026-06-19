@@ -1,13 +1,5 @@
 seed_everything: true
 
-.vars:
-  model_name: &model_name "changestar2"
-  log_dir: &log_dir ./lightning_logs
-  model_dir: &model_dir ./model_checkpoints/2026/changestar2
-  data_dir: &data_dir /mnt/geospatial/projet_RCM_scanfire/
-  patches_dir: &patches_dir /mnt/geospatial/projet_RCM_scanfire/grided_folder
-  run_name: &run_name 2026/changestar2/cs2base_A_y23-25_water_film-chdrop_focal-lovasz_1cycle
-
 trainer:
 #  detect_anomaly: true
   accelerator: "gpu"
@@ -21,8 +13,8 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
-      save_dir: *log_dir
-      name: *run_name
+      save_dir: ./lightning_logs
+      name: 2026/changestar2/cs2base_A_y23-25_water_film-chdrop_focal-lovasz_1cycle
 
   callbacks:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
@@ -34,7 +26,7 @@ trainer:
         min_delta: 1e-3
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: *model_dir
+        dirpath: ./model_checkpoints/2026/changestar2
         monitor: "val_loss"
         mode: "min"
         save_top_k: 5
@@ -62,7 +54,7 @@ trainer:
 model:
   class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
   init_args:
-    change_detection_model: *model_name
+    change_detection_model: "changestar2"
     image_size: [256,256]
     # set to the number of band_names in the datamodule + 1 for BITMASK_CROPPED (always loaded)
     # With separate_metadata=true, COMMON_MASK / SAT_PASS / BEAM are NOT
@@ -138,8 +130,8 @@ data:
     - 256
     - 256
     split_on_columns: db_nbac_fire_id
-    csv_root_folder: *data_dir
-    patches_root_folder: *patches_dir
+    csv_root_folder: /mnt/geospatial/projet_RCM_scanfire/
+    patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
     csv_file_name: tbl_input_pre_post_data.csv
     split_ratios: [0.8 ,0.1, 0.1]
 
