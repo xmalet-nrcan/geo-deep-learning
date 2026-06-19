@@ -15,7 +15,7 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: &log_dir ./lightning_logs
-      name: &run_name 2026_8_A_2023_2025_mask_water_rel_orbs_changeformer_focal-lovasz_fire_id_cosw_all_test
+      name: &run_name 2026_8_A_2023_2025_mask_water_rel_orbs_changeformer7_focal-lovasz_fire_id_cosw_all_attention
 
   callbacks:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
@@ -55,7 +55,7 @@ trainer:
 model:
   class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
   init_args:
-    change_detection_model: "changeformer"
+    change_detection_model: "changeformer_7"
     image_size: [256,256]
     # set to the number of band_names in the datamodule + 1 for BITMASK_CROPPED (always loaded)
     # With separate_metadata=true, COMMON_MASK / SAT_PASS / BEAM are NOT
