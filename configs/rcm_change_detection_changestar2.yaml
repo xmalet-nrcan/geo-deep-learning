@@ -43,11 +43,8 @@ trainer:
         swa_lrs: 5e-5         # must be ≤ base lr (1e-4) for AdamW; 1e-3 was 10× too high
         annealing_epochs: 10
         swa_epoch_start: 0.75
-    - class_path: lightning.pytorch.callbacks.GradientAccumulationScheduler
-      init_args:
-        scheduling:
-          0: 4      # epochs 0-19:   8×8 = 64 effective batch size (smooth start)
 
+  accumulate_grad_batches: 4    # replaces GradientAccumulationScheduler (compatible with OneCycleLR)
   max_epochs: 240
   check_val_every_n_epoch: 1
 
