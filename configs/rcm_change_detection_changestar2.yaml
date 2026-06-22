@@ -8,13 +8,13 @@ trainer:
 
   gradient_clip_val: 1.0
   precision: "bf16-mixed"  # bf16: no GradScaler needed, no overflow (same exponent as fp32)
-  sync_batchnorm: true
+  sync_batchnorm: false
   gradient_clip_algorithm: "norm"
   logger:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: ./lightning_logs
-      name: 2026/changestar2/cs2base_A_y23-25_water_film-chdrop_focal-lovasz_1cycle
+      name: 2026/changestar2/cs2base_A_y23-25_water_film16_focal-lovasz_1cycle
 
   callbacks:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
@@ -23,14 +23,14 @@ trainer:
         mode: "min"
         verbose: True
         patience: 50
-        min_delta: 1e-3
+        min_delta: 1e-4
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         dirpath: ./model_checkpoints/2026/changestar2
         monitor: "val_loss"
         mode: "min"
         save_top_k: 5
-        filename: "cs2base_A_y23-25-{epoch:02d}-{val_loss:.3f}"
+        filename: "cs2base_A_y23-25_film-only-no-swa-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 50
@@ -38,11 +38,12 @@ trainer:
       init_args:
         logging_interval: "epoch"
 
-    - class_path: lightning.pytorch.callbacks.StochasticWeightAveraging
-      init_args:
-        swa_lrs: 5e-5         # must be ≤ base lr (1e-4) for AdamW; 1e-3 was 10× too high
-        annealing_epochs: 10
-        swa_epoch_start: 0.75
+    #- class_path: lightning.pytorch.callbacks.StochasticWeightAveraging
+    #  init_args:
+    #    swa_lrs: 1e-5         # must be ≤ base lr (1e-4) for AdamW; 1e-3 was 10× too high
+    #    annealing_epochs: 5
+    #    swa_epoch_start: 0.8
+    #    annealing_strategy: cos
 
   accumulate_grad_batches: 4    # replaces GradientAccumulationScheduler (compatible with OneCycleLR)
   max_epochs: 240
@@ -57,26 +58,25 @@ model:
     # With separate_metadata=true, COMMON_MASK / SAT_PASS / BEAM are NOT
     # counted as image channels — they use FiLM conditioning instead.
     in_channels: 10 # len(band_names) + 1 (BITMASK_CROPPED)
-    max_samples: 50
+    max_samples: 10
     num_classes: 1  # binary change detection
-    burned_class_weight: 5.0  # >1 penalizes false negatives on class burn (1)
     deep_supervision: true  # use all ChangeFormer decoder heads for loss
     # deep_supervision_weights: [0.1, 0.1, 0.15, 0.2, 1.0]  # per-head weights (c4→c1→final)
     speckle_noise_std: 0.15  # SAR-specific multiplicative speckle augmentation
     # --- Conditioning & regularization modules ---
     use_metadata_film: true       # encode SAT_PASS/BEAM via FiLM instead of constant bands
-    film_embed_dim: 32            # embedding dimension for FiLM conditioner
+    film_embed_dim: 16            # embedding dimension for FiLM conditioner
 
     use_cbam: false               # Disabled: ConvNeXt encoder already has implicit channel attention
     cbam_reduction: 4
 
-    use_channel_dropout: true     # Drop aléatoire de bandes SAR (train only) — always useful
+    use_channel_dropout: false     # Drop aléatoire de bandes SAR (train only) — always useful
     channel_dropout_prob: 0.1     # prob de drop par canal (0.1 = conservateur)
 
     use_dfa: false                # Disabled: ChangeStar2 aux heads are too simple for gating
     dfa_gate_hidden: 16
 
-
+    burned_class_weight: 5.0  # >1 penalizes false negatives on class burn (to test : bcw ->[2,5])
     main_loss:
       class_path: segmentation_models_pytorch.losses.FocalLoss
       init_args:
@@ -94,21 +94,21 @@ model:
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
-        lr: 1e-4              # base lr (OneCycleLR uses this as initial, ramps to max_lr)
-        weight_decay: 0.01
+        lr: 1e-5              # base lr (OneCycleLR uses this as initial, ramps to max_lr)
+        weight_decay: 0.03
         betas:
         - 0.9
         - 0.999
     scheduler:
       class_path: torch.optim.lr_scheduler.OneCycleLR
       init_args:
-        max_lr: 6e-4          # peak lr (~6× base lr is a good default)
-        pct_start: 0.3        # 30% warmup, 70% cosine decay
+        max_lr: 1e-4          # peak lr
+        pct_start: 0.1
         anneal_strategy: cos  # cosine annealing (smoother than linear)
-        div_factor: 6         # initial lr = max_lr / div_factor = 6e-4 / 6 = 1e-4
-        final_div_factor: 100 # final lr = max_lr / (div_factor × final_div_factor) ≈ 1e-6
+        div_factor: 10         # initial lr = max_lr / div_factor 
+        final_div_factor: 100 # final lr = max_lr / (div_factor × final_div_factor) 
         total_steps: null     # auto-computed by Lightning from trainer config
-
+        cycle_momentum: false
     scheduler_config:
       interval: "step"        # OneCycleLR MUST step per batch, not per epoch
       frequency: 1
