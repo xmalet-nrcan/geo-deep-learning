@@ -1172,34 +1172,54 @@ class ChangeDetectionChangeFormer(LightningModule):
             beam: Tensor | None = None,
             **metadata_kwargs: Tensor,
     ) -> Tensor:
-        """Test-Time Augmentation: average softmax over geometric transforms.
+        """Average predictions over geometric transformations."""
 
-        Applies the original image + horizontal flip + vertical flip + 180°
-        rotation, computes softmax for each, and averages the results.
-        Returns averaged logits (log of mean probabilities).
-        """
         transforms = [
-            (lambda t: t, lambda t: t),  # identity
-            (lambda t: torch.flip(t, [-1]), lambda t: torch.flip(t, [-1])),  # hflip
-            (lambda t: torch.flip(t, [-2]), lambda t: torch.flip(t, [-2])),  # vflip
-            (lambda t: torch.flip(t, [-2, -1]), lambda t: torch.flip(t, [-2, -1])),  # rot180
+            lambda t: t,
+            lambda t: torch.flip(t, dims=(-1,)),
+            lambda t: torch.flip(t, dims=(-2,)),
+            lambda t: torch.flip(t, dims=(-2, -1)),
         ]
-        probs_sum = None
-        for fwd_fn, inv_fn in transforms:
-            aug_pre = fwd_fn(x_pre)
-            aug_post = fwd_fn(x_post)
-            out = self(aug_pre, aug_post, sat_pass=sat_pass, beam=beam, **metadata_kwargs)
-            if isinstance(out, list):
+
+        probs_sum: Tensor | None = None
+
+        for transform in transforms:
+            aug_pre = transform(x_pre)
+            aug_post = transform(x_post)
+
+            # This must call the forward path without TTA.
+            out = self(
+                aug_pre,
+                aug_post,
+                sat_pass=sat_pass,
+                beam=beam,
+                **metadata_kwargs,
+            )
+
+            if isinstance(out, (list, tuple)):
                 out = out[-1]
-            p = torch.softmax(out, dim=1)
-            p = inv_fn(p)
-            if probs_sum is None:
-                probs_sum = p
+
+            if out.shape[1] == 1:
+                probabilities = torch.sigmoid(out)
             else:
-                probs_sum = probs_sum + p
+                probabilities = torch.softmax(out, dim=1)
+
+            # These transformations are their own inverse.
+            probabilities = transform(probabilities)
+
+            probs_sum = (
+                probabilities
+                if probs_sum is None
+                else probs_sum + probabilities
+            )
+
         avg_probs = probs_sum / len(transforms)
-        # Convert back to logits for consistency with the rest of the pipeline
-        return torch.log(avg_probs.clamp_min(1e-7))
+        eps = 1e-7
+
+        if avg_probs.shape[1] == 1:
+            return torch.logit(avg_probs.clamp(eps, 1.0 - eps))
+
+        return torch.log(avg_probs.clamp_min(eps))
 
     def on_predict_end(self) -> None:
         """Appelé après que tous les predict_step soient terminés.
