@@ -9,20 +9,33 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: &log_dir ./lightning_logs
-      name: &run_name predict_changeformer
+      name: &run_name predict/changestar/2026/changestar2_2026
   # Pas de callbacks de training (pas d'EarlyStopping, ModelCheckpoint, etc.)
   callbacks: []
 
 model:
   class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
   init_args:
-    change_detection_model: "changeformer"
+    change_detection_model: "changestar2"
     image_size: [256, 256]
     in_channels: 10           # 9 band_names + 1 BITMASK_CROPPED (FiLM mode)
     max_samples: 10
     num_classes: 1
-    use_metadata_film: true   # encode SAT_PASS/BEAM via FiLM
-    film_embed_dim: 32        # must match training checkpoint
+    burned_class_weight: 5.0  # >1 penalizes false negatives on class burn (1)
+
+    speckle_noise_std: 0.15  # SAR-specific multiplicative speckle augmentation
+    # --- Conditioning & regularization modules ---
+    use_metadata_film: true       # encode SAT_PASS/BEAM via FiLM instead of constant bands
+    film_embed_dim: 32            # embedding dimension for FiLM conditioner
+
+    use_cbam: false               # Disabled: ConvNeXt encoder already has implicit channel attention
+    cbam_reduction: 4
+
+    use_channel_dropout: true     # Drop aléatoire de bandes SAR (train only) — always useful
+    channel_dropout_prob: 0.1     # prob de drop par canal (0.1 = conservateur)
+
+    use_dfa: false                # Disabled: ChangeStar2 aux heads are too simple for gating
+    dfa_gate_hidden: 16
     # Les losses sont requises par le constructeur, même si elles ne servent pas en predict
     main_loss:
       class_path: segmentation_models_pytorch.losses.FocalLoss
@@ -41,29 +54,36 @@ model:
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
-        lr: 1e-4
+        lr: 1e-5              # base lr (OneCycleLR ramps to max_lr)
         weight_decay: 0.01
-        betas: [0.9, 0.999]
+        betas:
+          - 0.9
+          - 0.999
     scheduler:
-      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
+      class_path: torch.optim.lr_scheduler.OneCycleLR
       init_args:
-        T_0: 10
-        T_mult: 2
-        eta_min: 1e-6
+        max_lr: 1e-4          # peak lr (reduced from 6e-4)
+        pct_start: 0.1        # 30% warmup, 70% cosine decay
+        anneal_strategy: cos
+        div_factor: 10        # initial lr = 3e-4 / 6 = 5e-5
+        final_div_factor: 100 # final lr ≈ 5e-7
+        total_steps: null     # auto-computed by Lightning
+        cycle_momentum: false
+
     scheduler_config:
-      interval: "epoch"
+      interval: "step"        # OneCycleLR MUST step per batch, not per epoch
       frequency: 1
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    #weights_from_checkpoint_path: /app/model_checkpoints/2026_7_A_2023_2025_mask_water_rel_orbs_changeformer_focal-lovasz_fire_id_cosw_all-epoch=71-val_loss=0.354.ckpt
+    weights_from_checkpoint_path: /app/models_checkpoints/2026/changestar2/cs2base_A_y23-25_film-only-epoch=89-val_loss=0.304.ckpt
     predict_output_dir: /mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
 
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
   init_args:
     dataset_class: datasets.rcm_change_detection_predict_dataset.RCMChangeDetectionOnPredictDataset
-    batch_size: 16
-    num_workers: 20
+    batch_size: 8
+    num_workers: 10
     separate_metadata: true   # SAT_PASS/BEAM as scalars for FiLM (must match training)
     patch_size: [256, 256]
     csv_root_folder:  &data_root /mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
