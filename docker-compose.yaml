@@ -70,7 +70,7 @@ services:
       - PREDICT_CONFIG=/app/configs/model_conf.yaml
     volumes:
       - "./configs/rcm_change_detection_predict.yaml:/app/configs/model_conf.yaml:ro"
-      - "./models_checkpoints:/app/model_checkpoints:rw"
+      - "./models_checkpoints:/app/models_checkpoints:rw"
       - "./lightning_logs:/app/lightning_logs:rw"
       - "../scanfire/scanfire_modules:/app/scanfire_modules:ro"
       - "/mnt/geospatial/projet_RCM_scanfire:/mnt/geospatial/projet_RCM_scanfire:rw"
