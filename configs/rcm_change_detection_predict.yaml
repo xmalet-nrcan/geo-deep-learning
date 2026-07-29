@@ -86,6 +86,12 @@ data:
     num_workers: 10
     separate_metadata: true   # SAT_PASS/BEAM as scalars for FiLM (must match training)
     patch_size: [256, 256]
+    # Tiling with overlap: tiles are blended using a cosine window
+    # to eliminate seam artefacts at tile boundaries.
+    # Set tile_stride < tile_size for overlap (e.g. 50% overlap here).
+    # Set to null to disable tiling entirely.
+    tile_size: [256, 256]
+    tile_stride: [192, 192]       # overlap = tile_size - stride = 64 px per side
     csv_root_folder:  &data_root /mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
     patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
     csv_file_name: vw_input_files_for_change_detection.csv
