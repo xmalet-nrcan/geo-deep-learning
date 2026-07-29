@@ -1374,6 +1374,69 @@ class ChangeDetectionChangeFormer(LightningModule):
         return str(batch_field)
 
     @staticmethod
+    def _safe_merge(datasets):
+        """Merge raster datasets, handling rasterio versions that reject negative pixel height.
+
+        Standard GeoTIFFs are north-up (pixel height < 0). Some rasterio versions
+        (e.g. 1.4.0) raise MergeError for these. Workaround: flip to positive pixel
+        height in memory, merge, then flip the result back.
+        """
+        from rasterio.merge import merge as rio_merge
+        from rasterio.transform import Affine
+        from rasterio import MemoryFile
+        import numpy as np
+
+        try:
+            return rio_merge(datasets)
+        except Exception as e:
+            if "negative pixel height" not in str(e):
+                raise
+
+        # --- Workaround: flip datasets to positive pixel height ---
+        mem_files = []
+        flipped_datasets = []
+        needs_flip = False
+
+        for ds in datasets:
+            if ds.transform.e < 0:
+                needs_flip = True
+                data = ds.read()[:, ::-1, :]  # flip vertically
+                new_transform = Affine(
+                    ds.transform.a, ds.transform.b, ds.transform.c,
+                    ds.transform.d, -ds.transform.e,
+                    ds.transform.f + ds.transform.e * ds.height,
+                )
+                profile = ds.profile.copy()
+                profile['transform'] = new_transform
+                memfile = MemoryFile()
+                with memfile.open(**profile) as mem_dst:
+                    mem_dst.write(data)
+                flipped_datasets.append(memfile.open())
+                mem_files.append(memfile)
+            else:
+                flipped_datasets.append(ds)
+
+        mosaic, mosaic_transform = rio_merge(flipped_datasets)
+
+        # Close flipped in-memory datasets
+        for ds in flipped_datasets:
+            if ds not in datasets:
+                ds.close()
+        for mf in mem_files:
+            mf.close()
+
+        # Flip result back to north-up (negative pixel height)
+        if needs_flip:
+            mosaic = mosaic[:, ::-1, :].copy()
+            mosaic_transform = Affine(
+                mosaic_transform.a, mosaic_transform.b, mosaic_transform.c,
+                mosaic_transform.d, -mosaic_transform.e,
+                mosaic_transform.f + mosaic_transform.e * mosaic.shape[1],
+            )
+
+        return mosaic, mosaic_transform
+
+    @staticmethod
     def _merge_predictions(
             group_tile_paths: dict[tuple[str, str, str], list[Path]],
             event_all_tile_paths: dict[str, list[Path]],
@@ -1399,7 +1462,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             datasets_to_merge = []
             try:
                 datasets_to_merge = [rio.open(str(p)) for p in tile_paths]
-                mosaic, mosaic_transform = rio_merge(datasets_to_merge)
+                mosaic, mosaic_transform = ChangeDetectionChangeFormer._safe_merge(datasets_to_merge)
 
                 merge_profile = datasets_to_merge[0].profile.copy()
                 merge_profile.update({
@@ -1438,7 +1501,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             datasets_to_merge = []
             try:
                 datasets_to_merge = [rio.open(str(p)) for p in tile_paths]
-                mosaic, mosaic_transform = rio_merge(datasets_to_merge)
+                mosaic, mosaic_transform = ChangeDetectionChangeFormer._safe_merge(datasets_to_merge)
 
                 merge_profile = datasets_to_merge[0].profile.copy()
                 merge_profile.update({
