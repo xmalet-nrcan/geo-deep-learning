@@ -1806,6 +1806,112 @@ class ChangeDetectionChangeFormer(LightningModule):
         return mosaic, mosaic_transform
 
     @staticmethod
+    def _chunked_merge(
+        tile_paths: list[Path],
+        output_path: Path,
+        chunk_size: int = 200,
+    ) -> None:
+        """Merge many tiles without exceeding the OS open-file limit.
+
+        When *tile_paths* contains more tiles than *chunk_size*, the merge is
+        done in rounds: each chunk is merged into a temporary GeoTIFF, then
+        the intermediate files are merged into the final output.  This avoids
+        the ``Too many open files`` error that occurs when rasterio tries to
+        hold hundreds of file descriptors simultaneously.
+
+        Args:
+            tile_paths: Paths to the individual prediction GeoTIFFs.
+            output_path: Destination path for the merged result.
+            chunk_size: Max number of files to open at once (default 200,
+                well below the typical ``ulimit -n`` of 1024).
+        """
+        import tempfile
+
+        if len(tile_paths) <= chunk_size:
+            # Small enough → single-pass merge
+            ChangeDetectionChangeFormer._single_merge(tile_paths, output_path)
+            return
+
+        logger.info(
+            "Batched merge: %d tiles in chunks of %d",
+            len(tile_paths), chunk_size,
+        )
+
+        intermediate_paths: list[Path] = []
+        tmp_dir = output_path.parent / "_merge_tmp"
+        tmp_dir.mkdir(exist_ok=True)
+
+        try:
+            # --- Round 1: merge each chunk → intermediate file ---
+            for chunk_idx in range(0, len(tile_paths), chunk_size):
+                chunk = tile_paths[chunk_idx: chunk_idx + chunk_size]
+                if len(chunk) == 1:
+                    # Single tile, no merge needed – use directly
+                    intermediate_paths.append(chunk[0])
+                    continue
+
+                intermediate_path = tmp_dir / f"_chunk_{chunk_idx}.tif"
+                ChangeDetectionChangeFormer._single_merge(chunk, intermediate_path)
+                intermediate_paths.append(intermediate_path)
+                logger.debug(
+                    "  Chunk %d–%d merged → %s",
+                    chunk_idx, chunk_idx + len(chunk) - 1, intermediate_path.name,
+                )
+
+            # --- Round 2: merge intermediates → final output ---
+            if len(intermediate_paths) == 1:
+                # Only one intermediate: just rename/copy
+                import shutil
+                shutil.move(str(intermediate_paths[0]), str(output_path))
+            else:
+                ChangeDetectionChangeFormer._single_merge(
+                    intermediate_paths, output_path,
+                )
+
+        finally:
+            # Clean up intermediate files
+            for p in tmp_dir.glob("_chunk_*.tif"):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+            try:
+                tmp_dir.rmdir()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _single_merge(tile_paths: list[Path], output_path: Path) -> None:
+        """Merge a list of tile GeoTIFFs into a single output file.
+
+        All files in *tile_paths* are opened, merged via
+        :func:`_safe_merge`, written to *output_path*, then closed.
+        """
+        datasets_to_merge = []
+        try:
+            datasets_to_merge = [rio.open(str(p)) for p in tile_paths]
+            mosaic, mosaic_transform = ChangeDetectionChangeFormer._safe_merge(
+                datasets_to_merge,
+            )
+
+            merge_profile = datasets_to_merge[0].profile.copy()
+            merge_profile.update({
+                "height": mosaic.shape[1],
+                "width": mosaic.shape[2],
+                "transform": mosaic_transform,
+            })
+
+            with rio.open(str(output_path), "w", **merge_profile) as dst:
+                dst.write(mosaic)
+
+        finally:
+            for ds in datasets_to_merge:
+                try:
+                    ds.close()
+                except Exception:
+                    pass
+
+    @staticmethod
     def _merge_predictions(
             group_tile_paths: dict[tuple[str, str, str], list[Path]],
             event_all_tile_paths: dict[str, list[Path]],
@@ -1813,49 +1919,28 @@ class ChangeDetectionChangeFormer(LightningModule):
         """Merge tiles in two passes:
         1. Per group_id_pre/group_id_post pair → merged_group_{pre}_{post}.tif
         2. All tiles in the event/date dir    → merged_all.tif
-        """
-        from rasterio.merge import merge as rio_merge
 
+        Uses :meth:`_chunked_merge` to handle large tile counts without
+        exceeding the OS open-file descriptor limit.
+        """
         # --- Pass 1 : merge par paire (group_id_pre, group_id_post) ---
         for (event_date_dir_str, group_pre, group_post), tile_paths in group_tile_paths.items():
             event_date_dir = Path(event_date_dir_str)
             if len(tile_paths) < 2:
-                # Rien à merger s'il n'y a qu'une seule tuile
                 logger.info("Skipping merge for group %s/%s (only %d tile)",
                             group_pre, group_post, len(tile_paths))
                 continue
 
             merged_name = f"merged_group_{group_pre}_{group_post}.tif"
+            merged_path = event_date_dir / merged_name
             logger.info("Merging %d tiles → %s/%s", len(tile_paths), event_date_dir, merged_name)
 
-            datasets_to_merge = []
             try:
-                datasets_to_merge = [rio.open(str(p)) for p in tile_paths]
-                mosaic, mosaic_transform = ChangeDetectionChangeFormer._safe_merge(datasets_to_merge)
-
-                merge_profile = datasets_to_merge[0].profile.copy()
-                merge_profile.update({
-                    "height": mosaic.shape[1],
-                    "width": mosaic.shape[2],
-                    "transform": mosaic_transform,
-                })
-
-                merged_path = event_date_dir / merged_name
-                with rio.open(str(merged_path), "w", **merge_profile) as dst:
-                    dst.write(mosaic)
-
-                logger.info("Saved merged group to %s (%dx%d)",
-                            merged_path, mosaic.shape[2], mosaic.shape[1])
-
+                ChangeDetectionChangeFormer._chunked_merge(tile_paths, merged_path)
+                logger.info("Saved merged group to %s", merged_path)
             except Exception:
                 logger.exception("Failed to merge group %s/%s in %s",
                                  group_pre, group_post, event_date_dir)
-            finally:
-                for ds in datasets_to_merge:
-                    try:
-                        ds.close()
-                    except Exception:
-                        pass
 
         # --- Pass 2 : merge global par EVENT_ID / PREDICTION_DATE ---
         for event_date_dir_str, tile_paths in event_all_tile_paths.items():
@@ -1865,34 +1950,13 @@ class ChangeDetectionChangeFormer(LightningModule):
                             event_date_dir, len(tile_paths))
                 continue
 
-            logger.info("Merging all %d tiles → %s/merged_all.tif", len(tile_paths), event_date_dir)
+            merged_path = event_date_dir / "merged_all.tif"
+            logger.info("Merging all %d tiles → %s", len(tile_paths), merged_path)
 
-            datasets_to_merge = []
             try:
-                datasets_to_merge = [rio.open(str(p)) for p in tile_paths]
-                mosaic, mosaic_transform = ChangeDetectionChangeFormer._safe_merge(datasets_to_merge)
-
-                merge_profile = datasets_to_merge[0].profile.copy()
-                merge_profile.update({
-                    "height": mosaic.shape[1],
-                    "width": mosaic.shape[2],
-                    "transform": mosaic_transform,
-                })
-
-                merged_path = event_date_dir / "merged_all.tif"
-                with rio.open(str(merged_path), "w", **merge_profile) as dst:
-                    dst.write(mosaic)
-
-                logger.info("Saved global merge to %s (%dx%d)",
-                            merged_path, mosaic.shape[2], mosaic.shape[1])
-
+                ChangeDetectionChangeFormer._chunked_merge(tile_paths, merged_path)
+                logger.info("Saved global merge to %s", merged_path)
             except Exception:
                 logger.exception("Failed to create global merge in %s", event_date_dir)
-            finally:
-                for ds in datasets_to_merge:
-                    try:
-                        ds.close()
-                    except Exception:
-                        pass
 
 
