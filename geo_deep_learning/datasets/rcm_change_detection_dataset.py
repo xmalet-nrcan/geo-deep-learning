@@ -511,7 +511,14 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         with rio.open(data['image']) as src:
             image_profile = src.profile
         image_profile['count'] = len(band_names)
-        image_profile['crs'] = str(image_profile['crs'])
+        # Store CRS as a reliably parseable EPSG string.
+        # Default to EPSG:3979 (NAD83 / Canada Atlas Lambert) if CRS is unavailable.
+        raw_crs = image_profile.get('crs')
+        if raw_crs is not None:
+            epsg = raw_crs.to_epsg()
+            image_profile['crs'] = f"EPSG:{epsg}" if epsg else "EPSG:3979"
+        else:
+            image_profile['crs'] = "EPSG:3979"
         image_profile['transform'] = list(image_profile['transform'])
         # Ensure nodata is never None — PyTorch's default collate cannot batch
         # a mix of float and NoneType across samples in the same dict key.

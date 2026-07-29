@@ -1301,6 +1301,13 @@ class ChangeDetectionChangeFormer(LightningModule):
                 # --- Reconstruire le profil rasterio ---
                 crs_val = batch_profiles["crs"][i] if isinstance(batch_profiles["crs"], (list, tuple)) else \
                 batch_profiles["crs"]
+                # Parse CRS back; default to EPSG:3979 if empty/invalid
+                from rasterio.crs import CRS as RioCRS
+                try:
+                    crs_obj = RioCRS.from_user_input(crs_val) if crs_val else RioCRS.from_epsg(3979)
+                except Exception:
+                    logger.warning("Could not parse CRS '%s' for sample %d — using default EPSG:3979.", crs_val, i)
+                    crs_obj = RioCRS.from_epsg(3979)
 
                 transform_raw = batch_profiles["transform"]
 
@@ -1315,7 +1322,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "nodata": 32767,
                     "height": orig_h,  # ← dimensions ORIGINALES, pas paddées
                     "width": orig_w,  # ← dimensions ORIGINALES, pas paddées
-                    "crs": crs_val,
+                    "crs": crs_obj,
                     "transform": Affine(*t_list),
                 }
                 # --- Chemin : base / EVENT_ID / PREDICTION_DATE / cell_id / image.tif ---
