@@ -1144,6 +1144,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             "original_width": batch["original_width"],
         }
 
+        # --- Propager le masque commun pour le re-masquage après blending overlap ---
+        if "mask-common" in batch:
+            result["mask_common"] = batch["mask-common"]
+
         # --- Propager les métadonnées optionnelles (event_id, db_nbac_fire_id, etc.) ---
         for key in ("pair_id",
                     "event_id",
@@ -1221,6 +1225,360 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         return torch.log(avg_probs.clamp_min(eps))
 
+    # ------------------------------------------------------------------
+    # Overlap blending for tile-based prediction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _create_blend_window(
+        height: int,
+        width: int,
+        overlap_h: int,
+        overlap_w: int,
+    ) -> np.ndarray:
+        """Create a 2D blending window with cosine ramps in overlap regions.
+
+        Pixels in the non-overlapping center get weight 1.0.  Pixels in the
+        overlap zone smoothly ramp from 0→1 using a raised-cosine profile,
+        ensuring seamless transitions between adjacent tiles.
+
+        Args:
+            height: Tile height in pixels.
+            width: Tile width in pixels.
+            overlap_h: Vertical overlap in pixels (tile_h − stride_h).
+            overlap_w: Horizontal overlap in pixels (tile_w − stride_w).
+
+        Returns:
+            2D ``float32`` array of shape ``[height, width]`` with values in ``(0, 1]``.
+        """
+
+        def _ramp(size: int, overlap: int) -> np.ndarray:
+            win = np.ones(size, dtype=np.float32)
+            if overlap > 0:
+                ramp_vals = np.linspace(0.0, 1.0, overlap, endpoint=False, dtype=np.float32)
+                ramp_vals = 0.5 * (1.0 - np.cos(np.pi * ramp_vals))
+                win[:overlap] = ramp_vals
+                win[-overlap:] = ramp_vals[::-1]
+            return win
+
+        win_h = _ramp(height, overlap_h)
+        win_w = _ramp(width, overlap_w)
+        window = np.outer(win_h, win_w)
+        return np.maximum(window, 1e-6).astype(np.float32)
+
+    def _reassemble_overlapping_tiles(
+        self,
+        predictions: list[dict[str, Any]],
+    ) -> tuple[dict[str, dict[str, Any]], bool]:
+        """Reassemble overlapping tiles into source-level predictions with cosine blending.
+
+        Detects whether tiling with overlap was used.  If so, groups tiles by
+        source image (using ``pre_post_name`` minus the tile suffix) and blends
+        their softmax probabilities with a 2D cosine window to eliminate tile
+        seam artefacts.
+
+        Args:
+            predictions: List of batch prediction dicts from :meth:`predict_step`.
+
+        Returns:
+            Tuple of:
+            - Dict mapping *source_key* → assembled prediction info (numpy arrays,
+              GeoTIFF profile, metadata scalars).
+            - ``True`` if overlap blending was applied, ``False`` otherwise.
+        """
+        from collections import defaultdict
+
+        # --- Check if tiling metadata is present ---
+        has_tiles = any("tile_row_start" in batch for batch in predictions)
+        if not has_tiles:
+            return {}, False
+
+        dm = self.trainer.datamodule
+        tile_size = getattr(dm, "tile_size", None)
+        tile_stride = getattr(dm, "tile_stride", None)
+        if tile_size is None or tile_stride is None:
+            return {}, False
+
+        tile_h, tile_w = tile_size
+        stride_h, stride_w = tile_stride
+        overlap_h = max(tile_h - stride_h, 0)
+        overlap_w = max(tile_w - stride_w, 0)
+
+        if overlap_h <= 0 and overlap_w <= 0:
+            return {}, False  # No overlap → skip blending
+
+        logger.info(
+            "Overlap detected: tile=%s, stride=%s, overlap=(%d, %d). "
+            "Reassembling tiles with cosine blending…",
+            tile_size, tile_stride, overlap_h, overlap_w,
+        )
+
+        # --- Group tiles by source image ---
+        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+        for batch_result in predictions:
+            names = batch_result["pre_post_name"]
+            batch_size = len(names)
+
+            for i in range(batch_size):
+                name = names[i].replace("\n", "")
+                source_key = name.split("|tile_")[0] if "|tile_" in name else name
+
+                tile_info: dict[str, Any] = {
+                    "name": name,
+                    "probabilities": batch_result["probabilities"][i].cpu(),
+                }
+
+                # Dimensions (original = after tile crop, before padding)
+                for dim_key in ("original_height", "original_width"):
+                    v = batch_result[dim_key]
+                    tile_info[dim_key] = v[i].item() if isinstance(v, torch.Tensor) else int(v[i])
+
+                # Tile position & source dimensions
+                for key in ("tile_row_start", "tile_col_start", "source_height", "source_width"):
+                    if key in batch_result:
+                        v = batch_result[key]
+                        tile_info[key] = v[i].item() if isinstance(v, torch.Tensor) else int(v[i])
+
+                # Scalar metadata
+                for key in ("cell_id", "pair_id", "event_id", "db_nbac_fire_id",
+                            "group_date_pre", "group_date_post",
+                            "group_id_pre", "group_id_post"):
+                    if key in batch_result:
+                        tile_info[key] = self._extract_scalar(batch_result[key], i, default="unknown")
+
+                # Profile (GeoTIFF)
+                tile_info["profile_raw"] = {
+                    pk: (pv[i] if isinstance(pv, (list, tuple)) else
+                         pv[i] if isinstance(pv, torch.Tensor) else pv)
+                    for pk, pv in batch_result["profile"].items()
+                }
+
+                # Common mask for NO_DATA
+                if "mask_common" in batch_result:
+                    tile_info["mask_common"] = batch_result["mask_common"][i].cpu()
+
+                groups[source_key].append(tile_info)
+
+        # --- Reassemble each source image ---
+        assembled: dict[str, dict[str, Any]] = {}
+        blend_window_cache: dict[tuple[int, int], np.ndarray] = {}
+
+        for source_key, tiles in groups.items():
+            # Single-tile source without tile metadata → leave for per-tile path
+            if len(tiles) == 1 and "tile_row_start" not in tiles[0]:
+                continue
+
+            source_h = tiles[0].get("source_height", tiles[0]["original_height"])
+            source_w = tiles[0].get("source_width", tiles[0]["original_width"])
+            num_classes = tiles[0]["probabilities"].shape[0]
+
+            prob_accum = np.zeros((num_classes, source_h, source_w), dtype=np.float64)
+            weight_accum = np.zeros((source_h, source_w), dtype=np.float64)
+            mask_accum = np.zeros((source_h, source_w), dtype=np.float32)
+
+            for tile in tiles:
+                r = tile.get("tile_row_start", 0)
+                c = tile.get("tile_col_start", 0)
+                th = tile["original_height"]
+                tw = tile["original_width"]
+
+                # Blend window (cached by tile dimensions)
+                win_key = (th, tw)
+                if win_key not in blend_window_cache:
+                    blend_window_cache[win_key] = self._create_blend_window(
+                        th, tw, overlap_h, overlap_w,
+                    )
+                win = blend_window_cache[win_key]
+
+                probs = tile["probabilities"].numpy()[:, :th, :tw]
+                prob_accum[:, r:r + th, c:c + tw] += probs * win[np.newaxis, :, :]
+                weight_accum[r:r + th, c:c + tw] += win
+
+                # Combine common masks (OR logic: valid in any tile = valid)
+                if "mask_common" in tile:
+                    cm = tile["mask_common"].numpy()
+                    if cm.ndim == 3:
+                        cm = cm.squeeze(0)
+                    mask_accum[r:r + th, c:c + tw] = np.maximum(
+                        mask_accum[r:r + th, c:c + tw], cm[:th, :tw],
+                    )
+
+            # Normalize blended probabilities
+            weight_accum = np.maximum(weight_accum, 1e-8)
+            blended_probs = (prob_accum / weight_accum[np.newaxis, :, :]).astype(np.float32)
+
+            # Final class prediction
+            pred = np.argmax(blended_probs, axis=0).astype(np.uint16)
+
+            # Re-apply NO_DATA mask
+            invalid = mask_accum < 0.5
+            pred[invalid] = NO_DATA
+
+            # Build source-level GeoTIFF profile
+            first_tile = tiles[0]
+            source_profile = self._build_source_profile(first_tile, source_h, source_w)
+
+            assembled[source_key] = {
+                "predictions": pred,
+                "probabilities": blended_probs,
+                "source_height": source_h,
+                "source_width": source_w,
+                "profile": source_profile,
+                "cell_id": first_tile.get("cell_id", "unknown"),
+                "pair_id": first_tile.get("pair_id"),
+                "event_id": first_tile.get(
+                    "event_id",
+                    first_tile.get("db_nbac_fire_id", "unknown_event"),
+                ),
+                "group_id_pre": first_tile.get("group_id_pre", "all"),
+                "group_id_post": first_tile.get("group_id_post", "all"),
+                "group_date_pre": first_tile.get("group_date_pre", "all"),
+                "group_date_post": first_tile.get("group_date_post", "all"),
+                "pre_post_name": source_key,
+            }
+
+        logger.info(
+            "Reassembled %d source images from overlapping tiles.",
+            len(assembled),
+        )
+        return assembled, bool(assembled)
+
+    @staticmethod
+    def _build_source_profile(
+        tile_info: dict[str, Any],
+        source_h: int,
+        source_w: int,
+    ) -> dict[str, Any]:
+        """Reconstruct the full source image's GeoTIFF profile from a tile's profile.
+
+        Inverts the tile-level transform translation so the saved GeoTIFF
+        covers the original spatial extent.
+        """
+        from rasterio.crs import CRS as RioCRS
+
+        raw_profile = tile_info["profile_raw"]
+        r = tile_info.get("tile_row_start", 0)
+        c = tile_info.get("tile_col_start", 0)
+
+        # Recover transform coefficients
+        transform_raw = raw_profile["transform"]
+        if isinstance(transform_raw, dict):
+            t_list = [transform_raw[k] for k in range(6)]
+        elif isinstance(transform_raw, (list, tuple)):
+            t_list = list(transform_raw[:6])
+        else:
+            t_list = list(transform_raw)[:6]
+        t_list = [t.item() if isinstance(t, torch.Tensor) else float(t) for t in t_list]
+
+        # Undo tile translation: source_transform = tile_transform * translation(−c, −r)
+        tile_transform = Affine(*t_list)
+        source_transform = tile_transform * Affine.translation(-c, -r)
+
+        # Parse CRS
+        crs_val = raw_profile.get("crs")
+        try:
+            crs_obj = RioCRS.from_user_input(crs_val) if crs_val else RioCRS.from_epsg(3979)
+        except Exception:
+            crs_obj = RioCRS.from_epsg(3979)
+
+        return {
+            "driver": "GTiff",
+            "dtype": "uint16",
+            "count": 1,
+            "nodata": 32767,
+            "height": source_h,
+            "width": source_w,
+            "crs": crs_obj,
+            "transform": source_transform,
+        }
+
+    def _save_assembled_predictions(
+        self,
+        assembled: dict[str, dict[str, Any]],
+        base_dir: Path,
+        predict_date: str,
+    ) -> None:
+        """Save overlap-blended source-level predictions as GeoTIFFs and merge.
+
+        Mirrors the structure of the per-tile path in :meth:`on_predict_end`:
+        individual GeoTIFFs → manifest JSON → group merge → global merge.
+        """
+        from collections import defaultdict
+        import json
+
+        group_tile_paths: dict[tuple[str, str, str], list[Path]] = defaultdict(list)
+        event_all_tile_paths: dict[str, list[Path]] = defaultdict(list)
+
+        manifest = {
+            "prediction_date": predict_date,
+            "model_name": self.change_detection_model,
+            "checkpoint": str(self.weights_from_checkpoint_path or ""),
+            "base_dir": str(base_dir),
+            "overlap_blended": True,
+            "predictions": [],
+        }
+
+        for source_key, info in assembled.items():
+            pred_np = info["predictions"]  # [H, W] uint16
+            profile_i = info["profile"]
+            cell_id = str(info["cell_id"])
+            pair_id = info.get("pair_id")
+            event_id = str(info.get("event_id", "unknown_event"))
+            group_id_pre = str(info.get("group_id_pre", "all"))
+            group_id_post = str(info.get("group_id_post", "all"))
+            group_date_pre = str(info.get("group_date_pre", "all"))
+            group_date_post = str(info.get("group_date_post", "all"))
+
+            safe_name = Path(
+                source_key[:60].replace("|", "_").replace("/", "_")
+            ).stem
+
+            # Directory: base / EVENT_ID / PREDICTION_DATE / cell_id
+            event_date_dir = base_dir / event_id / predict_date
+            tile_dir = event_date_dir / cell_id
+            tile_dir.mkdir(parents=True, exist_ok=True)
+
+            out_name = f"{pair_id}-{safe_name}.tif" if pair_id else f"{safe_name}.tif"
+            out_path = tile_dir / out_name
+
+            with rio.open(str(out_path), "w", **profile_i) as dst:
+                dst.write(pred_np[np.newaxis, :, :])
+
+            logger.info(
+                "Saved blended prediction to %s (%dx%d)",
+                out_path, pred_np.shape[1], pred_np.shape[0],
+            )
+
+            # Collect for merge
+            event_date_key = str(event_date_dir)
+            group_tile_paths[
+                (event_date_key, group_id_pre, group_id_post)
+            ].append(out_path)
+            event_all_tile_paths[event_date_key].append(out_path)
+
+            manifest["predictions"].append({
+                "pair_id": pair_id,
+                "event_id": event_id,
+                "cell_id": cell_id,
+                "group_id_pre": group_id_pre,
+                "group_id_post": group_id_post,
+                "group_date_pre": group_date_pre,
+                "group_date_post": group_date_post,
+                "tif_path": str(out_path),
+                "overlap_blended": True,
+            })
+
+        # Write manifest
+        manifest_path = base_dir / "manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2, default=str)
+        logger.info("Saved prediction manifest to %s", manifest_path)
+
+        # Merge across cells / groups (same logic as per-tile path)
+        self._merge_predictions(group_tile_paths, event_all_tile_paths)
+        logger.info("All blended predictions saved to %s", base_dir)
+
     def on_predict_end(self) -> None:
         """Appelé après que tous les predict_step soient terminés.
 
@@ -1243,6 +1601,17 @@ class ChangeDetectionChangeFormer(LightningModule):
                 base_dir = base_dir / "predictions"
         else:
             base_dir = Path(self.trainer.default_root_dir) / "predictions"
+
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- Try overlap-based tile reassembly (cosine blending) ---
+        assembled, used_blending = self._reassemble_overlapping_tiles(predictions)
+        if used_blending and assembled:
+            logger.info(
+                "Using overlap blending for %d source images.", len(assembled),
+            )
+            self._save_assembled_predictions(assembled, base_dir, predict_date)
+            return
 
         # --- Phase 1 : écrire chaque tuile individuelle ---
         # On collecte les chemins par (event_id, predict_date) pour le merge
