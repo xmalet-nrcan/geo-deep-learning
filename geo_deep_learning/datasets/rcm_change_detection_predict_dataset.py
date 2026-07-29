@@ -81,15 +81,19 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
         return files
 
     def _get_metadata(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Metadata specific to the predict CSV schema."""
+        """Metadata specific to the predict CSV schema.
+
+        All values are cast to concrete types to prevent None/NaN from reaching
+        PyTorch's default collate (which cannot mix float and NoneType).
+        """
         return {
-            "pair_id": data["pair_id"],
-            "event_id": data["event_id"],
-            "event_start_date": data["event_start_date"],
-            "group_id_pre": data["group_id_pre"],
-            "group_id_post": data["group_id_post"],
-            "group_date_pre": data["group_date_pre"],
-            "group_date_post": data["group_date_post"],
+            "pair_id": int(data["pair_id"]) if data["pair_id"] is not None else -1,
+            "event_id": int(data["event_id"]) if data["event_id"] is not None else -1,
+            "event_start_date": str(data["event_start_date"]) if data["event_start_date"] is not None else "",
+            "group_id_pre": int(data["group_id_pre"]) if data["group_id_pre"] is not None else -1,
+            "group_id_post": int(data["group_id_post"]) if data["group_id_post"] is not None else -1,
+            "group_date_pre": str(data["group_date_pre"]) if data["group_date_pre"] is not None else "",
+            "group_date_post": str(data["group_date_post"]) if data["group_date_post"] is not None else "",
         }
 
     def _get_pre_post_name(self, data: dict[str, str]) -> str:

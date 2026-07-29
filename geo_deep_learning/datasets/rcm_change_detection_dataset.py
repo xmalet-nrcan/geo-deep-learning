@@ -513,6 +513,10 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         image_profile['count'] = len(band_names)
         image_profile['crs'] = str(image_profile['crs'])
         image_profile['transform'] = list(image_profile['transform'])
+        # Ensure nodata is never None — PyTorch's default collate cannot batch
+        # a mix of float and NoneType across samples in the same dict key.
+        if image_profile.get('nodata') is None:
+            image_profile['nodata'] = float(NO_DATA)
         pre_post_name = self._get_pre_post_name(data)
 
         sample = {
