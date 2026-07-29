@@ -5,11 +5,11 @@ trainer:
   devices: 1                  # predict ne supporte qu'un seul device
   strategy: auto
   precision: "bf16-mixed"     # cohérent avec le training; RTX 6000 Ada OK
-  logger:
-    class_path: lightning.pytorch.loggers.TensorBoardLogger
-    init_args:
-      save_dir: &log_dir ./lightning_logs
-      name: &run_name predict/changestar/2026/changestar2_2026
+#  logger:
+#    class_path: lightning.pytorch.loggers.TensorBoardLogger
+#    init_args:
+#      save_dir: &log_dir ./lightning_logs
+#      name: &run_name predict/changestar/2026/changestar2_2026
   # Pas de callbacks de training (pas d'EarlyStopping, ModelCheckpoint, etc.)
   callbacks: []
 
@@ -26,13 +26,13 @@ model:
     speckle_noise_std: 0.15  # SAR-specific multiplicative speckle augmentation
     # --- Conditioning & regularization modules ---
     use_metadata_film: true       # encode SAT_PASS/BEAM via FiLM instead of constant bands
-    film_embed_dim: 32            # embedding dimension for FiLM conditioner
+    film_embed_dim: 8            # embedding dimension for FiLM conditioner
 
-    use_cbam: false               # Disabled: ConvNeXt encoder already has implicit channel attention
+    use_cbam: true               # Disabled: ConvNeXt encoder already has implicit channel attention
     cbam_reduction: 4
 
     use_channel_dropout: true     # Drop aléatoire de bandes SAR (train only) — always useful
-    channel_dropout_prob: 0.1     # prob de drop par canal (0.1 = conservateur)
+    channel_dropout_prob: 0.3     # prob de drop par canal (0.1 = conservateur)
 
     use_dfa: false                # Disabled: ChangeStar2 aux heads are too simple for gating
     dfa_gate_hidden: 16
@@ -75,7 +75,7 @@ model:
       frequency: 1
     class_labels: ["unburn", "burn"]
     class_colors: ["#000000", "#FF0000"]
-    weights_from_checkpoint_path: /app/models_checkpoints/2026/changestar2/cs2base_A_y23-25_film-only-epoch=89-val_loss=0.304.ckpt
+    weights_from_checkpoint_path: /app/models_checkpoints/2026/changestar2/cs2base_A_y23-25_8film-cbam-only-no-swa-epoch=94-val_loss=0.215.ckpt
     predict_output_dir: /mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
 
 data:
