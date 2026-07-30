@@ -86,10 +86,13 @@ data:
     num_workers: 10
     separate_metadata: true   # SAT_PASS/BEAM as scalars for FiLM (must match training)
     patch_size: [256, 256]
-    # Tiling with overlap: tiles are blended using a cosine window
-    # to eliminate seam artefacts at tile boundaries.
-    # Set tile_stride < tile_size for overlap (e.g. 50% overlap here).
-    # Set to null to disable tiling entirely.
+    # --- Overlap between grid cells ---
+    # Loads extra pixels from each neighboring cell on every side.
+    # For 200×200 cells with buffer=50, the expanded image is 300×300.
+    # Adjacent cells overlap by 2×50 = 100px = 50% of cell size.
+    predict_overlap_buffer: 50
+    # Tiling with overlap: if the expanded image (e.g. 400×400) is larger
+    # than image_size, enable tiling. Set to null to disable.
     tile_size: [256, 256]
     tile_stride: [192, 192]       # overlap = tile_size - stride = 64 px per side
     csv_root_folder:  &data_root /mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
