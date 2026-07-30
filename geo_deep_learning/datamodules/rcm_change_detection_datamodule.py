@@ -46,6 +46,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             separate_metadata: bool = True,
             tile_size: tuple[int, int] | None = None,
             tile_stride: tuple[int, int] | None = None,
+            predict_overlap_buffer: int = 0,
 
     ) -> None:
         """Initialize RcmChangeDetectionDataModule.
@@ -60,6 +61,12 @@ class RcmChangeDetectionDataModule(LightningDataModule):
                 ``None`` (default) disables tiling entirely.
             tile_stride: Step between tile origins.  Defaults to *tile_size*
                 (no overlap).  Use a smaller value for overlapping tiles.
+            predict_overlap_buffer: Number of pixels to load from each
+                neighboring cell on every side.  **Only used at predict time**
+                — ignored for train/val/test.  Passed to the dataset class
+                only when ``stage == "predict"``.
+                Set to 0 (default) to disable.
+                For 50 % overlap on 200×200 cells, use 100.
         """
         super().__init__()
 
@@ -84,6 +91,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self.separate_metadata = separate_metadata
         self.tile_size = tile_size
         self.tile_stride = tile_stride
+        self._predict_overlap_buffer = predict_overlap_buffer
 
         self.dataset: RCMChangeDetectionDataset = None
         if split_on_columns is None:
@@ -93,9 +101,9 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         elif isinstance(split_on_columns, Iterable):
             self._split_on_columns = list(split_on_columns)
 
-    def setup(self, stage: str | None = None) -> None:  # noqa: ARG002
+    def setup(self, stage: str | None = None) -> None:
         """Create dataset."""
-        self.dataset = self.dataset_class(
+        ds_kwargs = dict(
             split_or_csv_file_name=self.csv_file_name,
             norm_stats=self.norm_stats,
             csv_root_folder=self.csv_root_folder,
@@ -109,6 +117,16 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             tile_size=self.tile_size,
             tile_stride=self.tile_stride,
         )
+        # Only enable overlap buffer at predict time — training uses
+        # independent tiles without spatial context from neighbours.
+        if stage == "predict" and self._predict_overlap_buffer > 0:
+            ds_kwargs["predict_overlap_buffer"] = self._predict_overlap_buffer
+        try:
+            self.dataset = self.dataset_class(**ds_kwargs)
+        except TypeError:
+            # Fallback: dataset class doesn't accept predict_overlap_buffer
+            ds_kwargs.pop("predict_overlap_buffer", None)
+            self.dataset = self.dataset_class(**ds_kwargs)
 
         if stage != "predict":
             self._set_train_test_val_datasets()
