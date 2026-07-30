@@ -342,6 +342,31 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
             return pre, post, mask, pre_name, post_name
         return super()._load_image(index)
 
+    def _load_water_mask(self, index: int) -> tuple[Tensor, str]:
+        """Override to pad the water mask to match the expanded image size.
+
+        The water mask file covers the original cell (e.g. 200×200) but the
+        expanded image is larger (e.g. 300×300 with buffer=50).  We pad the
+        mask with 1 (= water) in the buffer zone so those pixels are marked
+        invalid in common_mask and won't contribute to the prediction.
+        Using water=1 in buffer zones is conservative: if the neighbor has
+        water there, it's correctly masked; if it doesn't, the common_mask
+        from the image bitmask will still mark it valid.
+        """
+        water_mask, name = super()._load_water_mask(index)
+        buf = self._predict_overlap_buffer
+        data = self.files[index]
+        if buf > 0 and "_buffer_orig_h" in data:
+            # Pad with 0 (= no water = keep valid) — the common_mask from
+            # the bitmask band already handles invalid pixels in the buffer.
+            _, orig_h, orig_w = water_mask.shape
+            exp_h = orig_h + 2 * buf
+            exp_w = orig_w + 2 * buf
+            padded = torch.zeros((1, exp_h, exp_w), dtype=water_mask.dtype)
+            padded[:, buf:buf + orig_h, buf:buf + orig_w] = water_mask
+            water_mask = padded
+        return water_mask, name
+
     def __getitem__(self, index: int) -> dict:
         """Override to adjust GeoTIFF profile for the expanded area."""
         sample = super().__getitem__(index)
