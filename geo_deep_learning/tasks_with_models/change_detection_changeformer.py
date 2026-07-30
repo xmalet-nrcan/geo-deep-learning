@@ -1743,12 +1743,19 @@ class ChangeDetectionChangeFormer(LightningModule):
         return str(batch_field)
 
     @staticmethod
-    def _safe_merge(datasets):
+    def _safe_merge(datasets, method="average"):
         """Merge raster datasets, handling rasterio versions that reject negative pixel height.
 
         Standard GeoTIFFs are north-up (pixel height < 0). Some rasterio versions
         (e.g. 1.4.0) raise MergeError for these. Workaround: flip to positive pixel
         height in memory, merge, then flip the result back.
+
+        Args:
+            datasets: List of rasterio dataset readers to merge.
+            method: Merge method for overlapping regions.
+                ``'average'`` (default) averages valid pixels — ideal when
+                adjacent cells have spatial overlap from ``predict_overlap_buffer``.
+                ``'first'`` takes the first valid value (legacy behaviour).
         """
         from rasterio.merge import merge as rio_merge
         from rasterio.transform import Affine
@@ -1756,7 +1763,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         import numpy as np
 
         try:
-            return rio_merge(datasets)
+            return rio_merge(datasets, method=method)
         except Exception as e:
             if "negative pixel height" not in str(e):
                 raise
@@ -1785,7 +1792,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             else:
                 flipped_datasets.append(ds)
 
-        mosaic, mosaic_transform = rio_merge(flipped_datasets)
+        mosaic, mosaic_transform = rio_merge(flipped_datasets, method=method)
 
         # Close flipped in-memory datasets
         for ds in flipped_datasets:
@@ -1809,7 +1816,7 @@ class ChangeDetectionChangeFormer(LightningModule):
     def _chunked_merge(
         tile_paths: list[Path],
         output_path: Path,
-        chunk_size: int = 200,
+        chunk_size: int = 100,
     ) -> None:
         """Merge many tiles without exceeding the OS open-file limit.
 
@@ -1822,10 +1829,10 @@ class ChangeDetectionChangeFormer(LightningModule):
         Args:
             tile_paths: Paths to the individual prediction GeoTIFFs.
             output_path: Destination path for the merged result.
-            chunk_size: Max number of files to open at once (default 200,
-                well below the typical ``ulimit -n`` of 1024).
+            chunk_size: Max number of files to open at once (default 100,
+                conservative to account for FDs used by GDAL, Python, etc.).
         """
-        import tempfile
+        import gc
 
         if len(tile_paths) <= chunk_size:
             # Small enough → single-pass merge
@@ -1857,6 +1864,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "  Chunk %d–%d merged → %s",
                     chunk_idx, chunk_idx + len(chunk) - 1, intermediate_path.name,
                 )
+                # Force-release file descriptors held by rasterio / GDAL
+                gc.collect()
 
             # --- Round 2: merge intermediates → final output ---
             if len(intermediate_paths) == 1:
@@ -1904,6 +1913,9 @@ class ChangeDetectionChangeFormer(LightningModule):
             with rio.open(str(output_path), "w", **merge_profile) as dst:
                 dst.write(mosaic)
 
+            # Free large arrays immediately
+            del mosaic
+
         finally:
             for ds in datasets_to_merge:
                 try:
@@ -1923,6 +1935,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         Uses :meth:`_chunked_merge` to handle large tile counts without
         exceeding the OS open-file descriptor limit.
         """
+        import gc
+
         # --- Pass 1 : merge par paire (group_id_pre, group_id_post) ---
         for (event_date_dir_str, group_pre, group_post), tile_paths in group_tile_paths.items():
             event_date_dir = Path(event_date_dir_str)
@@ -1941,6 +1955,9 @@ class ChangeDetectionChangeFormer(LightningModule):
             except Exception:
                 logger.exception("Failed to merge group %s/%s in %s",
                                  group_pre, group_post, event_date_dir)
+
+        # Force GC between passes to release all FDs from Pass 1
+        gc.collect()
 
         # --- Pass 2 : merge global par EVENT_ID / PREDICTION_DATE ---
         for event_date_dir_str, tile_paths in event_all_tile_paths.items():
