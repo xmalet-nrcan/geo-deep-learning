@@ -1826,9 +1826,8 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         try:
             mosaic_sum, transform = rio_merge(datasets, method="sum")
-            # Reset dataset file pointers so they can be read again
-            for ds in datasets:
-                ds.seek(0)
+            # rasterio.DatasetReader is random-access; no seek needed before the
+            # second pass.
             mosaic_count, _ = rio_merge(datasets, method="count")
         except Exception as e:
             if "negative pixel height" not in str(e):
@@ -1836,8 +1835,6 @@ class ChangeDetectionChangeFormer(LightningModule):
             mosaic_sum, transform = ChangeDetectionChangeFormer._merge_with_flip(
                 datasets, method="sum",
             )
-            for ds in datasets:
-                ds.seek(0)
             mosaic_count, _ = ChangeDetectionChangeFormer._merge_with_flip(
                 datasets, method="count",
             )
