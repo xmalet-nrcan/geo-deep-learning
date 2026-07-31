@@ -126,6 +126,9 @@ data:
     patch_size:
     - 256
     - 256
+    train_overlap_buffer: 50
+    tile_size: [ 256, 256 ]
+    tile_stride: [ 192, 192 ]
     split_on_columns: db_nbac_fire_id
     csv_root_folder: /mnt/geospatial/projet_RCM_scanfire/
     patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
