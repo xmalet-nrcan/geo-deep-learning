@@ -39,7 +39,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             band_names: Optional[List[str]] = None,
             satellite_pass: Optional[str] = None,
             beams: Optional[List[str]] = None,
-            dataset_years : Optional[list[int]] = None,
+            dataset_years: Optional[list[int]] = None,
             split_ratios=(0.70, 0.15, 0.15),
             split_on_columns: Optional[str | list] = None,
             dataset_class: Type[RCMChangeDetectionDataset] = RCMChangeDetectionDataset,
@@ -47,11 +47,15 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             tile_size: tuple[int, int] | None = None,
             tile_stride: tuple[int, int] | None = None,
             predict_overlap_buffer: int = 0,
-
+            train_overlap_buffer: int = 0,
     ) -> None:
         """Initialize RcmChangeDetectionDataModule.
 
         Args:
+            dataset_class: Dataset class used for **all** stages (train / val /
+                test / predict).  Override in the YAML config to switch between
+                ``RCMChangeDetectionDataset`` (training) and
+                ``RCMChangeDetectionOnPredictDataset`` (inference).
             separate_metadata: When True (default), the dataset will NOT
                 concatenate COMMON_MASK / SAT_PASS / BEAM to the image tensors.
                 Instead they are returned as separate dict entries for FiLM
@@ -62,11 +66,15 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             tile_stride: Step between tile origins.  Defaults to *tile_size*
                 (no overlap).  Use a smaller value for overlapping tiles.
             predict_overlap_buffer: Number of pixels to load from each
-                neighboring cell on every side.  **Only used at predict time**
-                — ignored for train/val/test.  Passed to the dataset class
-                only when ``stage == "predict"``.
+                neighboring cell on every side at **predict time** only.
                 Set to 0 (default) to disable.
                 For 50 % overlap on 200×200 cells, use 100.
+            train_overlap_buffer: Number of pixels to load from each
+                neighboring cell on every side during **train / val / test**.
+                Expands each cell with real SAR context from its 8 neighbours.
+                The loss is computed only on the central cell pixels so that
+                the buffer zone (which has no ground-truth label) is excluded.
+                Set to 0 (default) to disable.
         """
         super().__init__()
 
@@ -92,6 +100,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self.tile_size = tile_size
         self.tile_stride = tile_stride
         self._predict_overlap_buffer = predict_overlap_buffer
+        self._train_overlap_buffer = train_overlap_buffer
 
         self.dataset: RCMChangeDetectionDataset = None
         if split_on_columns is None:
@@ -103,6 +112,8 @@ class RcmChangeDetectionDataModule(LightningDataModule):
 
     def setup(self, stage: str | None = None) -> None:
         """Create dataset."""
+        is_predict = (stage == "predict")
+
         ds_kwargs = dict(
             split_or_csv_file_name=self.csv_file_name,
             norm_stats=self.norm_stats,
@@ -117,10 +128,12 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             tile_size=self.tile_size,
             tile_stride=self.tile_stride,
         )
-        # Only enable overlap buffer at predict time — training uses
-        # independent tiles without spatial context from neighbours.
-        if stage == "predict" and self._predict_overlap_buffer > 0:
-            ds_kwargs["predict_overlap_buffer"] = self._predict_overlap_buffer
+
+        # Inject the overlap buffer that matches the current stage
+        buf = self._predict_overlap_buffer if is_predict else self._train_overlap_buffer
+        if buf > 0:
+            ds_kwargs["predict_overlap_buffer"] = buf
+
         try:
             self.dataset = self.dataset_class(**ds_kwargs)
         except TypeError:
@@ -128,7 +141,7 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             ds_kwargs.pop("predict_overlap_buffer", None)
             self.dataset = self.dataset_class(**ds_kwargs)
 
-        if stage != "predict":
+        if not is_predict:
             self._set_train_test_val_datasets()
 
     def _split_by_column(self, column_name, split_ratios=(0.7, 0.15, 0.15), seed=42):
