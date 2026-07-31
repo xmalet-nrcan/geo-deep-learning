@@ -1744,31 +1744,94 @@ class ChangeDetectionChangeFormer(LightningModule):
 
     @staticmethod
     def _safe_merge(datasets, method="average"):
-        """Merge raster datasets, handling rasterio versions that reject negative pixel height.
+        """Merge raster datasets with averaging support for all rasterio versions.
 
         Standard GeoTIFFs are north-up (pixel height < 0). Some rasterio versions
         (e.g. 1.4.0) raise MergeError for these. Workaround: flip to positive pixel
         height in memory, merge, then flip the result back.
 
+        When ``method='average'``, overlapping valid pixels are averaged using
+        sum/count (compatible with all rasterio versions, since ``'average'``
+        was only added in rasterio ≥ 1.4.x).
+
         Args:
             datasets: List of rasterio dataset readers to merge.
-            method: Merge method for overlapping regions.
-                ``'average'`` (default) averages valid pixels — ideal when
-                adjacent cells have spatial overlap from ``predict_overlap_buffer``.
-                ``'first'`` takes the first valid value (legacy behaviour).
+            method: ``'average'`` (default) averages valid (non-nodata) pixels.
+                Any other value (``'first'``, ``'last'``, ``'min'``, ``'max'``)
+                is passed directly to ``rasterio.merge``.
         """
         from rasterio.merge import merge as rio_merge
         from rasterio.transform import Affine
         from rasterio import MemoryFile
         import numpy as np
 
+        if method == "average":
+            return ChangeDetectionChangeFormer._merge_average(datasets)
+
         try:
             return rio_merge(datasets, method=method)
         except Exception as e:
             if "negative pixel height" not in str(e):
                 raise
+            return ChangeDetectionChangeFormer._merge_with_flip(
+                datasets, method=method,
+            )
 
-        # --- Workaround: flip datasets to positive pixel height ---
+    @staticmethod
+    def _merge_average(datasets):
+        """Merge datasets by averaging overlapping valid pixels.
+
+        Uses two passes of ``rasterio.merge`` with ``method='sum'`` and
+        ``method='count'`` to compute the average.  Falls back to the
+        flip workaround if the rasterio version rejects negative pixel height.
+        """
+        from rasterio.merge import merge as rio_merge
+        import numpy as np
+
+        try:
+            mosaic_sum, transform = rio_merge(datasets, method="sum")
+            # Reset dataset file pointers so they can be read again
+            for ds in datasets:
+                ds.seek(0)
+            mosaic_count, _ = rio_merge(datasets, method="count")
+        except Exception as e:
+            if "negative pixel height" not in str(e):
+                raise
+            mosaic_sum, transform = ChangeDetectionChangeFormer._merge_with_flip(
+                datasets, method="sum",
+            )
+            for ds in datasets:
+                ds.seek(0)
+            mosaic_count, _ = ChangeDetectionChangeFormer._merge_with_flip(
+                datasets, method="count",
+            )
+
+        # Average: sum / count, avoiding division by zero
+        mask_no_coverage = (mosaic_count == 0)
+        mosaic_count_safe = mosaic_count.astype(np.float64)
+        mosaic_count_safe[mask_no_coverage] = 1.0
+        mosaic = (mosaic_sum.astype(np.float64) / mosaic_count_safe)
+
+        # Restore nodata where no tile contributed
+        nodata = datasets[0].nodata
+        if nodata is not None:
+            mosaic[mask_no_coverage] = nodata
+
+        mosaic = mosaic.astype(datasets[0].dtypes[0])
+        return mosaic, transform
+
+    @staticmethod
+    def _merge_with_flip(datasets, method="first"):
+        """Merge datasets after flipping to positive pixel height.
+
+        Workaround for rasterio versions that reject north-up (negative pixel
+        height) transforms.  Flips all datasets to positive pixel height in
+        memory, merges, then flips the result back.
+        """
+        from rasterio.merge import merge as rio_merge
+        from rasterio.transform import Affine
+        from rasterio import MemoryFile
+
         mem_files = []
         flipped_datasets = []
         needs_flip = False

@@ -13,3 +13,4 @@ models_checkpoints
 
 # Specific files
 environment_full_conda_bckp.yml
+!/data/
