@@ -130,6 +130,16 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
         if self._predict_overlap_buffer > 0:
             self._build_cell_grid_index(files)
 
+        # Apply tiling if configured.
+        # When predict_overlap_buffer > 0, the effective image size is larger
+        # than the file on disk (200→300 with buf=50).  We override the
+        # dimensions that _expand_files_with_tiles will see.
+        if self.tile_size is not None:
+            if self._predict_overlap_buffer > 0:
+                files = self._expand_files_with_tiles_buffered(files)
+            else:
+                files = self._expand_files_with_tiles(files)
+
         return files
 
     # ------------------------------------------------------------------
@@ -153,6 +163,60 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
             "(buffer=%d px).",
             len(self._cell_grid_index), len(files), self._predict_overlap_buffer,
         )
+
+    def _expand_files_with_tiles_buffered(self, files: list[dict]) -> list[dict]:
+        """Like ``_expand_files_with_tiles`` but uses the effective image size
+        after buffer expansion (e.g. 300×300 instead of the file's 200×200).
+
+        This ensures that expanded images larger than ``tile_size`` are properly
+        split into tiles so the model always receives its expected input size.
+        """
+        buf = self._predict_overlap_buffer
+        tile_h, tile_w = self.tile_size
+        stride_h, stride_w = self.tile_stride
+        n_files = len(files)
+
+        expanded: list[dict] = []
+        for entry in files:
+            # Get the original file dimensions
+            with rio.open(entry["image"]) as src:
+                file_h, file_w = src.height, src.width
+
+            # Effective dimensions after buffer expansion
+            img_h = file_h + 2 * buf
+            img_w = file_w + 2 * buf
+
+            if img_h <= tile_h and img_w <= tile_w:
+                # Expanded image fits in one tile — no splitting needed
+                expanded.append(entry)
+                continue
+
+            # Build tile grid on the EFFECTIVE dimensions
+            rows = sorted(set(
+                list(range(0, max(img_h - tile_h, 0) + 1, stride_h))
+                + ([max(0, img_h - tile_h)] if img_h > tile_h else [0])
+            ))
+            cols = sorted(set(
+                list(range(0, max(img_w - tile_w, 0) + 1, stride_w))
+                + ([max(0, img_w - tile_w)] if img_w > tile_w else [0])
+            ))
+
+            for r in rows:
+                for c in cols:
+                    tile_entry = entry.copy()
+                    tile_entry["_tile_row"] = r
+                    tile_entry["_tile_col"] = c
+                    tile_entry["_source_h"] = img_h
+                    tile_entry["_source_w"] = img_w
+                    expanded.append(tile_entry)
+
+        if len(expanded) != n_files:
+            logger.info(
+                "Tile expansion (buffered): %d files → %d tiles "
+                "(tile_size=%s, stride=%s, buffer=%d)",
+                n_files, len(expanded), self.tile_size, self.tile_stride, buf,
+            )
+        return expanded
 
     @staticmethod
     def _parse_cell_id(cell_id: str) -> tuple[int, int] | None:
@@ -347,18 +411,13 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
 
         The water mask file covers the original cell (e.g. 200×200) but the
         expanded image is larger (e.g. 300×300 with buffer=50).  We pad the
-        mask with 1 (= water) in the buffer zone so those pixels are marked
-        invalid in common_mask and won't contribute to the prediction.
-        Using water=1 in buffer zones is conservative: if the neighbor has
-        water there, it's correctly masked; if it doesn't, the common_mask
-        from the image bitmask will still mark it valid.
+        mask with 0 (= no water = valid) in the buffer zone — the common_mask
+        from the bitmask band already handles invalid pixels in the buffer.
         """
         water_mask, name = super()._load_water_mask(index)
         buf = self._predict_overlap_buffer
         data = self.files[index]
         if buf > 0 and "_buffer_orig_h" in data:
-            # Pad with 0 (= no water = keep valid) — the common_mask from
-            # the bitmask band already handles invalid pixels in the buffer.
             _, orig_h, orig_w = water_mask.shape
             exp_h = orig_h + 2 * buf
             exp_w = orig_w + 2 * buf
@@ -367,32 +426,43 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
             water_mask = padded
         return water_mask, name
 
+    def _apply_tile_crop(self, sample: dict, data: dict) -> dict:
+        """Override to apply buffer transform offset BEFORE tile cropping.
+
+        The parent's ``_apply_tile_crop`` adjusts the profile transform for the
+        tile position.  We must inject the buffer offset first so the tile
+        transform is computed relative to the expanded image origin, not the
+        original cell origin.
+
+        Order of transform adjustments:
+        1. Buffer offset: shift origin by (-buf, -buf) pixels
+        2. Tile crop: shift origin by (tile_col, tile_row) pixels  (parent)
+        """
+        buf = self._predict_overlap_buffer
+        if buf > 0 and "_buffer_orig_h" in data:
+            # Adjust profile transform for the buffer expansion
+            if sample.get("profile") is not None:
+                transform_list = sample["profile"]["transform"]
+                cell_transform = Affine(*transform_list[:6])
+                # Shift origin: -buf pixels in col (west) and row (north)
+                buffered_transform = cell_transform * Affine.translation(-buf, -buf)
+                sample["profile"]["transform"] = list(buffered_transform)
+
+        # Now let the parent handle tile cropping (if active)
+        return super()._apply_tile_crop(sample, data)
+
     def __getitem__(self, index: int) -> dict:
-        """Override to adjust GeoTIFF profile for the expanded area."""
+        """Override to update dimensions for the expanded area."""
         sample = super().__getitem__(index)
 
         data = self.files[index]
         buf = self._predict_overlap_buffer
         if buf > 0 and "_buffer_orig_h" in data:
-            orig_h = data["_buffer_orig_h"]
-            orig_w = data["_buffer_orig_w"]
-
-            # Adjust the GeoTIFF transform to account for the buffer offset.
-            # The origin shifts by -buf pixels in both row and col directions.
-            transform_list = sample["profile"]["transform"]
-            orig_transform = Affine(*transform_list[:6])
-            # Shift origin: buffer pixels to the left and up
-            expanded_transform = orig_transform * Affine.translation(-buf, -buf)
-            sample["profile"]["transform"] = list(expanded_transform)
-
-            # Update dimensions to reflect the expanded image
-            sample["original_height"] = sample["image"].shape[1]
-            sample["original_width"] = sample["image"].shape[2]
-
-            # Store buffer metadata for on_predict_end to know the core area
-            sample["_overlap_buffer"] = buf
-            sample["_core_height"] = orig_h
-            sample["_core_width"] = orig_w
+            # If no tiling was applied, update dimensions to the expanded size.
+            # (If tiling IS active, _apply_tile_crop already set these.)
+            if "_tile_row" not in data:
+                sample["original_height"] = sample["image"].shape[1]
+                sample["original_width"] = sample["image"].shape[2]
 
         return sample
 
