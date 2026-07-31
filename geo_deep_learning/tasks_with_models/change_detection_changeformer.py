@@ -1347,12 +1347,36 @@ class ChangeDetectionChangeFormer(LightningModule):
                     if key in batch_result:
                         tile_info[key] = self._extract_scalar(batch_result[key], i, default="unknown")
 
-                # Profile (GeoTIFF)
-                tile_info["profile_raw"] = {
-                    pk: (pv[i] if isinstance(pv, (list, tuple)) else
-                         pv[i] if isinstance(pv, torch.Tensor) else pv)
-                    for pk, pv in batch_result["profile"].items()
-                }
+                # Profile (GeoTIFF) — extract per-sample values from the collated profile.
+                # PyTorch's default_collate *transposes* a Python list of length N:
+                # a list of 9-element transform lists becomes a list of 9 tensors each
+                # of shape (batch_size,).  So pv[k][i] yields the k-th coefficient of
+                # the i-th sample — NOT pv[i] which would give the i-th coefficient
+                # across all samples.  Tensors (from numpy-backed values) are batched
+                # normally as (N, 9) and can be indexed with pv[i] directly.
+                profile_raw: dict[str, Any] = {}
+                for pk, pv in batch_result["profile"].items():
+                    if pk == "transform":
+                        if isinstance(pv, (list, tuple)):
+                            # Transposed list: pv[k] is a tensor of shape (batch_size,)
+                            # representing the k-th transform coefficient for all samples.
+                            profile_raw[pk] = [
+                                float(pv[k][i].item() if isinstance(pv[k], torch.Tensor)
+                                      else pv[k][i])
+                                for k in range(len(pv))
+                            ]
+                        elif isinstance(pv, torch.Tensor):
+                            # Stacked (N, 9) tensor: pv[i] is the i-th sample's transform.
+                            profile_raw[pk] = pv[i].tolist()
+                        else:
+                            profile_raw[pk] = pv
+                    elif isinstance(pv, (list, tuple)):
+                        profile_raw[pk] = pv[i]
+                    elif isinstance(pv, torch.Tensor):
+                        profile_raw[pk] = pv[i]
+                    else:
+                        profile_raw[pk] = pv
+                tile_info["profile_raw"] = profile_raw
 
                 # Common mask for NO_DATA
                 if "mask_common" in batch_result:
@@ -1461,18 +1485,30 @@ class ChangeDetectionChangeFormer(LightningModule):
         r = tile_info.get("tile_row_start", 0)
         c = tile_info.get("tile_col_start", 0)
 
-        # Recover transform coefficients
+        # Recover transform coefficients — support list/tuple (9 or 6 elements),
+        # 1-D tensor, numpy array, dict with int keys, or Affine object.
         transform_raw = raw_profile["transform"]
         if isinstance(transform_raw, dict):
-            t_list = [transform_raw[k] for k in range(6)]
+            try:
+                t_list = [transform_raw[k] for k in range(6)]
+            except KeyError:
+                t_list = [transform_raw.get(k, 0.0) for k in ("a", "b", "c", "d", "e", "f")]
         elif isinstance(transform_raw, (list, tuple)):
-            t_list = list(transform_raw[:6])
+            t_list = list(transform_raw)
         else:
-            t_list = list(transform_raw)[:6]
+            # tensor, numpy array, Affine, …
+            t_list = list(transform_raw)
         t_list = [t.item() if isinstance(t, torch.Tensor) else float(t) for t in t_list]
 
+        if len(t_list) < 6:
+            raise ValueError(
+                f"Cannot reconstruct source profile: transform has only {len(t_list)} "
+                f"element(s) — need ≥ 6. "
+                f"type={type(transform_raw).__name__!r}, raw={transform_raw!r}"
+            )
+
         # Undo tile translation: source_transform = tile_transform * translation(−c, −r)
-        tile_transform = Affine(*t_list)
+        tile_transform = Affine(*t_list[:6])
         source_transform = tile_transform * Affine.translation(-c, -r)
 
         # Parse CRS
