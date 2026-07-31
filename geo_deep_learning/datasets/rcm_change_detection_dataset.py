@@ -293,7 +293,9 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
         return arr, (arr[0, :, :] == 1)
 
     def _load_mask(self, index: int) -> tuple[Tensor, str]:
-        return self._load_image_by_name(index, "mask")
+        mask, name = self._load_image_by_name(index, "mask")
+        mask = self._apply_buffer_padding(mask, self.files[index])
+        return mask, name
 
     def _load_water_mask(self, index: int) -> tuple[Tensor, str]:
         water_mask, name = self._load_image_by_name(index, "water_mask")
