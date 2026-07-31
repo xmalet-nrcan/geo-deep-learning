@@ -377,6 +377,13 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
             image_pre  = manage_bands(image_pre,  bands_index)
             image_post = manage_bands(image_post, bands_index)
 
+        # Normalise BEFORE adding categorical bands so the stats always
+        # match the selected SAR channels only.
+        water_mask, _ = self._load_water_mask(index)
+        image_pre, image_post, mean, std, mins, maxs = self._normalize_and_standardize(
+            image_post, image_pre
+        )
+
         # Initialise FiLM metadata to safe defaults; only populated in separate_metadata mode
         sat_pass_value: int | None = None
         beam_value:     int | None = None
@@ -408,11 +415,6 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
                 + [SATELLITE_PASS_BAND_NAME, BEAM_BAND_NAME]
             )
             sat_pass_value = beam_value = None
-
-        water_mask, _ = self._load_water_mask(index)
-        image_pre, image_post, mean, std, mins, maxs = self._normalize_and_standardize(
-            image_post, image_pre
-        )
 
         # GeoTIFF profile for output TIFs
         with rio.open(data['image']) as src:
@@ -494,10 +496,16 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
     def _normalize_and_standardize(
         self, image_post: Tensor, image_pre: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        bands = getattr(self, "bands", None)
+
         def _t(key):
+            vals = self.norm_stats[key]
+            if bands is not None:
+                vals = [vals[b] for b in bands]
             return torch.tensor(
-                self.norm_stats[key], dtype=torch.float32, device=image_pre.device,
+                vals, dtype=torch.float32, device=image_pre.device,
             ).view(-1, 1, 1)
+
         mean, std, mins, maxs = _t("mean"), _t("std"), _t("min"), _t("max")
         image_pre  = (image_pre  - mean) / (std + 1e-8)
         image_post = (image_post - mean) / (std + 1e-8)
