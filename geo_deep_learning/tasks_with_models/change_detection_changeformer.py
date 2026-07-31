@@ -720,6 +720,26 @@ class ChangeDetectionChangeFormer(LightningModule):
         common_data_mask = batch["mask-common"]
 
         batch_size = x_post.shape[0]
+
+        # --- Mask out the neighbour-context buffer zone (train_overlap_buffer) ---
+        # When spatial context is loaded from adjacent cells the image is
+        # (h + 2b) × (w + 2b) but the ground-truth label mask only covers
+        # the central (h × w) region.  Zero the buffer zone in common_data_mask
+        # so the loss is never computed there.
+        # The dataset stores "buffer_size", "cell_orig_height", "cell_orig_width"
+        # whenever a non-zero buffer was applied (train or predict).
+        if "buffer_size" in batch:
+            buf_raw = batch["buffer_size"]
+            buf = int(buf_raw[0].item() if isinstance(buf_raw, torch.Tensor) else buf_raw[0])
+            if buf > 0:
+                img_h, img_w = x_post.shape[2], x_post.shape[3]
+                common_data_mask = common_data_mask.clone()
+                if buf < img_h:
+                    common_data_mask[:, :, :buf, :] = 0.0
+                    common_data_mask[:, :, img_h - buf:, :] = 0.0
+                if buf < img_w:
+                    common_data_mask[:, :, :, :buf] = 0.0
+                    common_data_mask[:, :, :, img_w - buf:] = 0.0
         # Vérif entrées images
         if not torch.isfinite(x_pre).all():
             raise RuntimeError("x_pre contains NaN/Inf")
