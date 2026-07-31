@@ -1,19 +1,30 @@
-from pathlib import Path
+"""RCM Change Detection Dataset (training schema).
+
+Hierarchy
+---------
+``CSVDataset``
+  └── ``ChangeDetectionDataset``
+        └── ``TiledChangeDetectionDataset``   ← tiling + spatial-context buffer
+              └── ``RCMChangeDetectionDataset``  ← RCM CSV schema + bands + FiLM metadata
+                    └── ``RCMChangeDetectionOnPredictDataset``  ← predict CSV schema
+"""
+from __future__ import annotations
 
 import logging
-import torch
-from enum import Enum
-from pandas import DataFrame
-from torch import Tensor
+from pathlib import Path
 from typing import Optional, List, Any
 
 import numpy as np
 import pandas as pd
 import rasterio as rio
-from rasterio.transform import Affine
-from geo_deep_learning.datasets.change_detection_dataset import ChangeDetectionDataset
+import torch
+from enum import Enum
+from numpy import ndarray
+from pandas import DataFrame
+from torch import Tensor
+
+from geo_deep_learning.datasets.tiled_change_detection_dataset import TiledChangeDetectionDataset
 from geo_deep_learning.utils.tensors import manage_bands
-from numpy import ndarray, dtype
 
 logger = logging.getLogger("RCM-PrePost ChangeDetectionDataset")
 ch = logging.StreamHandler()
@@ -24,42 +35,42 @@ logger.addHandler(ch)
 logger.setLevel(logging.DEBUG)
 
 
+# ---------------------------------------------------------------------------
+# Domain enumerations & constants
+# ---------------------------------------------------------------------------
+
 class SatellitePass(Enum):
     ASCENDING = 0
     DESCENDING = 1
 
     @classmethod
     def from_str(cls, s: str) -> "SatellitePass":
-        """Convert a string to a SatellitePass enum."""
-        translate_dict = {
-            "A": "Ascending",
-            "D": "Descending",
-            "ASC": "Ascending",
-            "DESC": "Descending",
-            "ASCENDING": "Ascending",
-            "DESCENDING": "Descending",
+        translate = {
+            "A": "Ascending", "D": "Descending",
+            "ASC": "Ascending", "DESC": "Descending",
+            "ASCENDING": "Ascending", "DESCENDING": "Descending",
         }
         try:
-            return cls[translate_dict[s.upper()].upper()]
+            return cls[translate[s.upper()].upper()]
         except KeyError:
-            raise ValueError(f"Satellite pass {s} not recognized.")
+            raise ValueError(f"Satellite pass {s!r} not recognized.")
 
 
 class BandName(Enum):
     BITMASK_CROPPED = 1
-    LOCALINCANGLE = 2
-    M = 3
-    NDSV = 4
-    PDN = 5
-    PSN = 6
-    PVN = 7
-    RFDI = 8
-    RL = 9
-    RR = 10
-    S0 = 11
-    SP1 = 12
-    SP2 = 13
-    SP3 = 14
+    LOCALINCANGLE   = 2
+    M               = 3
+    NDSV            = 4
+    PDN             = 5
+    PSN             = 6
+    PVN             = 7
+    RFDI            = 8
+    RL              = 9
+    RR              = 10
+    S0              = 11
+    SP1             = 12
+    SP2             = 13
+    SP3             = 14
 
 
 class Beams(Enum):
@@ -69,35 +80,33 @@ class Beams(Enum):
     D = 3
 
 
-BEAM_BAND_NAME = "BEAM"
+BEAM_BAND_NAME           = "BEAM"
 SATELLITE_PASS_BAND_NAME = "SATELLITE_PASS"
-# STATS UPDATED IN 2026-06-03 with 201286 thumbnails
+
+# Stats updated 2026-06-03 with 201 286 thumbnails
 bands_stats = {
-    'mean': [1.0671012440715284, 26.133220506930545, 4282.53025830744, -1762.5102994669658, 238.6081335327169,
-             4043.3150312687353, 5716.365492395923, 3587.3789677071168, 1366.3266999839548, 606.6409300828175,
-             1972.7496275401488, 662.1524939064722, 585.9621173767042, 8360.947639324142],
-    'std': [0.5140239082593165, 7.776109811847935, 2096.273627364101, 4390.274997471279, 337.8120308539174,
-            2197.621407866461, 2096.399549952241, 2099.0776151168197, 965.7990528898996, 395.7478935818052,
-            1149.0959360818918, 2805.261797215982, 3114.6516936980624, 2463.9644096193365],
-    'min': [1.0, 0.0, 0.0, -9998.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -9999.0, -9998.0, -9995.0],
-    'max': [17.0, 122.0, 9999.0, 9998.0, 9967.0, 9998.0, 9964.0, 9999.0, 32766.0, 32766.0, 32766.0, 9999.0, 9999.0,
-            10000.0]
-    }
+    'mean': [1.0671012440715284, 26.133220506930545, 4282.53025830744, -1762.5102994669658,
+             238.6081335327169, 4043.3150312687353, 5716.365492395923, 3587.3789677071168,
+             1366.3266999839548, 606.6409300828175, 1972.7496275401488, 662.1524939064722,
+             585.9621173767042, 8360.947639324142],
+    'std':  [0.5140239082593165, 7.776109811847935, 2096.273627364101, 4390.274997471279,
+             337.8120308539174, 2197.621407866461, 2096.399549952241, 2099.0776151168197,
+             965.7990528898996, 395.7478935818052, 1149.0959360818918, 2805.261797215982,
+             3114.6516936980624, 2463.9644096193365],
+    'min':  [1.0, 0.0, 0.0, -9998.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -9999.0, -9998.0, -9995.0],
+    'max':  [17.0, 122.0, 9999.0, 9998.0, 9967.0, 9998.0, 9964.0, 9999.0, 32766.0, 32766.0,
+             32766.0, 9999.0, 9999.0, 10000.0],
+}
 
 # Time-delta bin boundaries in days (upper bound exclusive).
-# Bin 0: 0-4 days   (same repeat cycle, ~4 days for RCM)
-# Bin 1: 4-12 days  (1-3 repeat cycles)
-# Bin 2: 12-24 days (3-6 repeat cycles)
-# Bin 3: 24-48 days (~1-2 months)
-# Bin 4: 48+ days   (long gap)
 TIME_DELTA_BINS = [4, 12, 24, 48]
 
+NO_DATA      = 32767
+IGNORE_INDEX = 255
+
+
 def band_names_to_indices(band_names: Optional[List[Any]]) -> Optional[List[int]]:
-    """
-    Convert a list of band names (str or BandName) into indices (int) according to BandName.
-
-
-    """
+    """Convert a list of band names (str or BandName) to integer indices."""
     if band_names is None:
         return None
     logger.info(f"TREATING BANDS : {band_names}")
@@ -109,55 +118,54 @@ def band_names_to_indices(band_names: Optional[List[Any]]) -> Optional[List[int]
             try:
                 indices.append(BandName[name].value)
             except KeyError:
-                raise ValueError(f"Unknown band name: {name}")
+                raise ValueError(f"Unknown band name: {name!r}")
         else:
             raise TypeError(f"Unsupported type for band_names: {type(name)}")
     return indices
 
 
-NO_DATA = 32767
-IGNORE_INDEX = 255
+# ---------------------------------------------------------------------------
+# Dataset class
+# ---------------------------------------------------------------------------
 
+class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
+    """RCM SAR change-detection dataset for **training**.
 
-class RCMChangeDetectionDataset(ChangeDetectionDataset):
-    def __init__(self, csv_root_folder: str,
-                 patches_root_folder: str,
-                 split_or_csv_file_name: str = None,
-                 norm_stats: dict[str, list[float]] | None = None,
-                 bands: Optional[List[int]] = None,
-                 band_names: Optional[List[str]] = None,
-                 satellite_pass: Optional[str | SatellitePass] = None,
-                 beams: Optional[List[str]] = None,
-                 dataset_years: Optional[list[int]] = None,
-                 separate_metadata: bool = True,
-                 tile_size: tuple[int, int] | None = None,
-                 tile_stride: tuple[int, int] | None = None,
-                 ) -> None:
-        """Initialize RCM Change Detection Dataset.
+    Extends :class:`TiledChangeDetectionDataset` with:
 
-        Args:
-            separate_metadata: When True, COMMON_MASK / SAT_PASS / BEAM are NOT
-                concatenated to the image tensors.  Instead they are returned as
-                separate dict entries (``sat_pass_value``, ``beam_value``).
-                COMMON_MASK is always available as ``mask-common``.
-                This reduces ``in_channels`` by 3 and allows the model to use
-                learned embeddings (FiLM) instead of wasting encoder capacity on
-                constant spatial bands.
-            tile_size: When set (e.g. ``(512, 512)``), source images larger
-                than this are split into a grid of tiles at load time.
-                Images that already fit within *tile_size* are returned
-                unchanged.  Set to ``None`` (default) to disable tiling and
-                preserve the current behaviour.
-            tile_stride: Step between tile origins.  Defaults to *tile_size*
-                (no overlap).  Set smaller than *tile_size* for overlap
-                (e.g. ``(256, 256)`` with ``tile_size=(512, 512)``).
-        """
+    * Training CSV schema (``pre_path``, ``post_path``, ``mask``, …)
+    * Band / satellite-pass / beam / year filtering
+    * RCM-specific image loading (int16, bitmask band)
+    * Ground-truth fire mask loading (NBaC)
+    * FiLM conditioning metadata (``sat_pass_value``, ``beam_value``,
+      ``pre_season``, ``post_season``, ``time_delta_bin``)
+    * GeoTIFF profile management for output predictions
+
+    Spatial concerns (tiling, neighbour-buffer) are fully handled by
+    :class:`TiledChangeDetectionDataset`.
+    """
+
+    NO_DATA = NO_DATA  # re-expose module constant as class attribute
+
+    def __init__(
+        self,
+        csv_root_folder: str,
+        patches_root_folder: str,
+        split_or_csv_file_name: str = None,
+        norm_stats: dict[str, list[float]] | None = None,
+        bands: Optional[List[int]] = None,
+        band_names: Optional[List[str]] = None,
+        satellite_pass: Optional[str | SatellitePass] = None,
+        beams: Optional[List[str]] = None,
+        dataset_years: Optional[list[int]] = None,
+        separate_metadata: bool = True,
+        tile_size: tuple[int, int] | None = None,
+        tile_stride: tuple[int, int] | None = None,
+        predict_overlap_buffer: int = 0,
+    ) -> None:
         self.separate_metadata = separate_metadata
-        # Tiling parameters — must be set before super().__init__() because
-        # it triggers _load_files() → _expand_files_with_tiles().
-        self.tile_size = tile_size
-        self.tile_stride = tile_stride if tile_stride is not None else tile_size
-        # Set bands index and band names
+
+        # Band setup — must precede super().__init__() (which triggers _load_files)
         if band_names is not None:
             self.bands = band_names_to_indices(band_names)
             self.band_names = [
@@ -165,7 +173,6 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             ]
         elif bands is not None:
             self.bands = bands
-            # Try to retrieve band names from indices
             self.band_names = []
             for idx in bands:
                 try:
@@ -176,25 +183,39 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             self.bands = [i.value for i in BandName]
             self.band_names = [i.name for i in BandName]
 
-        if satellite_pass:
-            match satellite_pass:
-                case str():
-                    self.satellite_pass = SatellitePass.from_str(satellite_pass)
-                case SatellitePass():
-                    self.satellite_pass = satellite_pass
-                case _:
-                    raise TypeError("satellite_pass must be string or SatellitePass enum")
-        else:
-            self.satellite_pass = None
-        self.beams = [] if beams is None else [i.upper() for i in beams]
+        match satellite_pass:
+            case None:
+                self.satellite_pass = None
+            case str():
+                self.satellite_pass = SatellitePass.from_str(satellite_pass)
+            case SatellitePass():
+                self.satellite_pass = satellite_pass
+            case _:
+                raise TypeError("satellite_pass must be a string or SatellitePass enum")
+
+        self.beams = [] if beams is None else [b.upper() for b in beams]
         if norm_stats is None:
             norm_stats = bands_stats
-        logger.debug(f'dataset_years ==> {dataset_years}' )
-        self._dataset_years = [] if dataset_years is None else [ int(y) for y in dataset_years]
-        super().__init__(csv_root_folder=csv_root_folder, patches_root_folder=patches_root_folder,
-                         split_or_csv_file_name=split_or_csv_file_name, norm_stats=norm_stats)
+        logger.debug("dataset_years ==> %s", dataset_years)
+        self._dataset_years = [] if dataset_years is None else [int(y) for y in dataset_years]
 
-    def _load_files(self) -> list[dict[str, str]]:
+        # Tiling / buffer params forwarded to TiledChangeDetectionDataset
+        super().__init__(
+            csv_root_folder=csv_root_folder,
+            patches_root_folder=patches_root_folder,
+            split_or_csv_file_name=split_or_csv_file_name,
+            norm_stats=norm_stats,
+            tile_size=tile_size,
+            tile_stride=tile_stride,
+            predict_overlap_buffer=predict_overlap_buffer,
+        )
+
+    # ------------------------------------------------------------------
+    # _build_raw_file_list — training CSV schema
+    # ------------------------------------------------------------------
+
+    def _build_raw_file_list(self) -> list[dict[str, Any]]:
+        """Load per-sample dicts from the training CSV."""
         df_csv = self._get_input_dataset_as_dataframe()
 
         files = []
@@ -205,24 +226,24 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
              'db_nbac_fire_id', 'cell_id', 'group_date_pre', 'group_date_post',
              'beam', 'sat_pass', 'fire_start_date', 'fire_end_date']
         ].itertuples(index=False):
-            img_pre_path = img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip()
+            img_pre_path  = img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip()
             img_post_path = img.replace("$ROOT_PATH", self.patches_root_folder).strip()
             if Path(img_pre_path).exists() and Path(img_post_path).exists():
                 files.append({
-                    "image_pre": img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip(),
-                    "image": img.replace("$ROOT_PATH", self.patches_root_folder).strip(),
-                    "mask": self._get_mask_path(cell_id, group_date_post),
-                    "water_mask": self._get_water_mask_path(cell_id),
-                    "cell_id": cell_id,
+                    "image_pre":       img_pre_path,
+                    "image":           img_post_path,
+                    "mask":            self._get_mask_path(cell_id, group_date_post),
+                    "water_mask":      self._get_water_mask_path(cell_id),
+                    "cell_id":         cell_id,
                     "db_nbac_fire_id": db_nbac_fire_id,
-                    "group_date_pre": group_date_pre,
+                    "group_date_pre":  group_date_pre,
                     "group_date_post": group_date_post,
-                    "beam": beam,
-                    "sat_pass": sat_pass,
-                    "group_id_pre": group_id_pre,
-                    "group_id_post": group_id_post,
+                    "beam":            beam,
+                    "sat_pass":        sat_pass,
+                    "group_id_pre":    group_id_pre,
+                    "group_id_post":   group_id_post,
                     "fire_start_date": fire_start_date,
-                    "fire_end_date": fire_end_date,
+                    "fire_end_date":   fire_end_date,
                 })
 
         logger.info(
@@ -231,227 +252,112 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             sum(1 for f in files if f["mask"] is not None),
             sum(1 for f in files if f["mask"] is None),
         )
-
-        if self.tile_size is not None:
-            files = self._expand_files_with_tiles(files)
-
         return files
 
-    def _get_water_mask_path(self, cell_id) -> Path | Any:
-        # --- Masque d'eau (optionnel) ---
-        water_mask_path = (
-                Path(self.patches_root_folder) / cell_id / "static_data"
-                / f"{cell_id}_WATER_mask_100m.tif"
-        )
-        if not water_mask_path.exists():
-            logger.debug("Water mask not found, setting to None: %s", water_mask_path)
-            water_mask_path = None
-        return water_mask_path
-
     # ------------------------------------------------------------------
-    # Tiling helpers
+    # Path helpers
     # ------------------------------------------------------------------
 
-    def _expand_files_with_tiles(self, files: list[dict]) -> list[dict]:
-        """Expand file entries into per-tile entries for images larger than *tile_size*.
-
-        Images that already fit within *tile_size* are returned unchanged (no
-        ``_tile_*`` keys added).  Larger images are split into a grid of tiles
-        that guarantees full coverage; edge tiles are shifted inward so every
-        tile has exactly *tile_size* dimensions.
-
-        This method is called at the end of :meth:`_load_files` and is a no-op
-        when ``self.tile_size is None``.
-        """
-        tile_h, tile_w = self.tile_size
-        stride_h, stride_w = self.tile_stride
-        n_files = len(files)
-
-        expanded: list[dict] = []
-        for entry in files:
-            with rio.open(entry["image"]) as src:
-                img_h, img_w = src.height, src.width
-
-            if img_h <= tile_h and img_w <= tile_w:
-                # Image fits in one tile — keep original entry untouched.
-                expanded.append(entry)
-                continue
-
-            # Build row / col start positions, ensuring all tiles are full-sized.
-            rows = sorted(set(
-                list(range(0, max(img_h - tile_h, 0) + 1, stride_h))
-                + ([max(0, img_h - tile_h)] if img_h > tile_h else [0])
-            ))
-            cols = sorted(set(
-                list(range(0, max(img_w - tile_w, 0) + 1, stride_w))
-                + ([max(0, img_w - tile_w)] if img_w > tile_w else [0])
-            ))
-
-            for r in rows:
-                for c in cols:
-                    tile_entry = entry.copy()
-                    tile_entry["_tile_row"] = r
-                    tile_entry["_tile_col"] = c
-                    tile_entry["_source_h"] = img_h
-                    tile_entry["_source_w"] = img_w
-                    expanded.append(tile_entry)
-
-        if len(expanded) != n_files:
-            logger.info(
-                "Tile expansion: %d files → %d tiles (tile_size=%s, stride=%s)",
-                n_files, len(expanded), self.tile_size, self.tile_stride,
-            )
-        return expanded
-
-    def _apply_tile_crop(self, sample: dict, data: dict) -> dict:
-        """Crop all spatial tensors and adjust the GeoTIFF profile for a tile.
-
-        No-op when tiling is inactive (``_tile_row`` absent from *data*).
-        """
-        if "_tile_row" not in data:
-            return sample
-
-        r, c = data["_tile_row"], data["_tile_col"]
-        th, tw = self.tile_size
-
-        # Crop spatial tensors [C, H, W] → [C, th, tw]
-        for key in ("image", "image_post", "image_pre", "mask", "mask-common", "water_mask"):
-            t = sample.get(key)
-            if t is not None and isinstance(t, Tensor) and t.dim() >= 3:
-                sample[key] = t[:, r:r + th, c:c + tw]
-
-        # Adjust GeoTIFF profile so each tile writes to the correct location
-        if sample.get("profile") is not None:
-            transform_list = sample["profile"]["transform"]
-            orig_transform = Affine(*transform_list[:6])
-            sample["profile"]["transform"] = list(
-                orig_transform * Affine.translation(c, r)
-            )
-
-        # Update dimensions to reflect the tile (used by PadTo / predict crop)
-        sample["original_height"] = sample["image"].shape[1]
-        sample["original_width"] = sample["image"].shape[2]
-
-        # Tile metadata for prediction reconstruction
-        sample["tile_row_start"] = r
-        sample["tile_col_start"] = c
-        sample["source_height"] = data["_source_h"]
-        sample["source_width"] = data["_source_w"]
-        return sample
-
-    def _get_mask_path(self, cell_id, group_date_post) -> Path | Any:
-        mask_path = (
-                Path(self.patches_root_folder) / cell_id / "static_data"
-                / f"{cell_id}_nbac_{int(group_date_post[:4])}_mask_unburn_burn_reject_100m.tif"
+    def _get_water_mask_path(self, cell_id) -> Path | None:
+        p = (
+            Path(self.patches_root_folder) / cell_id / "static_data"
+            / f"{cell_id}_WATER_mask_100m.tif"
         )
-        if not mask_path.exists():
-            logger.debug("Mask not found, setting to None: %s", mask_path)
-            mask_path = None
-        return mask_path
+        if not p.exists():
+            logger.debug("Water mask not found: %s", p)
+            return None
+        return p
+
+    def _get_mask_path(self, cell_id, group_date_post) -> Path | None:
+        p = (
+            Path(self.patches_root_folder) / cell_id / "static_data"
+            / f"{cell_id}_nbac_{int(group_date_post[:4])}_mask_unburn_burn_reject_100m.tif"
+        )
+        if not p.exists():
+            logger.debug("Mask not found: %s", p)
+            return None
+        return p
+
+    # ------------------------------------------------------------------
+    # Image / mask loaders
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _read_image_and_get_no_data(
+        path: str,
+        in_dtype: np.dtype = np.int16,
+    ) -> tuple[ndarray, ndarray]:
+        """Read a GeoTIFF; return ``(array [C,H,W], bitmask [H,W])``."""
+        with rio.open(path) as src:
+            arr = src.read().astype(in_dtype)
+        return arr, (arr[0, :, :] == 1)
+
+    def _load_mask(self, index: int) -> tuple[Tensor, str]:
+        return self._load_image_by_name(index, "mask")
+
+    def _load_water_mask(self, index: int) -> tuple[Tensor, str]:
+        water_mask, name = self._load_image_by_name(index, "water_mask")
+        water_mask = self._apply_buffer_padding(water_mask, self.files[index])
+        return water_mask, name
+
+    def _load_image_by_name(
+        self, index: int, key: str, as_type=np.int32,
+    ) -> tuple[Tensor, str]:
+        data = self.files[index]
+        path = data.get(key)
+        if path is not None and Path(str(path)).exists():
+            arr, _ = self._read_image_and_get_no_data(str(path), as_type)
+            return torch.from_numpy(arr).float(), Path(str(path)).name
+        with rio.open(data["image"]) as src:
+            H, W = src.height, src.width
+        return torch.zeros((1, H, W), dtype=torch.float32), f"no_{key}"
+
+    @staticmethod
+    def _apply_common_mask_to_tensor(
+        common_mask_tensor: Tensor,
+        in_image_tensor: Tensor,
+        fill_value=np.nan,
+    ) -> Tensor:
+        return in_image_tensor.masked_fill_(~common_mask_tensor, fill_value)
+
+    # ------------------------------------------------------------------
+    # CSV filtering
+    # ------------------------------------------------------------------
 
     def _get_input_dataset_as_dataframe(self) -> DataFrame:
         csv_path = self._get_csv_path()
         df_csv = pd.read_csv(csv_path)
 
-        logger.info("BEAM FILTER: {}".format(self.beams))
-        logger.info("SATELLITE PASS FILTER: {}".format(self.satellite_pass))
-        logger.info("DATASET YEARS FILTER: {}".format(self._dataset_years))
-        df_csv['sat_pass'] = df_csv['sat_pass'].map(lambda x: SatellitePass.from_str(x))  # type: ignore[arg-type]
-        df_csv['beam'] = df_csv['beam'].map(lambda x: Beams[str(x).upper()])  # type: ignore[arg-type]
+        logger.info("BEAM FILTER: %s", self.beams)
+        logger.info("SATELLITE PASS FILTER: %s", self.satellite_pass)
+        logger.info("DATASET YEARS FILTER: %s", self._dataset_years)
 
-        if  len(self._dataset_years) > 0:
-            
-            df_csv['fire_start_date'] = pd.to_datetime(df_csv['fire_start_date'], format='%Y-%m-%d')
-            df_csv = df_csv[df_csv['fire_start_date'].dt.year.isin(self._dataset_years)]
-            if df_csv.empty:
-                logger.warning(f"No entries found for Fire Year(s) : {self._dataset_years}")
+        df_csv['sat_pass'] = df_csv['sat_pass'].map(SatellitePass.from_str)
+        df_csv['beam']     = df_csv['beam'].map(lambda x: Beams[x.upper()])
+
         if self.satellite_pass is not None:
             df_csv = df_csv[df_csv['sat_pass'] == self.satellite_pass]
-            if df_csv.empty:
-                logger.warning(f"No entries found for satellite pass {self.satellite_pass}")
+        if self.beams:
+            df_csv = df_csv[df_csv['beam'].apply(lambda x: x.name in self.beams)]
+        if self._dataset_years:
+            df_csv = df_csv[df_csv['group_date_pre'].apply(
+                lambda x: int(str(x)[:4]) in self._dataset_years
+            )]
 
-        if len(self.beams) > 0:
-            beams_str = [Beams[str(b).upper()] for b in self.beams]
-            df_csv = df_csv[df_csv['beam'].isin(beams_str)]
-            if df_csv.empty:
-                logger.warning(f"No entries found for beams {beams_str}")
+        logger.info("Loaded %d rows from CSV after filtering.", len(df_csv))
         return df_csv
 
-    def __len__(self) -> int:
-        return super().__len__()
+    # ------------------------------------------------------------------
+    # __getitem__
+    # ------------------------------------------------------------------
 
-    def _get_bands_to_load(self) -> list | None:
-        """
-        Get the list of bands to load, ensuring BITMASK_CROPPED (band 1) is always included.
-        The returned list is 0-based indices for rasterio based on BandName enum numbering.
-        """
-        if self.bands is None:
-            return None
-
-        bands = list(self.bands)  # copie
-        if 1 not in bands:
-            bands.append(1)  # toujours inclure BITMASK_CROPPED
-
-        # Dédoublonner et trier
-        bands = sorted(set(bands))
-
-        # Convertir en 0-based pour rasterio
-        return [i - 1 for i in bands]
-
-    @staticmethod
-    def add_pass_and_beam_in_out_bands(pre_img, post_img, current_sample):
-        H, W = pre_img.shape[1], pre_img.shape[2]
-
-        # encode sat_pass : Ascending=0, Descending=1
-        sat_pass_val = current_sample['sat_pass'].value
-        sat_pass_band = torch.full((1, H, W), sat_pass_val, dtype=pre_img.dtype)
-
-        beam_map = current_sample["beam"].value
-        beam_val = beam_map
-        beam_band = torch.full((1, H, W), beam_val, dtype=pre_img.dtype)
-
-        # concat à pre_img et post_img
-        pre_img = torch.cat([pre_img, sat_pass_band, beam_band], dim=0)
-        post_img = torch.cat([post_img, sat_pass_band, beam_band], dim=0)
-        return pre_img, post_img
-
-    @staticmethod
-    def _read_image_and_get_no_data(path: str, in_dtype: np.dtype = np.int16):
-        with rio.open(path, nodata=NO_DATA, dtype='int16') as src:
-            arr = src.read().astype(in_dtype)  # shape (C,H,W)
-            mask = arr[0, :, :] == 1  # Read the bitmask cropped band to get data mask
-
-        return arr, mask
-
-    def convert_tif_to_tensor(self, in_image: str, in_dtype=np.int16) -> tuple[
-        Tensor, bool | ndarray[tuple[Any, ...], dtype[Any]] | Any]:
-        return super().convert_tif_to_tensor(in_image, in_dtype)
-
-    def __getitem__(self, index: int) -> dict:
+    def __getitem__(self, index: int) -> dict:  # noqa: C901
         data = self.files[index]
-        image_pre, image_post, common_mask_tensor, image_pre_name, image_post_name = self._load_image(index)
+        image_pre, image_post, common_mask_tensor, image_pre_name, image_post_name = (
+            self._load_image(index)
+        )
 
-        # --- Water mask (optionnel) ---
-        water_mask_path = data.get("water_mask")
-        if water_mask_path is not None:
-            try:
-                water_mask, _ = self._load_water_mask(index)
-                no_water_mask = (water_mask == 0)  # True = pas d'eau = garder
-            except Exception as e:
-                logger.warning("Failed to read water mask for index %d (%s): %s. Skipping water mask.",
-                               index, water_mask_path, e)
-                H, W = image_pre.shape[1], image_pre.shape[2]
-                water_mask = torch.ones((1, H, W), dtype=torch.float32)
-                no_water_mask = torch.ones((1, H, W), dtype=torch.bool)
-        else:
-            H, W = image_pre.shape[1], image_pre.shape[2]
-            water_mask = torch.ones((1, H, W), dtype=torch.float32)
-            no_water_mask = torch.ones((1, H, W), dtype=torch.bool)
-
-        image_post, image_pre, mean, std, mins, maxs = self._normalize_and_standardize(image_post, image_pre)
-        common_mask_tensor = common_mask_tensor & no_water_mask
-
-        # --- Mask from NBAC (optionnel) ---
+        # Ground-truth fire mask
         mask_path = data.get("mask")
         has_mask = mask_path is not None and Path(str(mask_path)).exists()
         if has_mask:
@@ -459,60 +365,57 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
             mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, IGNORE_INDEX)
         else:
             H, W = image_pre.shape[1], image_pre.shape[2]
-            mask = torch.zeros((1, H, W), dtype=torch.float32)
-            mask_name = "no_mask"
+            mask, mask_name = torch.zeros((1, H, W), dtype=torch.float32), "no_mask"
 
-        # Apply common mask to images
-        image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre, IGNORE_INDEX)
+        image_pre  = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre,  IGNORE_INDEX)
         image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, IGNORE_INDEX)
 
-        # Band selection
         bands_index = self._get_bands_to_load()
         if bands_index is not None:
-            image_pre = manage_bands(image_pre, bands_index)
+            image_pre  = manage_bands(image_pre,  bands_index)
             image_post = manage_bands(image_post, bands_index)
 
+        # Initialise FiLM metadata to safe defaults; only populated in separate_metadata mode
+        sat_pass_value: int | None = None
+        beam_value:     int | None = None
+        pre_month_value:   int = 0
+        post_month_value:  int = 0
+        time_delta_bin:    int = len(TIME_DELTA_BINS)
+        decoded_year:      int = 0
+
         if self.separate_metadata:
-            # ── NEW MODE: metadata as separate dict entries ──────────────
-            # Images contain ONLY data bands (no COMMON_MASK, SAT_PASS, BEAM).
-            # The model receives them via FiLM conditioning instead.
             band_names = (
                 [BandName(i + 1).name for i in bands_index]
-                if bands_index is not None
-                else [i.name for i in BandName]
+                if bands_index is not None else [i.name for i in BandName]
             )
-            sat_pass_value = data["sat_pass"].value  # int: 0=ASC, 1=DESC
-            beam_value = data["beam"].value  # int: 0=A, 1=B, 2=C, 3=D
-            # Season from pre and post image dates (0=DJF, 1=MAM, 2=JJA, 3=SON)
-            pre_month_value = self._extract_month(data.get("group_date_pre"))
+            sat_pass_value   = data["sat_pass"].value
+            beam_value       = data["beam"].value
+            pre_month_value  = self._extract_month(data.get("group_date_pre"))
             post_month_value = self._extract_month(data.get("group_date_post"))
-            # Time delta between pre and post groups, discretized into bins
-            time_delta_bin = self._extract_time_delta_bin(
+            time_delta_bin   = self._extract_time_delta_bin(
                 data.get("group_date_pre"), data.get("group_date_post"),
             )
             decoded_year = self._decode_year_processing(data.get("group_date_pre"))
         else:
-            # ── LEGACY MODE: concatenate metadata bands ─────────────────
-            # Add common mask as first band + sat_pass/beam bands
-            image_pre = torch.cat([common_mask_tensor, image_pre], dim=0)
+            image_pre  = torch.cat([common_mask_tensor, image_pre],  dim=0)
             image_post = torch.cat([common_mask_tensor, image_post], dim=0)
             image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
-
             band_names = (
-                [BandName(i + 1).name for i in bands_index]
-                if bands_index is not None
-                else [i.name for i in BandName]
+                ['COMMON_MASK']
+                + ([BandName(i + 1).name for i in bands_index] if bands_index else [i.name for i in BandName])
+                + [SATELLITE_PASS_BAND_NAME, BEAM_BAND_NAME]
             )
-            band_names = ['COMMON_MASK'] + band_names + [SATELLITE_PASS_BAND_NAME, BEAM_BAND_NAME]
-            sat_pass_value = None
-            beam_value = None
+            sat_pass_value = beam_value = None
 
-        image_profile = None
+        water_mask, _ = self._load_water_mask(index)
+        image_pre, image_post, mean, std, mins, maxs = self._normalize_and_standardize(
+            image_post, image_pre
+        )
+
+        # GeoTIFF profile for output TIFs
         with rio.open(data['image']) as src:
             image_profile = src.profile
         image_profile['count'] = len(band_names)
-        # Store CRS as a reliably parseable EPSG string.
-        # Default to EPSG:3979 (NAD83 / Canada Atlas Lambert) if CRS is unavailable.
         raw_crs = image_profile.get('crs')
         if raw_crs is not None:
             epsg = raw_crs.to_epsg()
@@ -520,223 +423,132 @@ class RCMChangeDetectionDataset(ChangeDetectionDataset):
         else:
             image_profile['crs'] = "EPSG:3979"
         image_profile['transform'] = list(image_profile['transform'])
-        # Ensure nodata is never None — PyTorch's default collate cannot batch
-        # a mix of float and NoneType across samples in the same dict key.
         if image_profile.get('nodata') is None:
             image_profile['nodata'] = float(NO_DATA)
-        pre_post_name = self._get_pre_post_name(data)
 
         sample = {
-            "image": image_post,
-            "image_post": image_post,
-            "image_pre": image_pre,
-            "image_pre_name": image_pre_name,
+            "image":           image_post,
+            "image_post":      image_post,
+            "image_pre":       image_pre,
+            "image_pre_name":  image_pre_name,
             "image_name_post": image_post_name,
-            "image_name": image_post_name,
-            "mask": mask,
-            "has_mask": has_mask,
-            "mask_name": mask_name,
-            "bands": band_names,
-            "cell_id": data["cell_id"],
-            "profile": image_profile,
-            "mask-common": common_mask_tensor,
-            "mean": mean,
-            "std": std,
-            "min": mins,
-            "max": maxs,
-            "water_mask": water_mask,
-            "pre_post_name": pre_post_name,
+            "image_name":      image_post_name,
+            "mask":            mask,
+            "has_mask":        has_mask,
+            "mask_name":       mask_name,
+            "bands":           band_names,
+            "cell_id":         data["cell_id"],
+            "profile":         image_profile,
+            "mask-common":     common_mask_tensor,
+            "mean":            mean,
+            "std":             std,
+            "min":             mins,
+            "max":             maxs,
+            "water_mask":      water_mask,
+            "pre_post_name":   self._get_pre_post_name(data),
             "original_height": image_post.shape[1],
-            "original_width": image_post.shape[2],
+            "original_width":  image_post.shape[2],
         }
 
-        # Metadata as scalars (only when separate_metadata=True)
         if sat_pass_value is not None:
-            sample["sat_pass_value"] = sat_pass_value
-        if beam_value is not None:
-            sample["beam_value"] = beam_value
-        if beam_value is not None:
-            # These are always set when separate_metadata=True
-            sample["pre_season"] = pre_month_value  # type: ignore[possibly-undefined]
-            sample["post_season"] = post_month_value  # type: ignore[possibly-undefined]
-            sample["time_delta_bin"] = time_delta_bin  # type: ignore[possibly-undefined]
-            sample["processing_year"] = decoded_year    # type: ignore[possibly-undefined]
+            sample.update({
+                "sat_pass_value":  sat_pass_value,
+                "beam_value":      beam_value,
+                "pre_season":      pre_month_value,
+                "post_season":     post_month_value,
+                "time_delta_bin":  time_delta_bin,
+                "processing_year": decoded_year,
+            })
 
         sample.update(self._get_metadata(data))
 
-        sample = self._apply_tile_crop(sample, data)
+        # Tile crop + buffer metadata — handled by TiledChangeDetectionDataset
+        return self._finalize_sample(sample, data)
 
-        return sample
+    # ------------------------------------------------------------------
+    # Metadata hooks
+    # ------------------------------------------------------------------
 
     def _get_metadata(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Return dataset-specific metadata to include in the sample dict.
-        Override in subclasses for different CSV schemas."""
-        return {
-            "db_nbac_fire_id": data["db_nbac_fire_id"],
-        }
+        return {"db_nbac_fire_id": data["db_nbac_fire_id"]}
 
     def _get_pre_post_name(self, data: dict[str, Any]) -> str:
-        pre_post_name = (
+        name = (
             f"{data['cell_id']}|"
-            f"{'ASC' if data['sat_pass'] == SatellitePass.ASCENDING else 'DESC'}-{data['beam'].name}|"
+            f"{'ASC' if data['sat_pass'] == SatellitePass.ASCENDING else 'DESC'}"
+            f"-{data['beam'].name}|"
             f"({data['group_id_pre']}){data['group_date_pre']}_"
             f"({data['group_id_post']}){data['group_date_post']}|"
             f"fire_({data['db_nbac_fire_id']})_{data['fire_start_date']}_{data['fire_end_date']}"
         )
         if "_tile_row" in data:
-            pre_post_name += f"|tile_r{data['_tile_row']}_c{data['_tile_col']}"
-        return pre_post_name
+            name += f"|tile_r{data['_tile_row']}_c{data['_tile_col']}"
+        return name
 
-    def _normalize_and_standardize(self, image_post: Tensor, image_pre: Tensor) -> tuple[
-        Tensor, Tensor, Tensor, Tensor, Tensor, Tensor
-    ]:
-        # Per-patch min-max normalization per band, without torch.nanmin / nanmax
-        mean = torch.tensor(
-                self.norm_stats["mean"],
-                dtype=torch.float32,
-                device=image_pre.device,
+    # ------------------------------------------------------------------
+    # Normalisation
+    # ------------------------------------------------------------------
+
+    def _normalize_and_standardize(
+        self, image_post: Tensor, image_pre: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        def _t(key):
+            return torch.tensor(
+                self.norm_stats[key], dtype=torch.float32, device=image_pre.device,
             ).view(-1, 1, 1)
+        mean, std, mins, maxs = _t("mean"), _t("std"), _t("min"), _t("max")
+        image_pre  = (image_pre  - mean) / (std + 1e-8)
+        image_post = (image_post - mean) / (std + 1e-8)
+        return image_pre, image_post, mean, std, mins, maxs
 
-        std = torch.tensor(
-                self.norm_stats["std"],
-                dtype=torch.float32,
-                device=image_pre.device,
-            ).view(-1, 1, 1)
+    def _get_bands_to_load(self) -> list[int] | None:
+        return getattr(self, "bands", None)
 
-        std = std.clamp_min(1e-6)
+    def add_pass_and_beam_in_out_bands(
+        self, image_pre: Tensor, image_post: Tensor, data: dict,
+    ) -> tuple[Tensor, Tensor]:
+        H, W = image_pre.shape[1], image_pre.shape[2]
+        sat = torch.full((1, H, W), data["sat_pass"].value, dtype=image_pre.dtype)
+        bm  = torch.full((1, H, W), data["beam"].value,     dtype=image_pre.dtype)
+        image_pre  = torch.cat([image_pre,  sat, bm], dim=0)
+        image_post = torch.cat([image_post, sat, bm], dim=0)
+        return image_pre, image_post
 
-        image_pre = (image_pre - mean) / std
-        image_post = (image_post - mean) / std
-
-        dummy = torch.zeros(
-                (image_pre.shape[0], 1, 1),
-                dtype=torch.float32,
-                device=image_pre.device,
-            )
-
-        return image_post, image_pre, mean, std, dummy, dummy
-
-    @staticmethod
-    def _norm_image(input_image: Tensor, eps: float, ):
-        for i in range(input_image.shape[0]):
-            curr_band = input_image[i]
-
-            # Mask non-finite values
-            infinte_mask = torch.isfinite(curr_band)
-            # Handle case where all values are non-finite
-            if infinte_mask.any():
-                band_min_post = curr_band[infinte_mask].min()
-                band_max_post = curr_band[infinte_mask].max()
-            else:
-                band_min_post = torch.tensor(0.0, device=input_image.device, dtype=input_image.dtype)
-                band_max_post = torch.tensor(1.0, device=input_image.device, dtype=input_image.dtype)
-
-            clamped_images = torch.clamp(band_max_post - band_min_post, min=eps)
-
-            input_image[i] = (curr_band - band_min_post) / clamped_images
-
-    def _load_water_mask(self, index: int) -> tuple[Tensor, str]:
-        """Load water mask."""
-        return self._load_image_by_name(index, "water_mask")
+    # ------------------------------------------------------------------
+    # Date / season helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _extract_month(date_str: str | None) -> int:
-        """Extract month from a date string (YYYY-MM-DD or YYYYMMDD).
-
-        Returns:
-            month number
-        """
         if date_str is None:
-            return 2  # default to summer (fire season)
+            return 2
         try:
-            # Handle both 'YYYY-MM-DD' and 'YYYYMMDD' formats
-            clean = str(date_str).replace("-", "")
-            month = int(clean[4:6])
+            return int(str(date_str).replace("-", "")[4:6])
         except (ValueError, IndexError):
-            return 0  # default
-        # Meteorological seasons: DJF=0, MAM=1, JJA=2, SON=3
-        return month
+            return 0
+
+    @staticmethod
+    def _extract_time_delta_bin(pre: str | None, post: str | None) -> int:
+        if pre is None or post is None:
+            return len(TIME_DELTA_BINS)
+        try:
+            from datetime import datetime
+            def _p(d):
+                return datetime.strptime(str(d).replace("-", ""), "%Y%m%d")
+            delta = abs((_p(post) - _p(pre)).days)
+            for i, boundary in enumerate(TIME_DELTA_BINS):
+                if delta < boundary:
+                    return i
+            return len(TIME_DELTA_BINS)
+        except Exception:
+            return len(TIME_DELTA_BINS)
 
     @staticmethod
     def _decode_year_processing(date_str: str | None) -> int:
-        """Extract meteorological season from a date string (YYYY-MM-DD or YYYYMMDD).
-
-        Returns:
-            month number
-        """
         if date_str is None:
-            return 0  # default to summer (fire season)
-        try:
-            # Handle both 'YYYY-MM-DD' and 'YYYYMMDD' formats
-            from datetime import datetime
-
-            clean = str(date_str).replace("-", "")
-            dt_cleaned = datetime.strptime(clean, "%Y%m%d")
-        except (ValueError, IndexError):
-            return 0  # default
-        # Meteorological seasons: DJF=0, MAM=1, JJA=2, SON=3
-        if dt_cleaned.year == 2023:
-            return 1
-        else:
-            return 2
-
-    @staticmethod
-    def _extract_time_delta_bin(
-        date_pre: str | None,
-        date_post: str | None,
-    ) -> int:
-        """Compute time delta between pre and post dates, discretized into bins.
-
-        Returns:
-            Integer bin index (0-4). See TIME_DELTA_BINS for boundaries.
-        """
-        if date_pre is None or date_post is None:
-            return 2  # default to mid-range
+            return 0
         try:
             from datetime import datetime
-            clean_pre = str(date_pre).replace("-", "").strip()[:8]
-            clean_post = str(date_post).replace("-", "").strip()[:8]
-            dt_pre = datetime.strptime(clean_pre, "%Y%m%d")
-            dt_post = datetime.strptime(clean_post, "%Y%m%d")
-            delta_days = abs((dt_post - dt_pre).days)
+            return datetime.strptime(str(date_str).replace("-", ""), "%Y%m%d").year
         except (ValueError, IndexError):
-            return 2  # default
-
-        for i, upper in enumerate(TIME_DELTA_BINS):
-            if delta_days < upper:
-                return i
-        return len(TIME_DELTA_BINS)  # last bin
-
-
-if __name__ == '__main__':
-    dataset = RCMChangeDetectionDataset(
-        csv_root_folder=r"C:\Users\xmalet\PycharmProjects\geo-deep-learning\data",
-        patches_root_folder=r"C:\Users\xmalet\PycharmProjects\geo-deep-learning\data\raw",
-        split_or_csv_file_name=r"pre_post_datasets.csv",
-        band_names=["RR", "RL", "M", 'PSN'],
-        satellite_pass="Descending",
-        beams=['A']
-    )
-    print(f"Dataset length: {len(dataset)}")
-    sample = dataset[0]
-    print(f"Sample keys: {list(sample.keys())}")
-    print(f"Image shape: {sample['image'].shape}")
-    print(f"Image pre shape: {sample['image_pre'].shape}")
-    print(f"Mask shape: {sample['mask'].shape}")
-    print(f"BANDS: {sample['bands']}")
-    print(f"Cell ID: {sample['cell_id']}")
-    print(f"DB NBAC Fire ID: {sample['db_nbac_fire_id']}")
-    print(sample['bands'].index(SATELLITE_PASS_BAND_NAME), sample['bands'].index(BEAM_BAND_NAME))
-    print(sample['image'][sample['bands'].index(SATELLITE_PASS_BAND_NAME), :5, :5])
-    print(sample['image'][sample['bands'].index(BEAM_BAND_NAME), :5, :5])
-
-    print(sample['profile'])
-    print(sample['image_name'])
-    data: Tensor = sample['image']
-
-    with rio.open(r"C:\Users\xmalet\PycharmProjects\geo-deep-learning\data\image_post.tiff", 'w',
-                  **sample['profile']) as src:
-        src.write(data.numpy())
-
-    # print(f"Mean: {sample['mean']}")
-    # print(f"Std: {sample['std']}")
+            return 0
