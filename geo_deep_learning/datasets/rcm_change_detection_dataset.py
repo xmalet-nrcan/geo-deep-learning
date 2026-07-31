@@ -372,10 +372,18 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
         image_pre  = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre,  IGNORE_INDEX)
         image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, IGNORE_INDEX)
 
+        # Save BITMASK_CROPPED (channel 0) before band selection so it can be
+        # prepended afterwards — the model always expects it as channel 0.
+        bitmask_pre  = image_pre [:1, :, :]   # [1, H, W]
+        bitmask_post = image_post[:1, :, :]   # [1, H, W]
+
         bands_index = self._get_bands_to_load()
         if bands_index is not None:
-            image_pre  = manage_bands(image_pre,  bands_index)
+            image_pre  = manage_bands(image_pre,  bands_index)   # [N_bands, H, W]
             image_post = manage_bands(image_post, bands_index)
+            # Prepend BITMASK_CROPPED → [1 + N_bands, H, W]  (matches in_channels comment)
+            image_pre  = torch.cat([bitmask_pre,  image_pre],  dim=0)
+            image_post = torch.cat([bitmask_post, image_post], dim=0)
 
         # Normalise BEFORE adding categorical bands so the stats always
         # match the selected SAR channels only.
@@ -393,8 +401,9 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
         decoded_year:      int = 0
 
         if self.separate_metadata:
+            # Channel 0 is always BITMASK_CROPPED; remaining channels are the selected bands.
             band_names = (
-                [BandName(i + 1).name for i in bands_index]
+                ['BITMASK_CROPPED'] + self.band_names
                 if bands_index is not None else [i.name for i in BandName]
             )
             sat_pass_value   = data["sat_pass"].value
@@ -411,7 +420,7 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
             image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
             band_names = (
                 ['COMMON_MASK']
-                + ([BandName(i + 1).name for i in bands_index] if bands_index else [i.name for i in BandName])
+                + (['BITMASK_CROPPED'] + self.band_names if bands_index is not None else [i.name for i in BandName])
                 + [SATELLITE_PASS_BAND_NAME, BEAM_BAND_NAME]
             )
             sat_pass_value = beam_value = None
@@ -501,7 +510,8 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
         def _t(key):
             vals = self.norm_stats[key]
             if bands is not None:
-                vals = [vals[b] for b in bands]
+                # Channel 0 is always BITMASK_CROPPED (index 0); then the selected bands.
+                vals = [vals[0]] + [vals[b] for b in bands]
             return torch.tensor(
                 vals, dtype=torch.float32, device=image_pre.device,
             ).view(-1, 1, 1)
