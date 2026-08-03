@@ -732,14 +732,59 @@ class ChangeDetectionChangeFormer(LightningModule):
             buf_raw = batch["buffer_size"]
             buf = int(buf_raw[0].item() if isinstance(buf_raw, torch.Tensor) else buf_raw[0])
             if buf > 0:
-                img_h, img_w = x_post.shape[2], x_post.shape[3]
                 common_data_mask = common_data_mask.clone()
-                if buf < img_h:
-                    common_data_mask[:, :, :buf, :] = 0.0
-                    common_data_mask[:, :, img_h - buf:, :] = 0.0
-                if buf < img_w:
-                    common_data_mask[:, :, :, :buf] = 0.0
-                    common_data_mask[:, :, :, img_w - buf:] = 0.0
+
+                if "tile_row_start" in batch:
+                    # --- Tiled + buffered ---
+                    # Each tile is a crop of the expanded (cell + 2*buf)
+                    # image.  The valid zone (central cell, excluding
+                    # neighbour context) spans rows [buf, buf + orig_h) ×
+                    # cols [buf, buf + orig_w) in the expanded image.
+                    # We compute the intersection of this valid zone with
+                    # each tile's coverage area and mask everything outside.
+                    # Without this per-tile logic the old code masked buf
+                    # pixels from ALL 4 edges of EVERY tile, which wrongly
+                    # discarded up to 63 % of valid pixels on interior
+                    # tiles that don't touch the buffer boundary at all.
+                    tile_h, tile_w = common_data_mask.shape[2], common_data_mask.shape[3]
+                    orig_h_batch = batch["cell_orig_height"]
+                    orig_w_batch = batch["cell_orig_width"]
+
+                    for i in range(batch_size):
+                        tr = int(batch["tile_row_start"][i].item() if isinstance(batch["tile_row_start"], torch.Tensor) else batch["tile_row_start"][i])
+                        tc = int(batch["tile_col_start"][i].item() if isinstance(batch["tile_col_start"], torch.Tensor) else batch["tile_col_start"][i])
+                        oh = int(orig_h_batch[i].item() if isinstance(orig_h_batch, torch.Tensor) else orig_h_batch[i])
+                        ow = int(orig_w_batch[i].item() if isinstance(orig_w_batch, torch.Tensor) else orig_w_batch[i])
+
+                        # Valid rows/cols in tile-local coordinates
+                        vr_start = max(0, buf - tr)
+                        vr_end   = min(tile_h, buf + oh - tr)
+                        vc_start = max(0, buf - tc)
+                        vc_end   = min(tile_w, buf + ow - tc)
+
+                        if vr_start > 0:
+                            common_data_mask[i, :, :vr_start, :] = 0.0
+                        if vr_end < tile_h:
+                            common_data_mask[i, :, vr_end:, :] = 0.0
+                        if vc_start > 0:
+                            common_data_mask[i, :, :, :vc_start] = 0.0
+                        if vc_end < tile_w:
+                            common_data_mask[i, :, :, vc_end:] = 0.0
+                else:
+                    # --- Non-tiled + buffered ---
+                    # The full expanded image: mask buf pixels from all edges.
+                    img_h, img_w = common_data_mask.shape[2], common_data_mask.shape[3]
+                    if buf < img_h:
+                        common_data_mask[:, :, :buf, :] = 0.0
+                        common_data_mask[:, :, img_h - buf:, :] = 0.0
+                    if buf < img_w:
+                        common_data_mask[:, :, :, :buf] = 0.0
+                        common_data_mask[:, :, :, img_w - buf:] = 0.0
+
+                # Propagate the modified mask so that metrics in
+                # training_step / validation_step / test_step use the
+                # same valid-pixel set as the loss.
+                batch["mask-common"] = common_data_mask
         # Vérif entrées images
         if not torch.isfinite(x_pre).all():
             raise RuntimeError("x_pre contains NaN/Inf")
