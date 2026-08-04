@@ -77,7 +77,6 @@ model:
     class_colors: ["#000000", "#FF0000"]
     weights_from_checkpoint_path: /app/models_checkpoints/2026/changestar2/cs2base_A_y23-25_8film-cbam-only-no-swa-epoch=94-val_loss=0.215.ckpt
     predict_output_dir: /mnt/geospatial/projet_RCM_scanfire/grided_folder/predictions
-
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
   init_args:
