@@ -1,0 +1,149 @@
+seed_everything: true
+
+trainer:
+#  detect_anomaly: true
+  accelerator: "gpu"
+  devices: -1
+  strategy: auto
+
+  gradient_clip_val: 1.0
+  precision: "bf16-mixed"
+  sync_batchnorm: false
+  gradient_clip_algorithm: "norm"
+  logger:
+    class_path: lightning.pytorch.loggers.TensorBoardLogger
+    init_args:
+      save_dir: ./lightning_logs
+      name: 2026/changestar2/cs2base_AB_y23-25_water_film8-cbam_focal-lovasz_1cycle-conservative
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: "val_loss"
+        mode: "min"
+        verbose: True
+        patience: 25          # réduit: si le modèle overfit, on coupe plus tôt
+        min_delta: 1e-3
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: ./models_checkpoints/2026/changestar2
+        monitor: "val_loss"
+        mode: "min"
+        save_top_k: 5
+        filename: "cs2base_AB_y23-25_1cycle-conservative-{epoch:02d}-{val_loss:.3f}"
+    - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
+      init_args:
+        max_samples: 50
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: "epoch"
+
+  accumulate_grad_batches: 4
+  max_epochs: 150             # réduit de 240 → 150 (moins de temps pour overfitter)
+  check_val_every_n_epoch: 1
+
+model:
+  class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
+  init_args:
+    change_detection_model: "changestar2"
+    image_size: [256,256]
+    in_channels: 10
+    max_samples: 10
+    num_classes: 1
+    deep_supervision: true
+    speckle_noise_std: 0.15
+    use_metadata_film: true
+    film_embed_dim: 8
+
+    use_cbam: true
+    cbam_reduction: 4
+
+    use_channel_dropout: true
+    channel_dropout_prob: 0.3
+
+    use_dfa: false
+    dfa_gate_hidden: 16
+
+    burned_class_weight: 3.0
+    main_loss:
+      class_path: segmentation_models_pytorch.losses.FocalLoss
+      init_args:
+        mode: "binary"
+        gamma: 1.5
+        ignore_index: 255
+    secondary_loss:
+      class_path: segmentation_models_pytorch.losses.LovaszLoss
+      init_args:
+        mode: "binary"
+        ignore_index: 255
+    loss_ratio:
+      - 0.6
+      - 0.4
+    optimizer:
+      class_path: torch.optim.AdamW
+      init_args:
+        lr: 1e-5
+        weight_decay: 0.05    # augmenté 0.03 → 0.05
+        betas:
+        - 0.9
+        - 0.999
+    # ═══════════════════════════════════════════════════════════════════
+    # OPTION C: OneCycleLR conservateur (même scheduler, params ajustés)
+    # ───────────────────────────────────────────────────────────────────
+    # Changements clés vs config originale :
+    #   1. max_lr: 9e-4 → 4e-4 (pic moins agressif → moins de memorization)
+    #   2. pct_start: 0.05 → 0.15 (warmup 3× plus long → exploration)
+    #   3. final_div_factor: 100 → 1000 (descend plus bas → quasi-arrêt)
+    #   4. div_factor: 10 → 25 (départ plus bas → montée plus graduelle)
+    #   5. max_epochs: 240 → 150 (budget total réduit)
+    #   6. weight_decay: 0.03 → 0.05
+    #
+    # Le profil LR devient :
+    #   initial=1.6e-5 → peak=4e-4 (sur 15% du budget)
+    #                  → final=1.6e-7 (sur les 85% restants)
+    # Cela donne moins de "puissance" au modèle pour mémoriser.
+    # ═══════════════════════════════════════════════════════════════════
+    scheduler:
+      class_path: torch.optim.lr_scheduler.OneCycleLR
+      init_args:
+        max_lr: 4e-4          # réduit de 9e-4 → 4e-4 (moins agressif)
+        pct_start: 0.15       # warmup 15% (était 5%) → plus de temps en exploration
+        anneal_strategy: cos
+        div_factor: 25         # initial lr = 4e-4 / 25 = 1.6e-5
+        final_div_factor: 1000 # final lr = 4e-4 / 25000 ≈ 1.6e-8 (quasi-zéro)
+        total_steps: null
+        cycle_momentum: false
+    scheduler_config:
+      interval: "step"
+      frequency: 1
+
+    class_labels: [ "unburn", "burn" ]
+    class_colors: [ "#000000", "#FF0000" ]
+
+data:
+  class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
+  init_args:
+    batch_size: 8
+    num_workers: 10
+    separate_metadata: true
+    patch_size:
+    - 256
+    - 256
+    train_overlap_buffer: 50
+    tile_size: [ 256, 256 ]
+    tile_stride: [ 192, 192 ]
+    split_on_columns: db_nbac_fire_id
+    csv_root_folder: /mnt/geospatial/projet_RCM_scanfire/
+    patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
+    csv_file_name: tbl_input_pre_post_data.csv
+    split_ratios: [0.8 ,0.1, 0.1]
+
+    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'NDSV','RFDI', 'RR','RL']
+
+    beams:
+    - 'A'
+    - 'B'
+    satellite_pass:
+    dataset_years:
+    - 2025
+    - 2023

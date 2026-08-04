@@ -1,0 +1,139 @@
+seed_everything: true
+
+trainer:
+#  detect_anomaly: true
+  accelerator: "gpu"
+  devices: -1
+  strategy: auto
+
+  gradient_clip_val: 1.0
+  precision: "bf16-mixed"  # bf16: no GradScaler needed, no overflow (same exponent as fp32)
+  sync_batchnorm: false
+  gradient_clip_algorithm: "norm"
+  logger:
+    class_path: lightning.pytorch.loggers.TensorBoardLogger
+    init_args:
+      save_dir: ./lightning_logs
+      name: 2026/changestar2/cs2base_AB_y23-25_water_film8-cbam_focal-lovasz_cosine-restarts
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: "val_loss"
+        mode: "min"
+        verbose: True
+        patience: 40          # plus de patience car les restarts causent des spikes temporaires
+        min_delta: 1e-3
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: ./models_checkpoints/2026/changestar2
+        monitor: "val_loss"
+        mode: "min"
+        save_top_k: 5
+        filename: "cs2base_AB_y23-25_cosine-restarts-{epoch:02d}-{val_loss:.3f}"
+    - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
+      init_args:
+        max_samples: 50
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: "epoch"
+
+  accumulate_grad_batches: 4
+  max_epochs: 240
+  check_val_every_n_epoch: 1
+
+model:
+  class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
+  init_args:
+    change_detection_model: "changestar2"
+    image_size: [256,256]
+    in_channels: 10
+    max_samples: 10
+    num_classes: 1
+    deep_supervision: true
+    speckle_noise_std: 0.15
+    use_metadata_film: true
+    film_embed_dim: 8
+
+    use_cbam: true
+    cbam_reduction: 4
+
+    use_channel_dropout: true
+    channel_dropout_prob: 0.3
+
+    use_dfa: false
+    dfa_gate_hidden: 16
+
+    burned_class_weight: 3.0
+    main_loss:
+      class_path: segmentation_models_pytorch.losses.FocalLoss
+      init_args:
+        mode: "binary"
+        gamma: 1.5
+        ignore_index: 255
+    secondary_loss:
+      class_path: segmentation_models_pytorch.losses.LovaszLoss
+      init_args:
+        mode: "binary"
+        ignore_index: 255
+    loss_ratio:
+      - 0.6
+      - 0.4
+    optimizer:
+      class_path: torch.optim.AdamW
+      init_args:
+        lr: 5e-4              # lr initial = max pour CosineAnnealingWarmRestarts
+        weight_decay: 0.05    # augmenté pour mieux régulariser (0.03 → 0.05)
+        betas:
+        - 0.9
+        - 0.999
+    # ═══════════════════════════════════════════════════════════════════
+    # OPTION A: CosineAnnealingWarmRestarts
+    # ───────────────────────────────────────────────────────────────────
+    # Avantages vs OneCycleLR pour le sur-entraînement :
+    #   1. Restarts périodiques → le LR remonte et "secoue" le modèle
+    #      hors des minima sharp qui généralisent mal
+    #   2. Agit comme régularisation implicite (sharp minima → flat minima)
+    #   3. T_mult=2 : cycles progressivement plus longs (30→60→120 epochs)
+    #      permettant une exploration large puis une convergence fine
+    # ═══════════════════════════════════════════════════════════════════
+    scheduler:
+      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
+      init_args:
+        T_0: 30               # premier cycle = 30 epochs
+        T_mult: 2             # chaque cycle suivant est 2× plus long (30→60→120)
+        eta_min: 1e-6         # LR plancher (jamais zéro)
+    scheduler_config:
+      interval: "epoch"       # step par epoch (pas par batch comme OneCycleLR)
+      frequency: 1
+
+    class_labels: [ "unburn", "burn" ]
+    class_colors: [ "#000000", "#FF0000" ]
+
+data:
+  class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
+  init_args:
+    batch_size: 8
+    num_workers: 10
+    separate_metadata: true
+    patch_size:
+    - 256
+    - 256
+    train_overlap_buffer: 50
+    tile_size: [ 256, 256 ]
+    tile_stride: [ 192, 192 ]
+    split_on_columns: db_nbac_fire_id
+    csv_root_folder: /mnt/geospatial/projet_RCM_scanfire/
+    patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
+    csv_file_name: tbl_input_pre_post_data.csv
+    split_ratios: [0.8 ,0.1, 0.1]
+
+    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'NDSV','RFDI', 'RR','RL']
+
+    beams:
+    - 'A'
+    - 'B'
+    satellite_pass:
+    dataset_years:
+    - 2025
+    - 2023
