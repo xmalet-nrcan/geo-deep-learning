@@ -14,7 +14,7 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: ./lightning_logs
-      name: 2026/changestar2/cs2base_AB_y23-25_water_film8-cbam_focal-lovasz_cosine-restarts
+      name: 2026/changestar2/tiled/cs2base_AB_y23-25_water_film8-cbam_focal-lovasz_cosine-restarts
 
   callbacks:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
@@ -26,11 +26,11 @@ trainer:
         min_delta: 1e-3
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: ./models_checkpoints/2026/changestar2
+        dirpath: ./models_checkpoints/2026/changestar2/tiled/
         monitor: "val_loss"
         mode: "min"
         save_top_k: 5
-        filename: "cs2base_AB_y23-25_cosine-restarts-{epoch:02d}-{val_loss:.3f}"
+        filename: "cs2base_AB_y23-25_cosine-restarts-tiled-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 50
