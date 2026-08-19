@@ -80,7 +80,8 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
              group_date_post,
              beam,
              sat_pass,
-             event_start_date) in df_csv[
+              event_start_date,
+              output_name) in df_csv[
             ['pre_input_file',
              'post_input_file',
              "pair_id",
@@ -92,7 +93,8 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
              'group_date_post',
              'beam',
              'sat_pass',
-             'event_start_date']
+              'event_start_date',
+              'output_name']
         ].itertuples(index=False):
             img_pre_path = img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip()
             img_post_path = img.replace("$ROOT_PATH", self.patches_root_folder).strip()
@@ -111,6 +113,7 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
                     "group_id_pre": group_id_pre,
                     "group_id_post": group_id_post,
                     "event_start_date": event_start_date,
+                    "output_name": output_name,
                 })
 
         logger.info(
@@ -130,10 +133,13 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
             "pair_id": int(data["pair_id"]) if data["pair_id"] is not None else -1,
             "event_id": int(data["event_id"]) if data["event_id"] is not None else -1,
             "event_start_date": str(data["event_start_date"]) if data["event_start_date"] is not None else "",
+            "beam": data["beam"].name if isinstance(data["beam"], Beams) else str(data["beam"]),
+            "sat_pass": "ASC" if data["sat_pass"] == SatellitePass.ASCENDING else "DESC",
             "group_id_pre": int(data["group_id_pre"]) if data["group_id_pre"] is not None else -1,
             "group_id_post": int(data["group_id_post"]) if data["group_id_post"] is not None else -1,
             "group_date_pre": str(data["group_date_pre"]) if data["group_date_pre"] is not None else "",
             "group_date_post": str(data["group_date_post"]) if data["group_date_post"] is not None else "",
+            "output_name": str(data["output_name"]),
         }
 
     def _get_pre_post_name(self, data: dict[str, str]) -> str:

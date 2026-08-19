@@ -1217,6 +1217,10 @@ class ChangeDetectionChangeFormer(LightningModule):
         for key in ("pair_id",
                     "event_id",
                     "db_nbac_fire_id",
+                    "event_start_date",
+                    "beam",
+                    "sat_pass",
+                    "output_name",
                     'group_date_pre',
                     'group_date_post',
                     'group_id_pre',
@@ -1407,6 +1411,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
                 # Scalar metadata
                 for key in ("cell_id", "pair_id", "event_id", "db_nbac_fire_id",
+                            "event_start_date", "beam", "sat_pass", "output_name",
                             "group_date_pre", "group_date_post",
                             "group_id_pre", "group_id_post"):
                     if key in batch_result:
@@ -1520,6 +1525,10 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "event_id",
                     first_tile.get("db_nbac_fire_id", "unknown_event"),
                 ),
+                "event_start_date": first_tile.get("event_start_date"),
+                "beam": first_tile.get("beam"),
+                "sat_pass": first_tile.get("sat_pass"),
+                "output_name": first_tile.get("output_name"),
                 "group_id_pre": first_tile.get("group_id_pre", "all"),
                 "group_id_post": first_tile.get("group_id_post", "all"),
                 "group_date_pre": first_tile.get("group_date_pre", "all"),
@@ -1608,7 +1617,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         from collections import defaultdict
         import json
 
-        group_tile_paths: dict[tuple[str, str, str], list[Path]] = defaultdict(list)
+        group_tile_paths: dict[tuple[str, ...], list[Path]] = defaultdict(list)
         event_all_tile_paths: dict[str, list[Path]] = defaultdict(list)
 
         manifest = {
@@ -1630,17 +1639,19 @@ class ChangeDetectionChangeFormer(LightningModule):
             group_id_post = str(info.get("group_id_post", "all"))
             group_date_pre = str(info.get("group_date_pre", "all"))
             group_date_post = str(info.get("group_date_post", "all"))
-
-            safe_name = Path(
-                source_key[:60].replace("|", "_").replace("/", "_")
-            ).stem
+            event_start_date = info.get("event_start_date")
+            beam = info.get("beam")
+            sat_pass = info.get("sat_pass")
+            safe_name = Path(source_key.replace("|", "_").replace("/", "_")).stem
 
             # Directory: base / EVENT_ID / PREDICTION_DATE / cell_id
             event_date_dir = base_dir / event_id / predict_date
             tile_dir = event_date_dir / cell_id
             tile_dir.mkdir(parents=True, exist_ok=True)
 
-            out_name = f"{pair_id}-{safe_name}.tif" if pair_id else f"{safe_name}.tif"
+            out_name = self._prediction_output_filename(
+                info.get("output_name"), pair_id=pair_id, legacy_name=safe_name,
+            )
             out_path = tile_dir / out_name
 
             with rio.open(str(out_path), "w", **profile_i) as dst:
@@ -1653,19 +1664,31 @@ class ChangeDetectionChangeFormer(LightningModule):
 
             # Collect for merge
             event_date_key = str(event_date_dir)
-            group_tile_paths[
-                (event_date_key, group_id_pre, group_id_post)
-            ].append(out_path)
+            group_tile_paths[self._group_merge_key(
+                event_date_key,
+                event_id,
+                event_start_date,
+                group_id_pre,
+                group_date_pre,
+                group_id_post,
+                group_date_post,
+                beam,
+                sat_pass,
+            )].append(out_path)
             event_all_tile_paths[event_date_key].append(out_path)
 
             manifest["predictions"].append({
                 "pair_id": pair_id,
                 "event_id": event_id,
+                "event_start_date": event_start_date,
                 "cell_id": cell_id,
+                "beam": beam,
+                "sat_pass": sat_pass,
                 "group_id_pre": group_id_pre,
                 "group_id_post": group_id_post,
                 "group_date_pre": group_date_pre,
                 "group_date_post": group_date_post,
+                "output_name": out_name,
                 "tif_path": str(out_path),
                 "overlap_blended": True,
             })
@@ -1716,7 +1739,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # --- Phase 1 : écrire chaque tuile individuelle ---
         # On collecte les chemins par (event_id, predict_date) pour le merge
-        group_tile_paths: dict[tuple[str, str, str], list[Path]] = defaultdict(list)
+        group_tile_paths: dict[tuple[str, ...], list[Path]] = defaultdict(list)
         event_all_tile_paths: dict[str, list[Path]] = defaultdict(list)
 
         logger.info(f"Saving predictions to {base_dir}")
@@ -1736,6 +1759,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_cell_id = batch_result['cell_id']
             y_pred = batch_result["predictions"]  # [B, H_padded, W_padded]
             names = batch_result["pre_post_name"]
+            batch_output_names = batch_result.get("output_name")
             batch_profiles = batch_result["profile"]
             orig_heights = batch_result["original_height"]  # Tensor [B] ou list
             orig_widths = batch_result["original_width"]  # Tensor [B] ou list
@@ -1750,12 +1774,18 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_group_id_post = batch_result.get("group_id_post")
             batch_group_date_pre = batch_result.get("group_date_pre")
             batch_group_date_post = batch_result.get("group_date_post")
+            batch_event_start_dates = batch_result.get("event_start_date")
+            batch_beams = batch_result.get("beam")
+            batch_sat_passes = batch_result.get("sat_pass")
 
             for i in range(batch_size):
                 cell_id = batch_cell_id[i]
                 sample_name = names[i].replace('\n', '').replace('|', '_').replace('/', '_')
                 pair_id = self._extract_scalar(batch_pair_ids, i, default=None)
                 event_id = self._extract_scalar(batch_event_ids, i, default="unknown_event")
+                event_start_date = self._extract_scalar(batch_event_start_dates, i, default=None)
+                beam = self._extract_scalar(batch_beams, i, default=None)
+                sat_pass = self._extract_scalar(batch_sat_passes, i, default=None)
                 group_id_pre = self._extract_scalar(batch_group_id_pre, i, default="all")
                 group_id_post = self._extract_scalar(batch_group_id_post, i, default="all")
                 group_date_pre = self._extract_scalar(batch_group_date_pre, i, default="all")
@@ -1799,14 +1829,29 @@ class ChangeDetectionChangeFormer(LightningModule):
                 event_date_dir = base_dir / event_id / predict_date
                 tile_dir = event_date_dir / cell_id
                 tile_dir.mkdir(parents=True, exist_ok=True)
-                out_path = tile_dir / f"{pair_id}-{sample_name}.tif"
+                out_name = self._prediction_output_filename(
+                    self._extract_scalar(batch_output_names, i, default=""),
+                    pair_id=pair_id,
+                    legacy_name=f"cell-{cell_id}_{sample_name}",
+                )
+                out_path = tile_dir / out_name
 
                 with rio.open(str(out_path), "w", **profile_i) as dst:
                     dst.write(pred_np[np.newaxis, :, :])
 
                 # Collecter pour les merges (APRÈS le with)
                 event_date_key = str(event_date_dir)
-                group_tile_paths[(event_date_key, str(group_id_pre), str(group_id_post))].append(out_path)
+                group_tile_paths[self._group_merge_key(
+                    event_date_key,
+                    event_id,
+                    event_start_date,
+                    group_id_pre,
+                    group_date_pre,
+                    group_id_post,
+                    group_date_post,
+                    beam,
+                    sat_pass,
+                )].append(out_path)
                 event_all_tile_paths[event_date_key].append(out_path)
 
                 logger.info("Saved prediction to %s (%dx%d)", out_path, orig_w, orig_h)
@@ -1814,11 +1859,15 @@ class ChangeDetectionChangeFormer(LightningModule):
                 manifest["predictions"].append({
                     "pair_id": pair_id,
                     "event_id": event_id,
+                    "event_start_date": event_start_date,
                     "cell_id": cell_id,
+                    "beam": beam,
+                    "sat_pass": sat_pass,
                     "group_id_pre": group_id_pre,
                     "group_id_post": group_id_post,
                     "group_date_pre": group_date_pre,
                     "group_date_post": group_date_post,
+                    "output_name": out_name,
                     "tif_path": str(out_path),
                 })
 
@@ -1831,6 +1880,82 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         self._merge_predictions(group_tile_paths, event_all_tile_paths)
         logger.info("All predictions saved to %s", base_dir)
+
+    @staticmethod
+    def _group_merge_key(
+        event_date_dir: str,
+        event_id: object,
+        event_start_date: object,
+        group_id_pre: object,
+        group_date_pre: object,
+        group_id_post: object,
+        group_date_post: object,
+        beam: object,
+        sat_pass: object,
+    ) -> tuple[str, ...]:
+        """Return the complete provenance key for one cross-cell merge."""
+        return tuple(map(str, (
+            event_date_dir,
+            event_id,
+            event_start_date,
+            group_id_pre,
+            group_date_pre,
+            group_id_post,
+            group_date_post,
+            beam,
+            sat_pass,
+        )))
+
+    @staticmethod
+    def _merge_date(value: object) -> str:
+        """Normalize a date-like metadata value to ``YYYYMMDD`` for filenames."""
+        value_as_string = str(value).strip()
+        digits = "".join(char for char in value_as_string if char.isdigit())
+        return digits[:8] if len(digits) >= 8 else "NA"
+
+    @classmethod
+    def _merged_group_filename(
+        cls,
+        event_id: str,
+        event_start_date: str,
+        group_id_pre: str,
+        group_date_pre: str,
+        group_id_post: str,
+        group_date_post: str,
+        beam: str,
+        sat_pass: str,
+    ) -> str:
+        """Build the cross-cell merge name without a ``cell_id`` component."""
+        return (
+            f"event-{event_id}"
+            f"_start-{cls._merge_date(event_start_date)}"
+            f"_pre-g{group_id_pre}-{cls._merge_date(group_date_pre)}"
+            f"_post-g{group_id_post}-{cls._merge_date(group_date_post)}"
+            f"_beam-{beam}_pass-{sat_pass}.tif"
+        )
+
+    @staticmethod
+    def _prediction_output_filename(
+        output_name: str | None,
+        *,
+        pair_id: str | None,
+        legacy_name: str,
+        suffix: str = "",
+    ) -> str:
+        """Return a safe GeoTIFF filename, preferring the CSV output name.
+
+        ``output_name`` is supplied by the SCANFIRE orchestrator and contains
+        the event, group dates/IDs, cell, beam, and satellite pass.  The
+        legacy fallback preserves compatibility with older prediction CSVs.
+        The standard SCANFIRE name already includes ``cell-{cell_id}``; the
+        legacy fallback receives the cell identifier from the caller as well.
+        """
+        if output_name:
+            requested = Path(str(output_name)).name
+            if requested.lower().endswith(".tif") and requested != ".tif":
+                return f"{Path(requested).stem}{suffix}.tif"
+
+        return f"{pair_id}-{legacy_name}{suffix}.tif" if pair_id else f"{legacy_name}{suffix}.tif"
 
     @staticmethod
     def _extract_scalar(batch_field, index: int, default: str = "unknown") -> str:
@@ -2086,11 +2211,11 @@ class ChangeDetectionChangeFormer(LightningModule):
 
     @staticmethod
     def _merge_predictions(
-            group_tile_paths: dict[tuple[str, str, str], list[Path]],
+            group_tile_paths: dict[tuple[str, ...], list[Path]],
             event_all_tile_paths: dict[str, list[Path]],
     ) -> None:
         """Merge tiles in two passes:
-        1. Per group_id_pre/group_id_post pair → merged_group_{pre}_{post}.tif
+        1. Per event/pre-post pair/beam/pass → one self-describing GeoTIFF
         2. All tiles in the event/date dir    → merged_all.tif
 
         Uses :meth:`_chunked_merge` to handle large tile counts without
@@ -2098,15 +2223,35 @@ class ChangeDetectionChangeFormer(LightningModule):
         """
         import gc
 
-        # --- Pass 1 : merge par paire (group_id_pre, group_id_post) ---
-        for (event_date_dir_str, group_pre, group_post), tile_paths in group_tile_paths.items():
+        # --- Pass 1 : merge par paire pré/post et configuration SAR ---
+        for (
+            event_date_dir_str,
+            event_id,
+            event_start_date,
+            group_pre,
+            group_date_pre,
+            group_post,
+            group_date_post,
+            beam,
+            sat_pass,
+        ), tile_paths in group_tile_paths.items():
             event_date_dir = Path(event_date_dir_str)
-            if len(tile_paths) < 2:
-                logger.info("Skipping merge for group %s/%s (only %d tile)",
-                            group_pre, group_post, len(tile_paths))
-                continue
+            if len(tile_paths) == 1:
+                logger.info(
+                    "Writing single-cell merge for event %s, group %s/%s, beam %s, pass %s",
+                    event_id, group_pre, group_post, beam, sat_pass,
+                )
 
-            merged_name = f"merged_group_{group_pre}_{group_post}.tif"
+            merged_name = ChangeDetectionChangeFormer._merged_group_filename(
+                event_id,
+                event_start_date,
+                group_pre,
+                group_date_pre,
+                group_post,
+                group_date_post,
+                beam,
+                sat_pass,
+            )
             merged_path = event_date_dir / merged_name
             logger.info("Merging %d tiles → %s/%s", len(tile_paths), event_date_dir, merged_name)
 
@@ -2114,8 +2259,10 @@ class ChangeDetectionChangeFormer(LightningModule):
                 ChangeDetectionChangeFormer._chunked_merge(tile_paths, merged_path)
                 logger.info("Saved merged group to %s", merged_path)
             except Exception:
-                logger.exception("Failed to merge group %s/%s in %s",
-                                 group_pre, group_post, event_date_dir)
+                logger.exception(
+                    "Failed to merge event %s, group %s/%s, beam %s, pass %s in %s",
+                    event_id, group_pre, group_post, beam, sat_pass, event_date_dir,
+                )
 
         # Force GC between passes to release all FDs from Pass 1
         gc.collect()
