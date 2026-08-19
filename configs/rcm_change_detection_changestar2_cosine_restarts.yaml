@@ -14,7 +14,7 @@ trainer:
     class_path: lightning.pytorch.loggers.TensorBoardLogger
     init_args:
       save_dir: ./lightning_logs
-      name: 2026/changestar2/tiled/cs2base_AB_y23-25_water_film8-cbam_focal-lovasz_cosine-restarts
+      name: 2026/changestar2/tiled/cs2base_A_y23-25_water_film8-RRRL-cbam_focal-lovasz_cosine-restarts
 
   callbacks:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
@@ -30,7 +30,7 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         save_top_k: 5
-        filename: "cs2base_AB_y23-25_cosine-restarts-tiled-{epoch:02d}-{val_loss:.3f}"
+        filename: "cs2base_A_y23-25_water-film8-RRRL-cosine-restarts-tiled-{epoch:02d}-{val_loss:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 50
@@ -47,7 +47,7 @@ model:
   init_args:
     change_detection_model: "changestar2"
     image_size: [256,256]
-    in_channels: 10
+    in_channels: 4
     max_samples: 10
     num_classes: 1
     deep_supervision: true
@@ -64,7 +64,7 @@ model:
     use_dfa: false
     dfa_gate_hidden: 16
 
-    burned_class_weight: 3.0
+    burned_class_weight: 5.0
     main_loss:
       class_path: segmentation_models_pytorch.losses.FocalLoss
       init_args:
@@ -128,11 +128,12 @@ data:
     csv_file_name: tbl_input_pre_post_data.csv
     split_ratios: [0.8 ,0.1, 0.1]
 
-    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'NDSV','RFDI', 'RR','RL']
+#    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'NDSV','RFDI', 'RR','RL']
+    band_names: [ 'LOCALINCANGLE',  'RR','RL']
 
     beams:
     - 'A'
-    - 'B'
+    # - 'B'
     satellite_pass:
     dataset_years:
     - 2025
