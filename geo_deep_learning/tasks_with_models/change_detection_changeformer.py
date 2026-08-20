@@ -1218,6 +1218,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "event_id",
                     "db_nbac_fire_id",
                     "event_start_date",
+                    "event_end_date",
                     "beam",
                     "sat_pass",
                     "output_name",
@@ -1411,7 +1412,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
                 # Scalar metadata
                 for key in ("cell_id", "pair_id", "event_id", "db_nbac_fire_id",
-                            "event_start_date", "beam", "sat_pass", "output_name",
+                            "event_start_date", "event_end_date", "beam", "sat_pass", "output_name",
                             "group_date_pre", "group_date_post",
                             "group_id_pre", "group_id_post"):
                     if key in batch_result:
@@ -1526,6 +1527,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     first_tile.get("db_nbac_fire_id", "unknown_event"),
                 ),
                 "event_start_date": first_tile.get("event_start_date"),
+                "event_end_date": first_tile.get("event_end_date"),
                 "beam": first_tile.get("beam"),
                 "sat_pass": first_tile.get("sat_pass"),
                 "output_name": first_tile.get("output_name"),
@@ -1640,6 +1642,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             group_date_pre = str(info.get("group_date_pre", "all"))
             group_date_post = str(info.get("group_date_post", "all"))
             event_start_date = info.get("event_start_date")
+            event_end_date = info.get("event_end_date")
             beam = info.get("beam")
             sat_pass = info.get("sat_pass")
             safe_name = Path(source_key.replace("|", "_").replace("/", "_")).stem
@@ -1668,6 +1671,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 event_date_key,
                 event_id,
                 event_start_date,
+                event_end_date,
                 group_id_pre,
                 group_date_pre,
                 group_id_post,
@@ -1681,6 +1685,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 "pair_id": pair_id,
                 "event_id": event_id,
                 "event_start_date": event_start_date,
+                "event_end_date": event_end_date,
                 "cell_id": cell_id,
                 "beam": beam,
                 "sat_pass": sat_pass,
@@ -1775,6 +1780,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_group_date_pre = batch_result.get("group_date_pre")
             batch_group_date_post = batch_result.get("group_date_post")
             batch_event_start_dates = batch_result.get("event_start_date")
+            batch_event_end_dates = batch_result.get("event_end_date")
             batch_beams = batch_result.get("beam")
             batch_sat_passes = batch_result.get("sat_pass")
 
@@ -1784,6 +1790,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 pair_id = self._extract_scalar(batch_pair_ids, i, default=None)
                 event_id = self._extract_scalar(batch_event_ids, i, default="unknown_event")
                 event_start_date = self._extract_scalar(batch_event_start_dates, i, default=None)
+                event_end_date = self._extract_scalar(batch_event_end_dates, i, default=None)
                 beam = self._extract_scalar(batch_beams, i, default=None)
                 sat_pass = self._extract_scalar(batch_sat_passes, i, default=None)
                 group_id_pre = self._extract_scalar(batch_group_id_pre, i, default="all")
@@ -1845,6 +1852,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     event_date_key,
                     event_id,
                     event_start_date,
+                    event_end_date,
                     group_id_pre,
                     group_date_pre,
                     group_id_post,
@@ -1860,6 +1868,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "pair_id": pair_id,
                     "event_id": event_id,
                     "event_start_date": event_start_date,
+                    "event_end_date": event_end_date,
                     "cell_id": cell_id,
                     "beam": beam,
                     "sat_pass": sat_pass,
@@ -1886,6 +1895,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         event_date_dir: str,
         event_id: object,
         event_start_date: object,
+        event_end_date: object,
         group_id_pre: object,
         group_date_pre: object,
         group_id_post: object,
@@ -1898,6 +1908,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             event_date_dir,
             event_id,
             event_start_date,
+            event_end_date,
             group_id_pre,
             group_date_pre,
             group_id_post,
@@ -1918,6 +1929,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         cls,
         event_id: str,
         event_start_date: str,
+        event_end_date: str,
         group_id_pre: str,
         group_date_pre: str,
         group_id_post: str,
@@ -1929,6 +1941,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         return (
             f"event-{event_id}"
             f"_start-{cls._merge_date(event_start_date)}"
+            f"_end_{cls._merge_date(event_end_date)}"
             f"_pre-g{group_id_pre}-{cls._merge_date(group_date_pre)}"
             f"_post-g{group_id_post}-{cls._merge_date(group_date_post)}"
             f"_beam-{beam}_pass-{sat_pass}.tif"
@@ -2228,6 +2241,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             event_date_dir_str,
             event_id,
             event_start_date,
+            event_end_date,
             group_pre,
             group_date_pre,
             group_post,
@@ -2245,6 +2259,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             merged_name = ChangeDetectionChangeFormer._merged_group_filename(
                 event_id,
                 event_start_date,
+                event_end_date,
                 group_pre,
                 group_date_pre,
                 group_post,

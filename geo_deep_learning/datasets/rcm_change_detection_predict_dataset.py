@@ -81,6 +81,7 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
              beam,
              sat_pass,
               event_start_date,
+              event_end_date,
               output_name) in df_csv[
             ['pre_input_file',
              'post_input_file',
@@ -94,6 +95,7 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
              'beam',
              'sat_pass',
               'event_start_date',
+              'event_end_date',
               'output_name']
         ].itertuples(index=False):
             img_pre_path = img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip()
@@ -113,6 +115,7 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
                     "group_id_pre": group_id_pre,
                     "group_id_post": group_id_post,
                     "event_start_date": event_start_date,
+                    "event_end_date": event_end_date,
                     "output_name": output_name,
                 })
 
@@ -133,6 +136,7 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
             "pair_id": int(data["pair_id"]) if data["pair_id"] is not None else -1,
             "event_id": int(data["event_id"]) if data["event_id"] is not None else -1,
             "event_start_date": str(data["event_start_date"]) if data["event_start_date"] is not None else "",
+            "event_end_date": str(data["event_end_date"]) if data["event_end_date"] is not None else "",
             "beam": data["beam"].name if isinstance(data["beam"], Beams) else str(data["beam"]),
             "sat_pass": "ASC" if data["sat_pass"] == SatellitePass.ASCENDING else "DESC",
             "group_id_pre": int(data["group_id_pre"]) if data["group_id_pre"] is not None else -1,
