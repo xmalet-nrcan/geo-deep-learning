@@ -1184,18 +1184,18 @@ class ChangeDetectionChangeFormer(LightningModule):
             probs = torch.softmax(logits, dim=1)
             y_pred = torch.argmax(probs, dim=1)
 
-        # --- Masquer l'eau avec NO_DATA (32767) ---
-        # mask-common inclut déjà le masque d'eau (combiné dans le dataset)
-        # On peut aussi utiliser water_mask directement pour être explicite
+        # --- Exclure les pixels invalides et l'eau avec NO_DATA (32767) ---
+        # ``mask-common`` décrit la validité des acquisitions SAR, mais ne
+        # contient pas nécessairement l'eau. Apply both masks even when the
+        # common mask is available so water can never be vectorized as burn.
+        invalid_mask = torch.zeros_like(y_pred, dtype=torch.bool)
         if "mask-common" in batch:
             common_mask = batch["mask-common"]  # [B, 1, H, W] bool ou float
-            # common_mask == 1 → pixel valide, == 0 → pixel à masquer (eau, no-data, etc.)
-            invalid_mask = (common_mask.squeeze(1) == 0)  # [B, H, W]
-            y_pred = y_pred.masked_fill(invalid_mask, NO_DATA)
-        elif "water_mask" in batch:
+            invalid_mask |= common_mask.squeeze(1) < 0.5
+        if "water_mask" in batch:
             water_mask = batch["water_mask"]  # [B, 1, H, W]
-            is_water = (water_mask.squeeze(1) > 0)  # eau = valeur > 0
-            y_pred = y_pred.masked_fill(is_water, NO_DATA)
+            invalid_mask |= water_mask.squeeze(1) > 0  # eau = valeur > 0
+        y_pred = y_pred.masked_fill(invalid_mask, NO_DATA)
 
         # Retourner un dict avec tout ce qu'il faut pour sauvegarder après
         result = {
@@ -1212,6 +1212,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Propager le masque commun pour le re-masquage après blending overlap ---
         if "mask-common" in batch:
             result["mask_common"] = batch["mask-common"]
+        if "water_mask" in batch:
+            result["water_mask"] = batch["water_mask"]
 
         # --- Propager les métadonnées optionnelles (event_id, db_nbac_fire_id, etc.) ---
         for key in ("pair_id",
@@ -1452,6 +1454,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                 # Common mask for NO_DATA
                 if "mask_common" in batch_result:
                     tile_info["mask_common"] = batch_result["mask_common"][i].cpu()
+                if "water_mask" in batch_result:
+                    tile_info["water_mask"] = batch_result["water_mask"][i].cpu()
 
                 groups[source_key].append(tile_info)
 
@@ -1471,6 +1475,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             prob_accum = np.zeros((num_classes, source_h, source_w), dtype=np.float64)
             weight_accum = np.zeros((source_h, source_w), dtype=np.float64)
             mask_accum = np.zeros((source_h, source_w), dtype=np.float32)
+            water_accum = np.zeros((source_h, source_w), dtype=bool)
 
             for tile in tiles:
                 r = tile.get("tile_row_start", 0)
@@ -1498,6 +1503,11 @@ class ChangeDetectionChangeFormer(LightningModule):
                     mask_accum[r:r + th, c:c + tw] = np.maximum(
                         mask_accum[r:r + th, c:c + tw], cm[:th, :tw],
                     )
+                if "water_mask" in tile:
+                    wm = tile["water_mask"].numpy()
+                    if wm.ndim == 3:
+                        wm = wm.squeeze(0)
+                    water_accum[r:r + th, c:c + tw] |= wm[:th, :tw] > 0
 
             # Normalize blended probabilities
             weight_accum = np.maximum(weight_accum, 1e-8)
@@ -1507,7 +1517,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             pred = np.argmax(blended_probs, axis=0).astype(np.uint16)
 
             # Re-apply NO_DATA mask
-            invalid = mask_accum < 0.5
+            invalid = (mask_accum < 0.5) | water_accum
             pred[invalid] = NO_DATA
 
             # Build source-level GeoTIFF profile
