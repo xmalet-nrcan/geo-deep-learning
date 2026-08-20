@@ -36,7 +36,7 @@ services:
     container_name: geo-deep-learning
     volumes:
       - "/mnt/geospatial/projet_RCM_scanfire:/mnt/geospatial/projet_RCM_scanfire:rw"
-      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection_changestar2.yaml:/app/configs/model_conf.yaml"
+      - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection_changestar2_cosine_restarts.yaml:/app/configs/model_conf.yaml"
       - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/models_checkpoints:rw"
       - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
 
@@ -71,7 +71,7 @@ services:
     volumes:
       - "./configs/rcm_change_detection_predict.yaml:/app/configs/model_conf.yaml:ro"
       - "./models_checkpoints:/app/models_checkpoints:rw"
-      - "./lightning_logs:/app/lightning_logs:rw"
+      #- "./lightning_logs:/app/lightning_logs:rw"
       - "../scanfire/scanfire_modules:/app/scanfire_modules:ro"
       - "/mnt/geospatial/projet_RCM_scanfire:/mnt/geospatial/projet_RCM_scanfire:rw"
 
