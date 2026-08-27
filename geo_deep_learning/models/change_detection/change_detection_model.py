@@ -6,6 +6,7 @@ from geo_deep_learning.models.change_detection.cbam import CBAM
 from geo_deep_learning.models.change_detection.channel_dropout import ChannelDropout
 from geo_deep_learning.models.change_detection.difference_feature_attention import DifferenceFeatureAttention
 from geo_deep_learning.models.change_detection.metadata_film_conditioner import MetadataFiLMConditioner
+from geo_deep_learning.models.change_detection.signed_difference import SignedDifferenceChannel
 from geo_deep_learning.models.change_detection.sub_models.changeformer.original_change_former import ChangeFormerV6, \
     ChangeFormerV5, ChangeFormerV7
 from geo_deep_learning.models.change_detection.sub_models.hdanet import (
@@ -41,6 +42,9 @@ class ChangeDetectionModel(BaseSegmentationModel):
                  channel_dropout_prob: float = 0.1,
                  use_dfa: bool = False,
                  dfa_gate_hidden: int = 16,
+                 use_signed_difference: bool = False,
+                 signed_difference_channels: int | None = None,
+                 signed_difference_normalize: bool = False,
                  **kwargs) -> None:
         """Initialize Change Detection segmentation model.
 
@@ -62,6 +66,14 @@ class ChangeDetectionModel(BaseSegmentationModel):
             use_dfa: If True, apply Difference Feature Attention on decoder outputs.
                 Learns to gate unreliable intermediate decoder predictions.
             dfa_gate_hidden: Hidden dim for DFA gating MLP.
+            use_signed_difference: If True, append the signed temporal difference
+                (x1 - x2) as extra input channels before the encoder. Injects the
+                *direction* of change (e.g. a drop of SAR backscatter = burned).
+            signed_difference_channels: If given, a learnable 1x1 conv compresses
+                the signed difference to this many channels. If None, the full
+                signed difference (in_channels) is appended.
+            signed_difference_normalize: If True, bound the signed-difference
+                channels to [-1, 1] via tanh.
         """
         super().__init__()
 
@@ -111,7 +123,18 @@ class ChangeDetectionModel(BaseSegmentationModel):
         model_kwargs.update(kwargs)
         model = model_selection[change_detection_model]
 
-        self.change_detection_model = model(input_nc=in_channels,
+        # Signed difference channel (built first so we know the encoder's input size)
+        self.signed_difference: SignedDifferenceChannel | None = None
+        encoder_in_channels = in_channels
+        if use_signed_difference:
+            self.signed_difference = SignedDifferenceChannel(
+                in_channels=in_channels,
+                project_channels=signed_difference_channels,
+                normalize=signed_difference_normalize,
+            )
+            encoder_in_channels = in_channels + self.signed_difference.extra_channels
+
+        self.change_detection_model = model(input_nc=encoder_in_channels,
                                             output_nc=out_channels,
                                             **model_kwargs)
 
@@ -164,6 +187,7 @@ class ChangeDetectionModel(BaseSegmentationModel):
             1. FiLM conditioning (metadata → per-channel scale/shift)
             2. CBAM (channel + spatial attention)
             3. Channel Dropout (training-only regularization)
+            3b. Signed difference from raw SAR inputs (append signed x1-x2)
             4. ChangeFormer encoder + decoder
             5. DFA (gating on intermediate decoder outputs)
 
@@ -177,8 +201,16 @@ class ChangeDetectionModel(BaseSegmentationModel):
         Returns:
             List of output tensors (one per decoder head + final).
         """
+        # Keep raw inputs for the physically meaningful signed difference
+        x1_raw = x1
+        x2_raw = x2
+
         # 1. FiLM conditioning
-        if self.film_conditioner is not None and sat_pass is not None and beam is not None:
+        if (
+                self.film_conditioner is not None
+                and sat_pass is not None
+                and beam is not None
+        ):
             x1 = self.film_conditioner(x1, sat_pass, beam, **metadata_kwargs)
             x2 = self.film_conditioner(x2, sat_pass, beam, **metadata_kwargs)
 
@@ -187,18 +219,31 @@ class ChangeDetectionModel(BaseSegmentationModel):
             x1 = self.cbam(x1)
             x2 = self.cbam(x2)
 
-        # 3. Channel Dropout (same mask for pre/post to preserve change signal)
+        # 3. Channel Dropout
+        # Use the same mask for pre/post and for the raw inputs used to build diff.
+        # This prevents a dropped SAR band from being reintroduced via diff.
         if self.training and self.channel_dropout is not None:
             shared_mask = self.channel_dropout.generate_shared_mask(
                 x1.shape[1], x1.device
             )
             x1 = self.channel_dropout(x1, mask=shared_mask)
             x2 = self.channel_dropout(x2, mask=shared_mask)
+            x1_raw = self.channel_dropout(x1_raw, mask=shared_mask)
+            x2_raw = self.channel_dropout(x2_raw, mask=shared_mask)
+
+        # 3b. Signed difference from the RAW SAR inputs.
+        # Convention for x1=pre and x2=post:
+        #   diff > 0 -> backscatter decreased after the event
+        #   diff < 0 -> backscatter increased after the event
+        if self.signed_difference is not None:
+            diff = self.signed_difference.compute_difference(x1_raw, x2_raw)
+            x1 = torch.cat((x1, diff), dim=1)
+            x2 = torch.cat((x2, diff), dim=1)
 
         # 4. ChangeFormer encoder + decoder
         outputs = self.change_detection_model(x1, x2)
 
-        # 5. Difference Feature Attention (gate intermediate predictions)
+        # 5. DFA
         if self.dfa is not None and isinstance(outputs, list):
             outputs = self.dfa(outputs)
 
@@ -255,6 +300,23 @@ if __name__ == '__main__':
     )
     outputs_dfa = model_dfa(x1, x2)[-1]
     print(f"With DFA          - outputs.shape: {outputs_dfa.shape}")  # noqa: T201
+
+    # Test with Signed Difference (raw: appends 9 signed-diff channels -> encoder sees 18)
+    model_sd = ChangeDetectionModel(
+        change_detection_model='changeformer_6', in_channels=9, out_channels=2,
+        use_signed_difference=True,
+    )
+    outputs_sd = model_sd(x1, x2)[-1]
+    print(f"With SignedDiff   - outputs.shape: {outputs_sd.shape}")  # noqa: T201
+
+    # Test with Signed Difference (projected to 3 channels + tanh normalize)
+    model_sdp = ChangeDetectionModel(
+        change_detection_model='changeformer_6', in_channels=9, out_channels=2,
+        use_signed_difference=True, signed_difference_channels=3,
+        signed_difference_normalize=True,
+    )
+    outputs_sdp = model_sdp(x1, x2)[-1]
+    print(f"With SignedDiffP  - outputs.shape: {outputs_sdp.shape}")  # noqa: T201
 
     # Test ALL modules combined
     model_all = ChangeDetectionModel(
