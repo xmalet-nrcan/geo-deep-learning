@@ -78,6 +78,9 @@ class ChangeDetectionChangeFormer(LightningModule):
             channel_dropout_prob: float = 0.1,
             use_dfa: bool = False,
             dfa_gate_hidden: int = 16,
+            use_signed_difference: bool = False,
+            signed_difference_channels: int | None = None,
+            signed_difference_normalize: bool = False,
             **kwargs: object,  # noqa: ARG002
     ) -> None:
         """Initialize the model.
@@ -104,6 +107,15 @@ class ChangeDetectionChangeFormer(LightningModule):
             use_dfa: Apply Difference Feature Attention on decoder outputs.
                 Gates unreliable intermediate predictions.
             dfa_gate_hidden: Hidden dim for DFA gating MLP.
+            use_signed_difference: Append the signed temporal difference (x1 - x2)
+                as extra input channels before the encoder. Injects the direction
+                of change (e.g. a drop of SAR backscatter = burned area). Works for
+                every backbone (changeformer, changestar2, ...).
+            signed_difference_channels: If set, a learnable 1x1 conv compresses the
+                signed difference to this many channels. If None, the full signed
+                difference (in_channels) is appended.
+            signed_difference_normalize: If True, bound the signed-difference
+                channels to [-1, 1] via tanh.
         """
         super().__init__()
         self.save_hyperparameters()
@@ -145,6 +157,9 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.channel_dropout_prob = channel_dropout_prob
         self.use_dfa = use_dfa
         self.dfa_gate_hidden = dfa_gate_hidden
+        self.use_signed_difference = use_signed_difference
+        self.signed_difference_channels = signed_difference_channels
+        self.signed_difference_normalize = signed_difference_normalize
 
         self.changed_num_classes = num_classes + 1 if num_classes == 1 else num_classes
         self.labels = (
@@ -323,6 +338,9 @@ class ChangeDetectionChangeFormer(LightningModule):
             channel_dropout_prob=self.channel_dropout_prob,
             use_dfa=self.use_dfa,
             dfa_gate_hidden=self.dfa_gate_hidden,
+            use_signed_difference=self.use_signed_difference,
+            signed_difference_channels=self.signed_difference_channels,
+            signed_difference_normalize=self.signed_difference_normalize,
         )
 
         if self.weights_from_checkpoint_path:
