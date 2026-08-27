@@ -88,10 +88,14 @@ class CBAM(nn.Module):
         self.spatial_attn = SpatialAttention(kernel_size=spatial_kernel)
         self.residual = residual
 
+        if residual:
+            self.gamma = nn.Parameter(torch.zeros(1))
+
     def forward(self, x: Tensor) -> Tensor:
         """Apply CBAM to input features [B, C, H, W]."""
         out = self.channel_attn(x)
         out = self.spatial_attn(out)
         if self.residual:
-            return x + out
+            return x + self.gamma * out
+
         return out
