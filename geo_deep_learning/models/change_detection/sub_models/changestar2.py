@@ -112,7 +112,7 @@ class ChangeMixin2_5(nn.Module):
     Three complementary pathways:
         1. linear_cat(cat(t1, t2))          — concatenation
         2. linear_cat(cat(t2, t1))          — temporal symmetry (optional)
-        3. linear_diff(cat(t1 - t2, |t1 - t2|))  — signed diff + magnitude
+        3. linear_diff(|t1 - t2|)           — difference
 
     The sum of all paths produces the final change features.
 
@@ -148,12 +148,8 @@ class ChangeMixin2_5(nn.Module):
             nn.GELU(),
             refine_cat,
         )
-        # Difference path input = [signed diff | magnitude] → 2 * dim channels.
-        # Keeping the signed difference preserves the *direction* of change
-        # (e.g. a drop vs. rise in SAR backscatter), while |diff| keeps the
-        # magnitude / temporal-order invariance.
         self.linear_diff = nn.Sequential(
-            nn.Conv2d(2 * dim, dim, 1, bias=False),
+            nn.Conv2d(dim, dim, 1, bias=False),
             LayerNorm2d(dim),
             nn.GELU(),
             refine_diff,
@@ -176,12 +172,8 @@ class ChangeMixin2_5(nn.Module):
         # Path 2: temporal symmetry
         if self.temporal_symmetric:
             bi = bi + self.linear_cat(torch.cat([t2_feat, t1_feat], dim=1))
-        # Path 3: signed difference + magnitude
-        # Concatenate the signed difference (preserves change direction) with
-        # its absolute value (magnitude / order-invariant) so the model keeps
-        # both cues instead of discarding the sign via .abs().
-        diff = t1_feat - t2_feat
-        bi = bi + self.linear_diff(torch.cat([diff, diff.abs()], dim=1))
+        # Path 3: absolute difference
+        bi = bi + self.linear_diff(torch.abs(t1_feat - t2_feat))
 
         return self.change_conv(bi)
 
