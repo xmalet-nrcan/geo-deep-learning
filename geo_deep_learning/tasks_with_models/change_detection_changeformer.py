@@ -503,6 +503,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Calcul des métriques différé (pour éviter de casser autograd) ---
         with torch.no_grad():
             common_mask = batch["mask-common"]  # [B, 1, H, W]
+            # Count each source pixel once across overlapping tiles (no-op if untiled)
+            common_mask = self._apply_tile_ownership(batch, common_mask)
             valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
 
             # On accumule les prédictions pour calculer les métriques à la fin
@@ -551,6 +553,87 @@ class ChangeDetectionChangeFormer(LightningModule):
         # Retourner tous les pixels aplatis — les métriques avec ignore_index ignoreront IGNORE_MASK_INDEX
         return preds.flatten(), targets.flatten()
 
+    # ------------------------------------------------------------------
+    # Tile-ownership mask (makes tiled metrics comparable to non-tiled)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _axis_tile_starts(source: int, tile: int, stride: int) -> list[int]:
+        """Reproduce the tile origins used at tiling time for one axis.
+
+        Mirrors ``TiledChangeDetectionDataset._expand_files_with_tiles`` so the
+        model can reconstruct, per sample, the full set of tile positions from
+        ``source_height`` / ``source_width`` alone.
+        """
+        if source <= tile:
+            return [0]
+        starts = list(range(0, (source - tile) + 1, stride))
+        last = source - tile
+        if last not in starts:
+            starts.append(last)
+        return sorted(set(starts))
+
+    @classmethod
+    def _axis_ownership_end(cls, starts: list[int], start: int, tile: int) -> int:
+        """Local exclusive end index of the region a tile *exclusively* owns.
+
+        A source pixel is owned by the tile with the **largest** start that
+        still covers it.  In tile-local coordinates a tile therefore owns
+        ``[0, next_start - start)`` (or the full tile for the last one),
+        guaranteeing a partition of the source with no overlap and no gap.
+        """
+        nexts = [s for s in starts if s > start]
+        return tile if not nexts else (min(nexts) - start)
+
+    def _tile_ownership_mask(
+            self,
+            batch: dict[str, Any],
+            ref_shape: torch.Size,
+    ) -> Tensor | None:
+        """Return a ``[B, 1, H, W]`` mask keeping only pixels each tile owns.
+
+        Eliminates double-counting of overlapping tiles in the metrics so that
+        tiled evaluation counts every source pixel exactly once — matching the
+        non-tiled setup.  Returns ``None`` when tiling is inactive (no-op).
+        """
+        if "tile_row_start" not in batch or "source_height" not in batch:
+            return None
+        dm = getattr(self.trainer, "datamodule", None)
+        tile_size = getattr(dm, "tile_size", None)
+        tile_stride = getattr(dm, "tile_stride", None)
+        if not tile_size or not tile_stride:
+            return None
+
+        tile_h, tile_w = tile_size
+        stride_h, stride_w = tile_stride
+        b, _, h, w = ref_shape
+        mask = torch.zeros((b, 1, h, w), dtype=torch.float32)
+
+        def _to_int(field: Any, i: int) -> int:
+            return int(field[i].item() if isinstance(field, torch.Tensor) else field[i])
+
+        for i in range(b):
+            r = _to_int(batch["tile_row_start"], i)
+            c = _to_int(batch["tile_col_start"], i)
+            sh = _to_int(batch["source_height"], i)
+            sw = _to_int(batch["source_width"], i)
+
+            row_starts = self._axis_tile_starts(sh, tile_h, stride_h)
+            col_starts = self._axis_tile_starts(sw, tile_w, stride_w)
+            row_end = min(self._axis_ownership_end(row_starts, r, tile_h), h)
+            col_end = min(self._axis_ownership_end(col_starts, c, tile_w), w)
+
+            if row_end > 0 and col_end > 0:
+                mask[i, 0, :row_end, :col_end] = 1.0
+        return mask
+
+    def _apply_tile_ownership(self, batch: dict[str, Any], common_mask: Tensor) -> Tensor:
+        """Restrict ``common_mask`` to owned pixels so overlapping tiles are counted once."""
+        own = self._tile_ownership_mask(batch, common_mask.shape)
+        if own is None:
+            return common_mask
+        return common_mask * own.to(common_mask.device, common_mask.dtype)
+
     def on_train_epoch_end(self):
         self.log("train_iou", self.train_iou.compute(), prog_bar=True, sync_dist=True)
         self.log("train_f1", self.train_f1.compute(), prog_bar=True, sync_dist=True)
@@ -594,6 +677,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         with torch.no_grad():
             # Masquer les pixels invalides avant de mettre à jour les métriques
             common_mask = batch["mask-common"]  # [B, 1, H, W]
+            # Count each source pixel once across overlapping tiles (no-op if untiled)
+            common_mask = self._apply_tile_ownership(batch, common_mask)
             valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
 
             if valid_preds.numel() > 0:
@@ -672,6 +757,8 @@ class ChangeDetectionChangeFormer(LightningModule):
         # --- Update metrics ---
         with torch.no_grad():
             common_mask = batch["mask-common"]  # [B, 1, H, W]
+            # Count each source pixel once across overlapping tiles (no-op if untiled)
+            common_mask = self._apply_tile_ownership(batch, common_mask)
             valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
 
             if valid_preds.numel() > 0:

@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import Any, Optional, List, Iterable, Type
 
 import numpy as np
+import rasterio as rio
 import torch
 import torch.utils.data as data
 from lightning.pytorch import LightningDataModule
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 
 from geo_deep_learning.datasets.rcm_change_detection_dataset import RCMChangeDetectionDataset
 
@@ -75,6 +76,20 @@ class RcmChangeDetectionDataModule(LightningDataModule):
                 The loss is computed only on the central cell pixels so that
                 the buffer zone (which has no ground-truth label) is excluded.
                 Set to 0 (default) to disable.
+            burned_oversample_factor: Relative sampling weight given to
+                training tiles that contain burned pixels, versus background-only
+                tiles.  ``1.0`` (default) disables oversampling.  Values > 1
+                enable a :class:`WeightedRandomSampler` on the **train split
+                only** (val/test untouched, so metrics stay comparable).  This
+                is a *data-level* rebalancing, complementary to the *loss-level*
+                ``burned_class_weight`` — it fixes the tile-level imbalance that
+                tiling aggravates (many pure-background tiles), which
+                ``burned_class_weight`` cannot address (it has no positive pixel
+                to up-weight on an empty tile).
+            burned_tile_min_ratio: Minimum burned-pixel ratio (over the tile's
+                valid central-cell zone) for a tile to be flagged "burned" and
+                receive the higher sampling weight.  ``0.0`` (default) means any
+                single burned pixel qualifies.
         """
         super().__init__()
 
@@ -101,6 +116,9 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         self.tile_stride = tile_stride
         self._predict_overlap_buffer = predict_overlap_buffer
         self._train_overlap_buffer = train_overlap_buffer
+        self.burned_oversample_factor = float(burned_oversample_factor)
+        self.burned_tile_min_ratio = float(burned_tile_min_ratio)
+        self._train_sample_weights: list[float] | None = None
 
         self.dataset: RCMChangeDetectionDataset = None
         if split_on_columns is None:
@@ -230,6 +248,108 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             )
         self._log_split_contents()
 
+    # ------------------------------------------------------------------
+    # Burned-tile oversampling (data-level class rebalancing, TRAIN only)
+    # ------------------------------------------------------------------
+
+    def _get_train_sample_weights(self) -> list[float] | None:
+        """Return (and cache) per-sample sampling weights for the train split.
+
+        Weights are aligned with the ordering of ``self.train_dataset`` (a
+        :class:`~torch.utils.data.Subset`), because :class:`WeightedRandomSampler`
+        draws positions ``0 … len(subset)-1`` of that subset — not indices into
+        the underlying dataset.
+        """
+        if self._train_sample_weights is not None:
+            return self._train_sample_weights
+        if self.train_dataset is None:
+            return None
+
+        indices = getattr(self.train_dataset, "indices", None)
+        if indices is None:
+            indices = list(range(len(self.train_dataset)))
+
+        weights: list[float] = []
+        mask_cache: dict[str, np.ndarray | None] = {}
+        n_burned = 0
+        for idx in indices:
+            entry = self.dataset.files[idx]
+            ratio = self._tile_burned_ratio(entry, mask_cache)
+            is_burned = ratio > self.burned_tile_min_ratio
+            if is_burned:
+                n_burned += 1
+            weights.append(self.burned_oversample_factor if is_burned else 1.0)
+
+        logger.info(
+            "Burned-tile oversampling: %d/%d train tiles flagged burned "
+            "(factor=%.2f, min_ratio=%.3f)",
+            n_burned, len(weights), self.burned_oversample_factor,
+            self.burned_tile_min_ratio,
+        )
+        if n_burned == 0:
+            logger.warning(
+                "No burned tiles detected — disabling oversampling (check "
+                "mask paths / burned_tile_min_ratio)."
+            )
+            self._train_sample_weights = None
+            return None
+
+        self._train_sample_weights = weights
+        return weights
+
+    def _tile_burned_ratio(
+            self,
+            entry: dict[str, Any],
+            mask_cache: dict[str, np.ndarray | None],
+    ) -> float:
+        """Fraction of burned pixels (value == 1) in a tile's valid central-cell zone.
+
+        The on-disk mask covers the *cell* (no buffer).  When a spatial-context
+        buffer is active, tile coordinates live in the expanded
+        ``cell + 2*buffer`` frame, so we intersect the tile footprint with the
+        central-cell region ``[buf, buf + cell_size)`` before counting.
+        """
+        mask_path = entry.get("mask")
+        if mask_path is None:
+            return 0.0
+
+        key = str(mask_path)
+        arr = mask_cache.get(key, "MISS")
+        if isinstance(arr, str):  # not yet cached
+            try:
+                with rio.open(key) as src:
+                    arr = src.read(1)
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not read mask for weighting: %s", key)
+                arr = None
+            mask_cache[key] = arr
+        if arr is None:
+            return 0.0
+
+        cell_h, cell_w = arr.shape
+        buf = self._train_overlap_buffer
+
+        if "_tile_row" in entry:
+            r, c = entry["_tile_row"], entry["_tile_col"]
+            th, tw = self.tile_size
+            # Intersect tile [r, r+th) × [c, c+tw) with cell [buf, buf+cell)
+            r0 = max(r, buf) - buf
+            r1 = min(r + th, buf + cell_h) - buf
+            c0 = max(c, buf) - buf
+            c1 = min(c + tw, buf + cell_w) - buf
+            if r1 <= r0 or c1 <= c0:
+                return 0.0
+            sub = arr[r0:r1, c0:c1]
+        else:
+            sub = arr
+
+        total = sub.size
+        if total == 0:
+            return 0.0
+        return float(np.count_nonzero(sub == 1)) / float(total)
+
+
+
     def _log_split_contents(self) -> None:
         """Log and save to CSV the unique fire IDs and group IDs in each split.
 
@@ -304,6 +424,20 @@ class RcmChangeDetectionDataModule(LightningDataModule):
     def train_dataloader(self) -> DataLoader[Any]:
         """Dataloader for training."""
 
+        sampler = None
+        shuffle = True
+        # Data-level class rebalancing: oversample burned tiles on the TRAIN
+        # split only (val/test untouched → metrics stay comparable).
+        if self.burned_oversample_factor and self.burned_oversample_factor > 1.0:
+            weights = self._get_train_sample_weights()
+            if weights is not None:
+                sampler = WeightedRandomSampler(
+                    weights=weights,
+                    num_samples=len(weights),
+                    replacement=True,
+                )
+                shuffle = False  # mutually exclusive with a sampler
+
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
@@ -311,7 +445,8 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             pin_memory=True,
             persistent_workers=True,
             prefetch_factor=2,
-            shuffle=True,
+            shuffle=shuffle,
+            sampler=sampler,
         )
 
     def val_dataloader(self) -> DataLoader[Any]:
