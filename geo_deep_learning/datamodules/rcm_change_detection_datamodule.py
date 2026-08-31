@@ -49,6 +49,8 @@ class RcmChangeDetectionDataModule(LightningDataModule):
             tile_stride: tuple[int, int] | None = None,
             predict_overlap_buffer: int = 0,
             train_overlap_buffer: int = 0,
+            burned_oversample_factor: float = 1.0,
+            burned_tile_min_ratio: float = 0.0,
     ) -> None:
         """Initialize RcmChangeDetectionDataModule.
 
