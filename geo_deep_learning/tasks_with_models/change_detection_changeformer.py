@@ -2175,9 +2175,10 @@ class ChangeDetectionChangeFormer(LightningModule):
     def _merge_with_flip(datasets, method="first"):
         """Merge datasets after flipping to positive pixel height.
 
-        Workaround for rasterio versions that reject north-up (negative pixel
-        height) transforms.  Flips all datasets to positive pixel height in
-        memory, merges, then flips the result back.
+        Workaround for rasterio, which rejects "upside down" rasters (pixel
+        height ``transform.e > 0``) in :func:`rasterio.merge.merge`.  Such
+        rasters are flipped vertically to north-up (negative ``e``) in memory,
+        merged, then flipped back to preserve the original orientation.
         """
         from rasterio.merge import merge as rio_merge
         from rasterio.transform import Affine
@@ -2188,7 +2189,10 @@ class ChangeDetectionChangeFormer(LightningModule):
         needs_flip = False
 
         for ds in datasets:
-            if ds.transform.e < 0:
+            # rasterio rejects rasters whose pixel height is POSITIVE
+            # (``transform.e > 0`` → "upside down"). Flip exactly those to
+            # north-up (negative ``e``) so the merge is accepted.
+            if ds.transform.e > 0:
                 needs_flip = True
                 data = ds.read()[:, ::-1, :]  # flip vertically
                 new_transform = Affine(
@@ -2215,7 +2219,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         for mf in mem_files:
             mf.close()
 
-        # Flip result back to north-up (negative pixel height)
+        # Flip result back to the original "upside down" orientation (positive e)
         if needs_flip:
             mosaic = mosaic[:, ::-1, :].copy()
             mosaic_transform = Affine(
