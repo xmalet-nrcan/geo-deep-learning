@@ -298,6 +298,14 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
         return mask, name
 
     def _load_water_mask(self, index: int) -> tuple[Tensor, str]:
+        # When a spatial-context buffer is active the pre/post images are
+        # expanded with *real* neighbour imagery, so the model predicts across
+        # the whole expanded tile. The water mask must therefore also carry the
+        # neighbours' water in the buffer ring; zero-padding it would leave
+        # water pixels near the cell borders (and in cross-cell merge overlaps)
+        # unmasked.
+        if self._predict_overlap_buffer > 0 and getattr(self, "_cell_grid_index", None):
+            return self._load_static_raster_with_buffer(index, "water_mask", fill_value=0.0)
         water_mask, name = self._load_image_by_name(index, "water_mask")
         water_mask = self._apply_buffer_padding(water_mask, self.files[index])
         return water_mask, name

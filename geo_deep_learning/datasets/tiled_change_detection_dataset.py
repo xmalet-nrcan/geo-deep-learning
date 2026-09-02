@@ -436,6 +436,69 @@ class TiledChangeDetectionDataset(ChangeDetectionDataset):
         padded[:, buf:buf + orig_h, buf:buf + orig_w] = mask
         return padded
 
+    def _load_static_raster_with_buffer(
+        self,
+        index: int,
+        image_key: str,
+        fill_value: float = 0.0,
+    ) -> tuple[Tensor, str]:
+        """Load a single-band static raster expanded by *buffer* using neighbours.
+
+        Mirrors :meth:`_load_image_with_buffer` but for a single-band, static
+        per-cell raster such as the water mask.  The central cell is placed at
+        the centre and the surrounding ``buf`` pixel ring is filled with the
+        matching raster from each neighbouring cell (when available), instead
+        of zeros.
+
+        This is essential because the pre/post images are expanded with *real*
+        neighbour imagery, so the model produces genuine predictions across the
+        whole expanded tile.  If the water mask were only zero-padded in the
+        buffer ring (see :meth:`_apply_buffer_padding`), water pixels lying in
+        that ring — which overlaps neighbouring cells through the merge step —
+        would never be masked.
+
+        Returns
+        -------
+        raster : ``[1, H+2b, W+2b]`` float tensor
+        name   : str
+        """
+        data = self.files[index]
+        buf = self._predict_overlap_buffer
+
+        path = data.get(image_key)
+        if path is not None and Path(str(path)).exists():
+            center, _ = self._read_image_and_get_no_data(str(path), np.int32)
+        else:
+            with rio.open(data["image"]) as src:
+                height, width = src.height, src.width
+            center = np.zeros((1, height, width), dtype=np.int32)
+
+        _, orig_h, orig_w = center.shape
+        exp_h, exp_w = orig_h + 2 * buf, orig_w + 2 * buf
+        exp = np.full((1, exp_h, exp_w), fill_value, dtype=center.dtype)
+        exp[:, buf:buf + orig_h, buf:buf + orig_w] = center[:1]
+
+        rc = self._parse_cell_id(data["cell_id"])
+        if rc is not None:
+            r, c_idx = rc
+            for (dr, dc), (dst_r, dst_c, src_r, src_c) in (
+                self._get_neighbor_slices(buf, orig_h, orig_w).items()
+            ):
+                nb_rc = (r + dr, c_idx + dc)
+                nb_path = self._find_neighbor_path(data, nb_rc, image_key)
+                if nb_path is None:
+                    continue
+                try:
+                    n_arr, _ = self._read_image_and_get_no_data(nb_path, np.int32)
+                    exp[:, dst_r, dst_c] = n_arr[:1, src_r, src_c]
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(
+                        "Could not load neighbour %s for %s: %s", nb_rc, image_key, e,
+                    )
+
+        name = Path(str(path)).name if path is not None else f"no_{image_key}"
+        return torch.from_numpy(exp).float(), name
+
     # ------------------------------------------------------------------
     # _finalize_sample  — called at the END of every subclass __getitem__
     # ------------------------------------------------------------------
