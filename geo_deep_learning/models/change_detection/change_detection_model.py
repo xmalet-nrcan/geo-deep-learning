@@ -1,4 +1,6 @@
 """Change Detection Model segmentation model."""
+from typing import Any, Callable
+
 import torch
 from torch import Tensor
 
@@ -7,18 +9,41 @@ from geo_deep_learning.models.change_detection.channel_dropout import ChannelDro
 from geo_deep_learning.models.change_detection.difference_feature_attention import DifferenceFeatureAttention
 from geo_deep_learning.models.change_detection.metadata_film_conditioner import MetadataFiLMConditioner
 from geo_deep_learning.models.change_detection.signed_difference import SignedDifferenceChannel
-from geo_deep_learning.models.change_detection.sub_models.changeformer.original_change_former import ChangeFormerV6, \
-    ChangeFormerV5, ChangeFormerV7
-from geo_deep_learning.models.change_detection.sub_models.hdanet import (
-    HDANet, HDANetSmall, HDANetBase, HDANetLarge,
+from geo_deep_learning.models.change_detection.sub_models.changeformer.original_change_former import (
+    ChangeFormerV5, ChangeFormerV6, ChangeFormerV7,
 )
-from geo_deep_learning.models.change_detection.sub_models.changemask import (
-    ChangeMask, ChangeMask18, ChangeMask34, ChangeMask50,
-)
+from geo_deep_learning.models.change_detection.sub_models.hdanet import HDANetBase, HDANetLarge, HDANetSmall
+from geo_deep_learning.models.change_detection.sub_models.changemask import ChangeMask18, ChangeMask34, ChangeMask50
 from geo_deep_learning.models.change_detection.sub_models.changestar2 import (
-    ChangeStar2, ChangeStar2Small, ChangeStar2Base, ChangeStar2Large,
+    ChangeStar2Base, ChangeStar2Large, ChangeStar2Small,
 )
 from geo_deep_learning.models.segmentation.base import BaseSegmentationModel
+
+# All currently supported backbones share the same default construction kwargs.
+_DEFAULT_BACKBONE_KWARGS: dict[str, Any] = {"decoder_softmax": False, "embed_dim": 256}
+
+# Maps a user-facing model key (the ``change_detection_model`` argument) to the
+# backbone class that implements it. Kept as a single module-level constant
+# (instead of being rebuilt on every ``__init__`` call) so the registry is
+# created once and the mapping is easy to audit/extend in one place.
+_MODEL_REGISTRY: dict[str, Callable[..., torch.nn.Module]] = {
+    "changeformer": ChangeFormerV6,
+    "changeformer_5": ChangeFormerV5,
+    "changeformer_6": ChangeFormerV6,
+    "changeformer_7": ChangeFormerV7,
+    "hdanet": HDANetBase,
+    "hdanet_small": HDANetSmall,
+    "hdanet_base": HDANetBase,
+    "hdanet_large": HDANetLarge,
+    "changemask": ChangeMask18,
+    "changemask_18": ChangeMask18,
+    "changemask_34": ChangeMask34,
+    "changemask_50": ChangeMask50,
+    "changestar2": ChangeStar2Base,
+    "changestar2_small": ChangeStar2Small,
+    "changestar2_base": ChangeStar2Base,
+    "changestar2_large": ChangeStar2Large,
+}
 
 
 class ChangeDetectionModel(BaseSegmentationModel):
@@ -77,52 +102,6 @@ class ChangeDetectionModel(BaseSegmentationModel):
         """
         super().__init__()
 
-        model_selection = {'changeformer': ChangeFormerV6,
-                           'changeformer_5': ChangeFormerV5,
-                           'changeformer_6': ChangeFormerV6,
-                           'changeformer_7': ChangeFormerV7,
-                           'hdanet': HDANetBase,
-                           'hdanet_small': HDANetSmall,
-                           'hdanet_base': HDANetBase,
-                           'hdanet_large': HDANetLarge,
-                           'changemask': ChangeMask18,
-                           'changemask_18': ChangeMask18,
-                           'changemask_34': ChangeMask34,
-                           'changemask_50': ChangeMask50,
-                           'changestar2': ChangeStar2Base,
-                           'changestar2_small': ChangeStar2Small,
-                           'changestar2_base': ChangeStar2Base,
-                           'changestar2_large': ChangeStar2Large,
-                           }
-
-        model_sub_name = {'changeformer': 'changeformer',
-                          'changeformer_5': 'changeformer',
-                          'changeformer_6': 'changeformer',
-                          'changeformer_7': 'changeformer',
-                          'hdanet': 'hdanet',
-                          'hdanet_small': 'hdanet',
-                          'hdanet_base': 'hdanet',
-                          'hdanet_large': 'hdanet',
-                          'changemask': 'changemask',
-                          'changemask_18': 'changemask',
-                          'changemask_34': 'changemask',
-                          'changemask_50': 'changemask',
-                          'changestar2': 'changestar2',
-                          'changestar2_small': 'changestar2',
-                          'changestar2_base': 'changestar2',
-                          'changestar2_large': 'changestar2',
-                          }
-
-        model_parameters = {'changeformer': {'decoder_softmax': False, 'embed_dim': 256},
-                            'hdanet': {'decoder_softmax': False, 'embed_dim': 256},
-                            'changemask': {'decoder_softmax': False, 'embed_dim': 256},
-                            'changestar2': {'decoder_softmax': False, 'embed_dim': 256}}
-        model_kwargs = model_parameters.get(model_sub_name.get(change_detection_model))
-        if model_kwargs is None:
-            model_kwargs = {}
-        model_kwargs.update(kwargs)
-        model = model_selection[change_detection_model]
-
         # Signed difference channel (built first so we know the encoder's input size)
         self.signed_difference: SignedDifferenceChannel | None = None
         encoder_in_channels = in_channels
@@ -134,9 +113,9 @@ class ChangeDetectionModel(BaseSegmentationModel):
             )
             encoder_in_channels = in_channels + self.signed_difference.extra_channels
 
-        self.change_detection_model = model(input_nc=encoder_in_channels,
-                                            output_nc=out_channels,
-                                            **model_kwargs)
+        self.change_detection_model = self._build_backbone(
+            change_detection_model, encoder_in_channels, out_channels, **kwargs,
+        )
 
         # FiLM conditioner for acquisition metadata
         self.use_metadata_film = use_metadata_film
@@ -173,6 +152,40 @@ class ChangeDetectionModel(BaseSegmentationModel):
                 gate_hidden=dfa_gate_hidden,
             )
 
+    @staticmethod
+    def _build_backbone(
+        change_detection_model: str,
+        in_channels: int,
+        out_channels: int,
+        **kwargs: Any,
+    ) -> torch.nn.Module:
+        """Instantiate the requested change-detection backbone.
+
+        Args:
+            change_detection_model: Registry key selecting the backbone
+                (see ``_MODEL_REGISTRY``, e.g. 'changeformer_6', 'hdanet_large').
+            in_channels: Number of encoder input channels (post signed-difference concat).
+            out_channels: Number of output classes.
+            **kwargs: Extra keyword arguments forwarded to the backbone constructor,
+                overriding the shared defaults in ``_DEFAULT_BACKBONE_KWARGS``.
+
+        Returns:
+            The instantiated backbone module.
+
+        Raises:
+            ValueError: If ``change_detection_model`` is not a known registry key.
+        """
+        try:
+            backbone_cls = _MODEL_REGISTRY[change_detection_model]
+        except KeyError as exc:
+            known_models = ", ".join(sorted(_MODEL_REGISTRY))
+            raise ValueError(
+                f"Unknown change_detection_model={change_detection_model!r}. "
+                f"Known models: {known_models}",
+            ) from exc
+        backbone_kwargs = {**_DEFAULT_BACKBONE_KWARGS, **kwargs}
+        return backbone_cls(input_nc=in_channels, output_nc=out_channels, **backbone_kwargs)
+
     def forward(
         self,
         x1: Tensor,
@@ -180,7 +193,7 @@ class ChangeDetectionModel(BaseSegmentationModel):
         sat_pass: Tensor | None = None,
         beam: Tensor | None = None,
         **metadata_kwargs: Tensor,
-    ) -> Tensor:
+    ) -> list[Tensor]:
         """Forward pass of the model.
 
         Pipeline order:
@@ -250,75 +263,73 @@ class ChangeDetectionModel(BaseSegmentationModel):
         return outputs
 
 
+def _print_output_shape(label: str, outputs: Tensor | list[Tensor]) -> None:
+    """Print the shape of the final decoder head output for a smoke-test run."""
+    final_output = outputs[-1] if isinstance(outputs, list) else outputs
+    print(f"{label:<18}- outputs.shape: {final_output.shape}")  # noqa: T201
+
 
 if __name__ == '__main__':
-    # Test without any conditioning
-    model = ChangeDetectionModel(change_detection_model='changeformer_6', in_channels=9, out_channels=2)
     x1 = torch.randn(5, 9, 512, 512)
     x2 = torch.randn(5, 9, 512, 512)
-    outputs = model(x1, x2)[-1]
-    print(f"Without extras    - outputs.shape: {outputs.shape}")  # noqa: T201
-
-    # Test HDANet
-    model_hda = ChangeDetectionModel(change_detection_model='hdanet', in_channels=9, out_channels=2)
     x1_sm = torch.randn(2, 9, 256, 256)
     x2_sm = torch.randn(2, 9, 256, 256)
-    outputs_hda = model_hda(x1_sm, x2_sm)[-1]
-    print(f"HDANet            - outputs.shape: {outputs_hda.shape}")  # noqa: T201
+    sat_pass = torch.tensor([0, 1, 0, 1, 0])
+    beam = torch.tensor([0, 1, 2, 3, 0])
 
-    # Test with FiLM
+    # Without any conditioning
+    model = ChangeDetectionModel(change_detection_model='changeformer_6', in_channels=9, out_channels=2)
+    _print_output_shape("Without extras", model(x1, x2))
+
+    # HDANet backbone
+    model_hda = ChangeDetectionModel(change_detection_model='hdanet', in_channels=9, out_channels=2)
+    _print_output_shape("HDANet", model_hda(x1_sm, x2_sm))
+
+    # FiLM metadata conditioning
     model_film = ChangeDetectionModel(
         change_detection_model='changeformer_6', in_channels=9, out_channels=2,
         use_metadata_film=True,
     )
-    sat_pass = torch.tensor([0, 1, 0, 1, 0])
-    beam = torch.tensor([0, 1, 2, 3, 0])
-    outputs_film = model_film(x1, x2, sat_pass=sat_pass, beam=beam)[-1]
-    print(f"With FiLM         - outputs.shape: {outputs_film.shape}")  # noqa: T201
+    _print_output_shape("With FiLM", model_film(x1, x2, sat_pass=sat_pass, beam=beam))
 
-    # Test with CBAM
+    # CBAM channel/spatial attention
     model_cbam = ChangeDetectionModel(
         change_detection_model='changeformer_6', in_channels=9, out_channels=2,
         use_cbam=True,
     )
-    outputs_cbam = model_cbam(x1, x2)[-1]
-    print(f"With CBAM         - outputs.shape: {outputs_cbam.shape}")  # noqa: T201
+    _print_output_shape("With CBAM", model_cbam(x1, x2))
 
-    # Test with Channel Dropout (training mode)
+    # Channel Dropout (training mode)
     model_cd = ChangeDetectionModel(
         change_detection_model='changeformer_6', in_channels=9, out_channels=2,
         use_channel_dropout=True, channel_dropout_prob=0.2,
     )
     model_cd.train()
-    outputs_cd = model_cd(x1, x2)[-1]
-    print(f"With ChannelDrop  - outputs.shape: {outputs_cd.shape}")  # noqa: T201
+    _print_output_shape("With ChannelDrop", model_cd(x1, x2))
 
-    # Test with DFA
+    # Difference Feature Attention
     model_dfa = ChangeDetectionModel(
         change_detection_model='changeformer_6', in_channels=9, out_channels=2,
         use_dfa=True,
     )
-    outputs_dfa = model_dfa(x1, x2)[-1]
-    print(f"With DFA          - outputs.shape: {outputs_dfa.shape}")  # noqa: T201
+    _print_output_shape("With DFA", model_dfa(x1, x2))
 
-    # Test with Signed Difference (raw: appends 9 signed-diff channels -> encoder sees 18)
+    # Signed difference (raw: appends 9 signed-diff channels -> encoder sees 18)
     model_sd = ChangeDetectionModel(
         change_detection_model='changeformer_6', in_channels=9, out_channels=2,
         use_signed_difference=True,
     )
-    outputs_sd = model_sd(x1, x2)[-1]
-    print(f"With SignedDiff   - outputs.shape: {outputs_sd.shape}")  # noqa: T201
+    _print_output_shape("With SignedDiff", model_sd(x1, x2))
 
-    # Test with Signed Difference (projected to 3 channels + tanh normalize)
+    # Signed difference (projected to 3 channels + tanh normalize)
     model_sdp = ChangeDetectionModel(
         change_detection_model='changeformer_6', in_channels=9, out_channels=2,
         use_signed_difference=True, signed_difference_channels=3,
         signed_difference_normalize=True,
     )
-    outputs_sdp = model_sdp(x1, x2)[-1]
-    print(f"With SignedDiffP  - outputs.shape: {outputs_sdp.shape}")  # noqa: T201
+    _print_output_shape("With SignedDiffP", model_sdp(x1, x2))
 
-    # Test ALL modules combined
+    # All modules combined
     model_all = ChangeDetectionModel(
         change_detection_model='changeformer_6', in_channels=9, out_channels=2,
         use_metadata_film=True,
@@ -327,6 +338,5 @@ if __name__ == '__main__':
         use_dfa=True,
     )
     model_all.train()
-    outputs_all = model_all(x1, x2, sat_pass=sat_pass, beam=beam)[-1]
-    print(f"With ALL modules  - outputs.shape: {outputs_all.shape}")  # noqa: T201
+    _print_output_shape("With ALL modules", model_all(x1, x2, sat_pass=sat_pass, beam=beam))
 
