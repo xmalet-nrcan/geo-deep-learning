@@ -1,17 +1,20 @@
 """Change Detection with ChangeFormer model for RCM SAR data."""
 
-from pathlib import Path
-
-import kornia as krn
+import json
 import logging
 import math
+import warnings
+from collections import defaultdict
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import kornia as krn
 import numpy as np
 import rasterio as rio
 import torch
 import torch.nn.functional as F
-import warnings
-from collections.abc import Callable
-from datetime import datetime
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
@@ -19,17 +22,24 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from matplotlib import pyplot as plt
 from rasterio.transform import Affine
 from torch import Tensor
-from torchmetrics import JaccardIndex, F1Score
-from torchmetrics.classification import BinaryJaccardIndex
-from torchmetrics.classification import BinaryPrecision, BinaryRecall
+from torchmetrics import F1Score, JaccardIndex, Precision, Recall
+from torchmetrics.classification import BinaryJaccardIndex, BinaryPrecision, BinaryRecall
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
-from typing import Any
 
 from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA, BandName  # noqa: F401
 from geo_deep_learning.models.change_detection.change_detection_model import ChangeDetectionModel
 from geo_deep_learning.tools.visualization import visualize_prediction
+from geo_deep_learning.utils.geotiff_merge import (
+    extract_scalar,
+    group_merge_key,
+    merge_predictions,
+    parse_crs,
+    prediction_output_filename,
+    transform_coeffs,
+)
 from geo_deep_learning.utils.models import load_weights_from_checkpoint
+from geo_deep_learning.utils.tile_reassembly import reassemble_overlapping_tiles
 
 warnings.filterwarnings(
     "ignore",
@@ -42,6 +52,16 @@ IGNORE_MASK_INDEX = 255
 # Deep supervision weights for ChangeFormer's 5 output heads (c4→c1→final).
 # Intermediate heads get decreasing weight; the final head gets the most.
 DEEP_SUPERVISION_WEIGHTS = [0.1, 0.1, 0.15, 0.2, 1.0]
+
+# Only visualize samples with at least this fraction of valid pixels labeled
+# "burned" (class 1) — keeps validation/test figures informative.
+MIN_BURNED_RATIO_FOR_VISUALIZATION = 0.10
+
+# Replacement value for NaN logits before they reach the loss functions.
+# Using 0.0 (a neutral / low-confidence score) avoids injecting an
+# artificially "certain" class prediction into the loss — see docstring on
+# ``_sanitize_logits`` for details on why an extreme value here is unsafe.
+NAN_LOGIT_REPLACEMENT = 0.0
 
 class ChangeDetectionChangeFormer(LightningModule):
     """Change Detection with ChangeFormer V6 model."""
@@ -208,39 +228,39 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         self._total_samples_visualized = 0
 
-        num_classes = self.num_classes if self.num_classes > 1 else 2
-        task_type = "multiclass" if num_classes > 2 else "binary"
+        classification_num_classes = self.num_classes if self.num_classes > 1 else 2
+        task_type = "multiclass" if classification_num_classes > 2 else "binary"
 
-        if num_classes == 2:
-            self.train_iou = BinaryJaccardIndex(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX)
-            self.val_iou = BinaryJaccardIndex(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX)
-            self.test_iou = BinaryJaccardIndex(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX)
-        else:
-            self.train_iou = JaccardIndex(task=task_type, num_classes=num_classes)
-            self.val_iou = JaccardIndex(task=task_type, num_classes=num_classes)
-            self.test_iou = JaccardIndex(task=task_type, num_classes=num_classes)
-
-        self.train_f1 = F1Score(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX)
-        self.val_f1 = F1Score(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX)
-        self.test_f1 = F1Score(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX)
-
-        if num_classes == 2:
-            self.train_precision = BinaryPrecision(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX )
-            self.val_precision = BinaryPrecision(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX )
-            self.test_precision = BinaryPrecision(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX )
-            self.train_recall = BinaryRecall(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX )
-            self.val_recall = BinaryRecall(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX )
-            self.test_recall = BinaryRecall(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX )
-        else:
-            from torchmetrics import Precision, Recall
-            self.train_precision = Precision(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX )
-            self.val_precision = Precision(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX )
-            self.test_precision = Precision(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX )
-            self.train_recall = Recall(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX )
-            self.val_recall = Recall(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX )
-            self.test_recall = Recall(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX )
+        for split in ("train", "val", "test"):
+            metrics = self._build_classification_metrics(classification_num_classes, task_type)
+            setattr(self, f"{split}_iou", metrics["iou"])
+            setattr(self, f"{split}_f1", metrics["f1"])
+            setattr(self, f"{split}_precision", metrics["precision"])
+            setattr(self, f"{split}_recall", metrics["recall"])
 
         self.predict_output_dir = predict_output_dir
+
+    def _build_classification_metrics(self, num_classes: int, task_type: str) -> dict[str, Any]:
+        """Instantiate IoU/F1/Precision/Recall metrics for one data split.
+
+        ``ignore_index=IGNORE_MASK_INDEX`` is set on every metric (including
+        the multiclass ``JaccardIndex``, which was previously missing it) so
+        that all four metrics behave consistently even if an ignore-index
+        pixel ever reaches ``.update()`` without being pre-filtered.
+        """
+        if num_classes == 2:  # noqa: PLR2004
+            return {
+                "iou": BinaryJaccardIndex(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX),
+                "f1": F1Score(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX),
+                "precision": BinaryPrecision(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX),
+                "recall": BinaryRecall(threshold=self.threshold, ignore_index=IGNORE_MASK_INDEX),
+            }
+        return {
+            "iou": JaccardIndex(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX),
+            "f1": F1Score(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX),
+            "precision": Precision(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX),
+            "recall": Recall(task=task_type, num_classes=num_classes, ignore_index=IGNORE_MASK_INDEX),
+        }
 
     @staticmethod
     def _build_geo_aug() -> AugmentationSequential:
@@ -819,78 +839,23 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.test_precision.reset()
         self.test_recall.reset()
 
-    def _forward_and_get_loss(self, batch: dict[str, Any]) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, int]:
+    def _forward_and_get_loss(
+            self, batch: dict[str, Any],
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, int]:
+        """Run the forward pass and compute the (possibly deep-supervised) loss.
+
+        Returns a 10-tuple of ``(x_pre, x_post, y_float, one_hot, logits,
+        main_loss, focal_loss, lovasz_loss, final_head_loss, batch_size)``.
+        """
         x_pre, x_post = batch["image_pre"], batch["image"]
         y = batch["mask"]
-        common_data_mask = batch["mask-common"]
-
         batch_size = x_post.shape[0]
 
-        # --- Mask out the neighbour-context buffer zone (train_overlap_buffer) ---
-        # When spatial context is loaded from adjacent cells the image is
-        # (h + 2b) × (w + 2b) but the ground-truth label mask only covers
-        # the central (h × w) region.  Zero the buffer zone in common_data_mask
-        # so the loss is never computed there.
-        # The dataset stores "buffer_size", "cell_orig_height", "cell_orig_width"
-        # whenever a non-zero buffer was applied (train or predict).
-        if "buffer_size" in batch:
-            buf_raw = batch["buffer_size"]
-            buf = int(buf_raw[0].item() if isinstance(buf_raw, torch.Tensor) else buf_raw[0])
-            if buf > 0:
-                common_data_mask = common_data_mask.clone()
+        common_data_mask = self._mask_buffer_zone(batch, batch["mask-common"], batch_size)
+        # Propagate the modified mask so that metrics in training_step /
+        # validation_step / test_step use the same valid-pixel set as the loss.
+        batch["mask-common"] = common_data_mask
 
-                if "tile_row_start" in batch:
-                    # --- Tiled + buffered ---
-                    # Each tile is a crop of the expanded (cell + 2*buf)
-                    # image.  The valid zone (central cell, excluding
-                    # neighbour context) spans rows [buf, buf + orig_h) ×
-                    # cols [buf, buf + orig_w) in the expanded image.
-                    # We compute the intersection of this valid zone with
-                    # each tile's coverage area and mask everything outside.
-                    # Without this per-tile logic the old code masked buf
-                    # pixels from ALL 4 edges of EVERY tile, which wrongly
-                    # discarded up to 63 % of valid pixels on interior
-                    # tiles that don't touch the buffer boundary at all.
-                    tile_h, tile_w = common_data_mask.shape[2], common_data_mask.shape[3]
-                    orig_h_batch = batch["cell_orig_height"]
-                    orig_w_batch = batch["cell_orig_width"]
-
-                    for i in range(batch_size):
-                        tr = int(batch["tile_row_start"][i].item() if isinstance(batch["tile_row_start"], torch.Tensor) else batch["tile_row_start"][i])
-                        tc = int(batch["tile_col_start"][i].item() if isinstance(batch["tile_col_start"], torch.Tensor) else batch["tile_col_start"][i])
-                        oh = int(orig_h_batch[i].item() if isinstance(orig_h_batch, torch.Tensor) else orig_h_batch[i])
-                        ow = int(orig_w_batch[i].item() if isinstance(orig_w_batch, torch.Tensor) else orig_w_batch[i])
-
-                        # Valid rows/cols in tile-local coordinates
-                        vr_start = max(0, buf - tr)
-                        vr_end   = min(tile_h, buf + oh - tr)
-                        vc_start = max(0, buf - tc)
-                        vc_end   = min(tile_w, buf + ow - tc)
-
-                        if vr_start > 0:
-                            common_data_mask[i, :, :vr_start, :] = 0.0
-                        if vr_end < tile_h:
-                            common_data_mask[i, :, vr_end:, :] = 0.0
-                        if vc_start > 0:
-                            common_data_mask[i, :, :, :vc_start] = 0.0
-                        if vc_end < tile_w:
-                            common_data_mask[i, :, :, vc_end:] = 0.0
-                else:
-                    # --- Non-tiled + buffered ---
-                    # The full expanded image: mask buf pixels from all edges.
-                    img_h, img_w = common_data_mask.shape[2], common_data_mask.shape[3]
-                    if buf < img_h:
-                        common_data_mask[:, :, :buf, :] = 0.0
-                        common_data_mask[:, :, img_h - buf:, :] = 0.0
-                    if buf < img_w:
-                        common_data_mask[:, :, :, :buf] = 0.0
-                        common_data_mask[:, :, :, img_w - buf:] = 0.0
-
-                # Propagate the modified mask so that metrics in
-                # training_step / validation_step / test_step use the
-                # same valid-pixel set as the loss.
-                batch["mask-common"] = common_data_mask
-        # Vérif entrées images
         if not torch.isfinite(x_pre).all():
             raise RuntimeError("x_pre contains NaN/Inf")
         if not torch.isfinite(x_post).all():
@@ -909,27 +874,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                     "x_post stats: min=%.4f, max=%.4f, mean=%.4f",
                     x_post.min().item(), x_post.max().item(), x_post.mean().item(),
                 )
-        # --- Remplacer les images quasi-vides par du bruit faible ---
-        # pour éviter NaN dans LayerNorm (variance ~ 0 → gradient explose)
-        valid_ratio = common_data_mask.flatten(1).mean(dim=1)  # [B]
-        min_valid_ratio = 0.05  # au moins 5% de pixels valides
-        bad_mask = valid_ratio < min_valid_ratio  # [B] booléen
-        if bad_mask.any():
-            n_bad = bad_mask.sum().item()
-            logger.warning(
-                "Patching %d/%d samples with <%.0f%% valid pixels (ratios: %s)",
-                n_bad, batch_size, min_valid_ratio * 100,
-                [f"{r:.3f}" for r, b in zip(valid_ratio.tolist(), bad_mask.tolist()) if b],
-            )
-            # Remplir les samples quasi-vides avec du bruit uniforme [0, 0.01]
-            # pour que LayerNorm ait une variance > 0
-            noise = torch.rand_like(x_pre[0:1]) * 0.01
-            for idx in bad_mask.nonzero(as_tuple=True)[0]:
-                x_pre[idx] = noise[0]
-                x_post[idx] = noise[0]
-                # Mettre le masque à 0 pour exclure ces samples de la loss
-                common_data_mask[idx] = 0.0
-                y[idx] = 0
+
+        self._patch_degenerate_samples(x_pre, x_post, y, common_data_mask, batch_size)
 
         raw_output = self(
             x_pre,
@@ -951,7 +897,6 @@ class ChangeDetectionChangeFormer(LightningModule):
             logits = raw_output
 
         y_float = y.float()
-        logits_no_nan = torch.nan_to_num(logits, nan=1e15, posinf=1.0, neginf=0.0)
         num_classes = self.changed_num_classes
 
         # Vérifier les logits (NaN résiduel)
@@ -967,81 +912,33 @@ class ChangeDetectionChangeFormer(LightningModule):
             logits_safe = torch.zeros_like(logits)
             dummy_one_hot = torch.zeros(
                 (batch_size, num_classes, x_post.shape[2], x_post.shape[3]),
-                device=logits.device, dtype=logits.dtype, )
+                device=logits.device, dtype=logits.dtype,
+            )
+            return x_pre, x_post, y_float, dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, zero_loss, batch_size
 
-            return x_pre, x_post, y.float(), dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, zero_loss, batch_size
+        logits_no_nan = self._sanitize_logits(logits)
 
-        # Préparation du one-hot
-        y_one_hot = y.squeeze(1) if y.dim() == 4 else y
-        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1)  # clamp aussi les 255 → num_classes-1
-        one_hot = torch.nn.functional.one_hot(y_one_hot.long(), num_classes=num_classes)
-        one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
-
-        # Mark invalid pixels with IGNORE_MASK_INDEX in targets.
-        # Both FocalLoss and LovaszLoss support ignore_index=255 natively,
-        # avoiding the previous mask-multiplication approach which:
-        #   - biased Lovász sorting (invalid pixels got error=1, distorting gradients)
-        #   - added phantom class-0 contributions to FocalLoss
-        invalid_pixels = (common_data_mask < 0.5)  # [B, 1, H, W], True=invalid
-        one_hot_for_loss = one_hot.clone()
-        one_hot_for_loss.masked_fill_(invalid_pixels.expand_as(one_hot), IGNORE_MASK_INDEX)
+        # Préparation du one-hot (+ variante avec ignore_index pour la loss)
+        one_hot, one_hot_for_loss = self._prepare_one_hot_targets(y, common_data_mask, num_classes)
 
         # Vérifier qu'il reste des pixels valides
-        valid_sum = common_data_mask.sum()
-        if valid_sum == 0:
+        if common_data_mask.sum() == 0:
             zero = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
             return x_pre, x_post, y_float, one_hot, logits_no_nan, zero, zero, zero, zero, batch_size
-
-        w_ml, w_sl = self.loss_ratio
 
         # Vérifier entrées de la loss
         if not torch.isfinite(one_hot).all():
             raise RuntimeError("One-hot targets contain non-finite values (NaN/Inf).")
 
-        # --- Deep supervision: compute loss on every decoder head ---
-        target_h, target_w = logits_no_nan.shape[2], logits_no_nan.shape[3]
-
         if self.deep_supervision and len(all_outputs) > 1 and self.training:
-            ds_weights = self.deep_supervision_weights
-            # Ensure we have a weight for each head
-            if len(ds_weights) < len(all_outputs):
-                ds_weights = ds_weights + [1.0] * (len(all_outputs) - len(ds_weights))
-
-            total_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-            total_focal = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-            total_lovasz = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-            weight_sum = sum(ds_weights[:len(all_outputs)])
-
-            final_head_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-            for head_idx, head_output in enumerate(all_outputs):
-                head_logits = torch.nan_to_num(head_output, nan=1e15, posinf=1.0, neginf=0.0)
-                # Resize intermediate heads to final resolution
-                if head_logits.shape[2] != target_h or head_logits.shape[3] != target_w:
-                    head_logits = F.interpolate(
-                        head_logits, size=(target_h, target_w),
-                        mode='bilinear', align_corners=False,
-                    )
-
-                head_lovasz = self.secondary_loss(head_logits.contiguous(), one_hot_for_loss)
-                head_focal = self.main_loss(head_logits.contiguous(), one_hot_for_loss)
-                head_loss = w_sl * head_lovasz + w_ml * head_focal
-
-                total_loss = total_loss + ds_weights[head_idx] * head_loss
-                total_focal = total_focal + ds_weights[head_idx] * head_focal
-                total_lovasz = total_lovasz + ds_weights[head_idx] * head_lovasz
-
-                # Save final head loss for fair train/val comparison
-                if head_idx == len(all_outputs) - 1:
-                    final_head_loss = head_loss
-
-            main_loss = total_loss / weight_sum
-            focal_loss_val = total_focal / weight_sum
-            lovasz_loss_val = total_lovasz / weight_sum
+            main_loss, focal_loss_val, lovasz_loss_val, final_head_loss = self._compute_deep_supervision_loss(
+                all_outputs, one_hot_for_loss, target_shape=logits_no_nan.shape[2:],
+            )
         else:
             # Standard single-head loss (final_head_loss == main_loss)
-            lovasz_loss_val = self.secondary_loss(logits_no_nan.contiguous(), one_hot_for_loss)
-            focal_loss_val = self.main_loss(logits_no_nan.contiguous(), one_hot_for_loss)
-            main_loss = w_sl * lovasz_loss_val + w_ml * focal_loss_val
+            main_loss, focal_loss_val, lovasz_loss_val = self._compute_single_head_loss(
+                logits_no_nan, one_hot_for_loss,
+            )
             final_head_loss = main_loss
 
         # Burned-class false-negative penalty (uses burned_class_weight)
@@ -1058,7 +955,228 @@ class ChangeDetectionChangeFormer(LightningModule):
                 f"burn_penalty={burn_penalty.detach().cpu().item()}"
             )
 
-        return x_pre, x_post, y_float, one_hot, logits_no_nan, main_loss, focal_loss_val, lovasz_loss_val, final_head_loss, batch_size
+        return (
+            x_pre, x_post, y_float, one_hot, logits_no_nan,
+            main_loss, focal_loss_val, lovasz_loss_val, final_head_loss, batch_size,
+        )
+
+    @staticmethod
+    def _sanitize_logits(logits: Tensor) -> Tensor:
+        """Replace non-finite values in logits with numerically-safe ones.
+
+        NaN is replaced with ``NAN_LOGIT_REPLACEMENT`` (0.0) — a neutral,
+        low-confidence score — rather than an extreme value.  An earlier
+        version of this code used ``nan=1e15``: since softmax subtracts the
+        per-pixel max before exponentiating, a 1e15 logit would deterministically
+        assign ~100% probability to that class for the affected pixel,
+        injecting a large, meaningless gradient into the loss.  ``posinf``/
+        ``neginf`` are clamped to ``1.0``/``0.0`` as before.
+        """
+        return torch.nan_to_num(logits, nan=NAN_LOGIT_REPLACEMENT, posinf=1.0, neginf=0.0)
+
+    @staticmethod
+    def _mask_buffer_zone(
+            batch: dict[str, Any],
+            common_data_mask: Tensor,
+            batch_size: int,
+    ) -> Tensor:
+        """Zero out the neighbour-context buffer zone (``train_overlap_buffer``).
+
+        When spatial context is loaded from adjacent cells the image is
+        ``(h + 2b) × (w + 2b)`` but the ground-truth label mask only covers
+        the central ``(h × w)`` region.  The buffer zone is zeroed in the
+        returned mask so the loss is never computed there.  The dataset
+        stores ``buffer_size``, ``cell_orig_height``, ``cell_orig_width``
+        whenever a non-zero buffer was applied (train or predict).
+        """
+        if "buffer_size" not in batch:
+            return common_data_mask
+
+        buf_raw = batch["buffer_size"]
+        buf = int(buf_raw[0].item() if isinstance(buf_raw, torch.Tensor) else buf_raw[0])
+        if buf <= 0:
+            return common_data_mask
+
+        common_data_mask = common_data_mask.clone()
+
+        if "tile_row_start" in batch:
+            # --- Tiled + buffered ---
+            # Each tile is a crop of the expanded (cell + 2*buf) image.  The
+            # valid zone (central cell, excluding neighbour context) spans
+            # rows [buf, buf + orig_h) × cols [buf, buf + orig_w) in the
+            # expanded image.  We compute the intersection of this valid
+            # zone with each tile's coverage area and mask everything
+            # outside.  Without this per-tile logic, masking buf pixels
+            # from ALL 4 edges of EVERY tile wrongly discarded up to 63 % of
+            # valid pixels on interior tiles that don't touch the buffer
+            # boundary at all.
+            tile_h, tile_w = common_data_mask.shape[2], common_data_mask.shape[3]
+            orig_h_batch = batch["cell_orig_height"]
+            orig_w_batch = batch["cell_orig_width"]
+
+            for i in range(batch_size):
+                tr = int(batch["tile_row_start"][i].item() if isinstance(batch["tile_row_start"], torch.Tensor) else batch["tile_row_start"][i])
+                tc = int(batch["tile_col_start"][i].item() if isinstance(batch["tile_col_start"], torch.Tensor) else batch["tile_col_start"][i])
+                oh = int(orig_h_batch[i].item() if isinstance(orig_h_batch, torch.Tensor) else orig_h_batch[i])
+                ow = int(orig_w_batch[i].item() if isinstance(orig_w_batch, torch.Tensor) else orig_w_batch[i])
+
+                # Valid rows/cols in tile-local coordinates
+                vr_start = max(0, buf - tr)
+                vr_end = min(tile_h, buf + oh - tr)
+                vc_start = max(0, buf - tc)
+                vc_end = min(tile_w, buf + ow - tc)
+
+                if vr_start > 0:
+                    common_data_mask[i, :, :vr_start, :] = 0.0
+                if vr_end < tile_h:
+                    common_data_mask[i, :, vr_end:, :] = 0.0
+                if vc_start > 0:
+                    common_data_mask[i, :, :, :vc_start] = 0.0
+                if vc_end < tile_w:
+                    common_data_mask[i, :, :, vc_end:] = 0.0
+        else:
+            # --- Non-tiled + buffered ---
+            # The full expanded image: mask buf pixels from all edges.
+            # BUGFIX: ``row_start``/``row_end`` (and column counterparts) are
+            # clamped so a buffer >= half the image size correctly zeroes
+            # the *entire* mask.  The previous code only masked when
+            # ``buf < img_h`` and otherwise did nothing — but with
+            # ``buf >= img_h`` the unconditional slice
+            # ``common_data_mask[:, :, img_h - buf:, :]`` would have used a
+            # *negative* start index (Python counts from the end), silently
+            # zeroing the wrong rows instead of the whole mask.
+            img_h, img_w = common_data_mask.shape[2], common_data_mask.shape[3]
+            row_start = min(buf, img_h)
+            row_end = max(img_h - buf, row_start)
+            col_start = min(buf, img_w)
+            col_end = max(img_w - buf, col_start)
+            common_data_mask[:, :, :row_start, :] = 0.0
+            common_data_mask[:, :, row_end:, :] = 0.0
+            common_data_mask[:, :, :, :col_start] = 0.0
+            common_data_mask[:, :, :, col_end:] = 0.0
+
+        return common_data_mask
+
+    @staticmethod
+    def _patch_degenerate_samples(
+            x_pre: Tensor,
+            x_post: Tensor,
+            y: Tensor,
+            common_data_mask: Tensor,
+            batch_size: int,
+    ) -> None:
+        """Replace near-empty samples with low-amplitude noise, in place.
+
+        Samples with too few valid pixels can make LayerNorm compute a
+        variance close to zero, which explodes gradients.  Such samples are
+        overwritten with uniform noise, excluded from the loss (mask set to
+        0), and their target zeroed out.
+        """
+        valid_ratio = common_data_mask.flatten(1).mean(dim=1)  # [B]
+        min_valid_ratio = 0.05  # au moins 5% de pixels valides
+        bad_mask = valid_ratio < min_valid_ratio  # [B] booléen
+        if not bad_mask.any():
+            return
+
+        n_bad = bad_mask.sum().item()
+        logger.warning(
+            "Patching %d/%d samples with <%.0f%% valid pixels (ratios: %s)",
+            n_bad, batch_size, min_valid_ratio * 100,
+            [f"{r:.3f}" for r, b in zip(valid_ratio.tolist(), bad_mask.tolist()) if b],
+        )
+        # Remplir les samples quasi-vides avec du bruit uniforme [0, 0.01]
+        # pour que LayerNorm ait une variance > 0
+        noise = torch.rand_like(x_pre[0:1]) * 0.01
+        for idx in bad_mask.nonzero(as_tuple=True)[0]:
+            x_pre[idx] = noise[0]
+            x_post[idx] = noise[0]
+            common_data_mask[idx] = 0.0  # exclure ces samples de la loss
+            y[idx] = 0
+
+    @staticmethod
+    def _prepare_one_hot_targets(
+            y: Tensor,
+            common_data_mask: Tensor,
+            num_classes: int,
+    ) -> tuple[Tensor, Tensor]:
+        """Build the one-hot target and its ignore-index-aware loss variant.
+
+        Returns ``(one_hot, one_hot_for_loss)``.  Invalid pixels in
+        ``one_hot_for_loss`` are filled with ``IGNORE_MASK_INDEX`` so that
+        FocalLoss/LovaszLoss (which both natively support
+        ``ignore_index=255``) skip them — avoiding the previous
+        mask-multiplication approach which biased Lovász sorting (invalid
+        pixels got error=1) and added phantom class-0 contributions to
+        FocalLoss.
+        """
+        y_one_hot = y.squeeze(1) if y.dim() == 4 else y  # noqa: PLR2004
+        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1)  # clamp aussi les 255 → num_classes-1
+        one_hot = F.one_hot(y_one_hot.long(), num_classes=num_classes)
+        one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
+
+        invalid_pixels = common_data_mask < 0.5  # [B, 1, H, W], True=invalid  # noqa: PLR2004
+        one_hot_for_loss = one_hot.clone()
+        one_hot_for_loss.masked_fill_(invalid_pixels.expand_as(one_hot), IGNORE_MASK_INDEX)
+        return one_hot, one_hot_for_loss
+
+    def _compute_single_head_loss(
+            self,
+            logits: Tensor,
+            one_hot_for_loss: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Compute ``(main_loss, focal_loss, lovasz_loss)`` for one prediction head."""
+        w_ml, w_sl = self.loss_ratio
+        lovasz_loss_val = self.secondary_loss(logits.contiguous(), one_hot_for_loss)
+        focal_loss_val = self.main_loss(logits.contiguous(), one_hot_for_loss)
+        main_loss = w_sl * lovasz_loss_val + w_ml * focal_loss_val
+        return main_loss, focal_loss_val, lovasz_loss_val
+
+    def _compute_deep_supervision_loss(
+            self,
+            all_outputs: list[Tensor],
+            one_hot_for_loss: Tensor,
+            target_shape: torch.Size,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Compute the weighted-average loss over every ChangeFormer decoder head.
+
+        Returns ``(main_loss, focal_loss, lovasz_loss, final_head_loss)``
+        where ``final_head_loss`` is the *unweighted* loss of the last
+        (highest-resolution) head, kept comparable to ``val_loss``/
+        ``test_loss`` which always use a single head.
+        """
+        target_h, target_w = target_shape
+        ds_weights = self.deep_supervision_weights
+        # Ensure we have a weight for each head
+        if len(ds_weights) < len(all_outputs):
+            ds_weights = ds_weights + [1.0] * (len(all_outputs) - len(ds_weights))
+        weight_sum = sum(ds_weights[:len(all_outputs)])
+
+        device, dtype = all_outputs[-1].device, all_outputs[-1].dtype
+        total_loss = torch.tensor(0.0, device=device, dtype=dtype)
+        total_focal = torch.tensor(0.0, device=device, dtype=dtype)
+        total_lovasz = torch.tensor(0.0, device=device, dtype=dtype)
+        final_head_loss = torch.tensor(0.0, device=device, dtype=dtype)
+
+        for head_idx, head_output in enumerate(all_outputs):
+            head_logits = self._sanitize_logits(head_output)
+            # Resize intermediate heads to final resolution
+            if head_logits.shape[2] != target_h or head_logits.shape[3] != target_w:
+                head_logits = F.interpolate(
+                    head_logits, size=(target_h, target_w),
+                    mode="bilinear", align_corners=False,
+                )
+
+            head_loss, head_focal, head_lovasz = self._compute_single_head_loss(head_logits, one_hot_for_loss)
+
+            total_loss = total_loss + ds_weights[head_idx] * head_loss
+            total_focal = total_focal + ds_weights[head_idx] * head_focal
+            total_lovasz = total_lovasz + ds_weights[head_idx] * head_lovasz
+
+            # Save final head loss for fair train/val comparison
+            if head_idx == len(all_outputs) - 1:
+                final_head_loss = head_loss
+
+        return total_loss / weight_sum, total_focal / weight_sum, total_lovasz / weight_sum, final_head_loss
 
     def _burned_false_negative_penalty(
             self,
@@ -1150,19 +1268,17 @@ class ChangeDetectionChangeFormer(LightningModule):
                 data_band_end = max(num_bands - 2, data_band_start + 1)  # skip SAT_PASS, BEAM
                 available = list(range(data_band_start, data_band_end))
             # Take 3 evenly spaced bands (or fewer if not enough)
-            if len(available) >= 3:
-                step = max(1, len(available) // 3)
+            if len(available) >= 3:  # noqa: PLR2004
                 rgb_indices = [available[0], available[len(available) // 2], available[-1]]
             else:
                 rgb_indices = available[:3]
 
-            # Minimum burned pixel ratio to include a sample in visualizations
-            min_burned_ratio = 0.10
             for i in range(len(image_batch)):
                 if num_logged >= num_samples:
                     break
 
-                # --- Filter: only visualize samples with ≥30% burned pixels ---
+                # --- Filter: only visualize samples with enough burned pixels ---
+                # (see MIN_BURNED_RATIO_FOR_VISUALIZATION at module level)
                 has_real_mask = has_mask_flags[i] if isinstance(
                     has_mask_flags, (list, torch.Tensor)) else has_mask_flags
                 if not has_real_mask:
@@ -1180,7 +1296,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
                 burned_count = ((mask_i_for_filter == 1) & valid_pixels).sum()
                 burned_ratio = burned_count.float() / valid_count.float()
-                if burned_ratio < min_burned_ratio:
+                if burned_ratio < MIN_BURNED_RATIO_FOR_VISUALIZATION:
                     continue
                 image_post = image_batch[i]
                 image_pre = pre_image_batch[i]
@@ -1203,8 +1319,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     invalid = (common_mask[i].squeeze(0) < 0.5)  # [H, W]
                     # Use a distinct value (255) for visualization of masked pixels
                     pred = pred.clone()
-                    effective_num_classes = self.num_classes + 1 if self.num_classes == 1 else self.num_classes
-                    pred[invalid] = effective_num_classes  # = 2 → index du gris dans la colormap
+                    pred[invalid] = self.changed_num_classes  # = 2 → index du gris dans la colormap
 
                 # Ground truth mask (always present here — filtered above)
                 mask_i = mask_batch[i]
@@ -1213,6 +1328,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     image=vis_image,
                     mask=mask_i,
                     prediction=pred,
+
                     sample_name=image_name[:80],  # truncate long names
                     num_classes=self.num_classes,
                     class_colors=self.class_colors,
@@ -1262,10 +1378,13 @@ class ChangeDetectionChangeFormer(LightningModule):
     ) -> dict[str, Any]:
         """Run prediction step with optional Test-Time Augmentation (TTA).
 
-        TTA applies geometric transforms (flips, 90° rotations), runs inference
-        on each, inverts the transform, and averages the softmax probabilities.
-        This reduces noise-related false positives — particularly important for
-        SAR data where speckle can cause spurious detections.
+        TTA applies 4 self-inverse geometric transforms (identity, horizontal
+        flip, vertical flip, and both flips i.e. a 180° rotation), runs
+        inference on each, inverts the transform, and averages the softmax
+        probabilities. This reduces noise-related false positives —
+        particularly important for SAR data where speckle can cause spurious
+        detections. Note: unlike the training augmentations, 90°/270°
+        rotations are *not* included here (see :meth:`_tta_forward`).
         """
 
         x_pre = batch["image_pre"]
@@ -1405,424 +1524,158 @@ class ChangeDetectionChangeFormer(LightningModule):
         return torch.log(avg_probs.clamp_min(eps))
 
     # ------------------------------------------------------------------
-    # Overlap blending for tile-based prediction
+    # Saving predictions (GeoTIFF + manifest + cross-tile merging)
+    #
+    # Overlap-blended tile reassembly (``create_blend_window``,
+    # ``build_source_profile``, ``reassemble_overlapping_tiles``) and the
+    # generic GeoTIFF-merging routines (``safe_merge``, ``chunked_merge``,
+    # ``merge_predictions``, filename helpers, …) live in
+    # ``geo_deep_learning.utils.geotiff_merge`` /
+    # ``geo_deep_learning.utils.tile_reassembly`` — imported at the top of
+    # this module — since they are pure, reusable I/O logic with no
+    # dependency on the LightningModule itself.
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _create_blend_window(
-        height: int,
-        width: int,
-        overlap_h: int,
-        overlap_w: int,
-    ) -> np.ndarray:
-        """Create a 2D blending window with cosine ramps in overlap regions.
-
-        Pixels in the non-overlapping center get weight 1.0.  Pixels in the
-        overlap zone smoothly ramp from 0→1 using a raised-cosine profile,
-        ensuring seamless transitions between adjacent tiles.
-
-        Args:
-            height: Tile height in pixels.
-            width: Tile width in pixels.
-            overlap_h: Vertical overlap in pixels (tile_h − stride_h).
-            overlap_w: Horizontal overlap in pixels (tile_w − stride_w).
-
-        Returns:
-            2D ``float32`` array of shape ``[height, width]`` with values in ``(0, 1]``.
-        """
-
-        def _ramp(size: int, overlap: int) -> np.ndarray:
-            win = np.ones(size, dtype=np.float32)
-            if overlap > 0:
-                ramp_vals = np.linspace(0.0, 1.0, overlap, endpoint=False, dtype=np.float32)
-                ramp_vals = 0.5 * (1.0 - np.cos(np.pi * ramp_vals))
-                win[:overlap] = ramp_vals
-                win[-overlap:] = ramp_vals[::-1]
-            return win
-
-        win_h = _ramp(height, overlap_h)
-        win_w = _ramp(width, overlap_w)
-        window = np.outer(win_h, win_w)
-        return np.maximum(window, 1e-6).astype(np.float32)
-
-    def _reassemble_overlapping_tiles(
-        self,
-        predictions: list[dict[str, Any]],
-    ) -> tuple[dict[str, dict[str, Any]], bool]:
-        """Reassemble overlapping tiles into source-level predictions with cosine blending.
-
-        Detects whether tiling with overlap was used.  If so, groups tiles by
-        source image (using ``pre_post_name`` minus the tile suffix) and blends
-        their softmax probabilities with a 2D cosine window to eliminate tile
-        seam artefacts.
-
-        Args:
-            predictions: List of batch prediction dicts from :meth:`predict_step`.
-
-        Returns:
-            Tuple of:
-            - Dict mapping *source_key* → assembled prediction info (numpy arrays,
-              GeoTIFF profile, metadata scalars).
-            - ``True`` if overlap blending was applied, ``False`` otherwise.
-        """
-        from collections import defaultdict
-
-        # --- Check if tiling metadata is present ---
-        has_tiles = any("tile_row_start" in batch for batch in predictions)
-        if not has_tiles:
-            return {}, False
-
-        dm = self.trainer.datamodule
-        tile_size = getattr(dm, "tile_size", None)
-        tile_stride = getattr(dm, "tile_stride", None)
-        if tile_size is None or tile_stride is None:
-            return {}, False
-
-        tile_h, tile_w = tile_size
-        stride_h, stride_w = tile_stride
-        overlap_h = max(tile_h - stride_h, 0)
-        overlap_w = max(tile_w - stride_w, 0)
-
-        if overlap_h <= 0 and overlap_w <= 0:
-            return {}, False  # No overlap → skip blending
-
-        logger.info(
-            "Overlap detected: tile=%s, stride=%s, overlap=(%d, %d). "
-            "Reassembling tiles with cosine blending…",
-            tile_size, tile_stride, overlap_h, overlap_w,
-        )
-
-        # --- Group tiles by source image ---
-        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
-
-        for batch_result in predictions:
-            names = batch_result["pre_post_name"]
-            batch_size = len(names)
-
-            for i in range(batch_size):
-                name = names[i].replace("\n", "")
-                source_key = name.split("|tile_")[0] if "|tile_" in name else name
-
-                tile_info: dict[str, Any] = {
-                    "name": name,
-                    "probabilities": batch_result["probabilities"][i].cpu(),
-                }
-
-                # Dimensions (original = after tile crop, before padding)
-                for dim_key in ("original_height", "original_width"):
-                    v = batch_result[dim_key]
-                    tile_info[dim_key] = v[i].item() if isinstance(v, torch.Tensor) else int(v[i])
-
-                # Tile position & source dimensions
-                for key in ("tile_row_start", "tile_col_start", "source_height", "source_width"):
-                    if key in batch_result:
-                        v = batch_result[key]
-                        tile_info[key] = v[i].item() if isinstance(v, torch.Tensor) else int(v[i])
-
-                # Scalar metadata
-                for key in ("cell_id", "pair_id", "event_id", "db_nbac_fire_id",
-                            "event_start_date", "event_end_date", "beam", "sat_pass", "output_name",
-                            "group_date_pre", "group_date_post",
-                            "group_id_pre", "group_id_post"):
-                    if key in batch_result:
-                        tile_info[key] = self._extract_scalar(batch_result[key], i, default="unknown")
-
-                # Profile (GeoTIFF) — extract per-sample values from the collated profile.
-                # PyTorch's default_collate *transposes* a Python list of length N:
-                # a list of 9-element transform lists becomes a list of 9 tensors each
-                # of shape (batch_size,).  So pv[k][i] yields the k-th coefficient of
-                # the i-th sample — NOT pv[i] which would give the i-th coefficient
-                # across all samples.  Tensors (from numpy-backed values) are batched
-                # normally as (N, 9) and can be indexed with pv[i] directly.
-                profile_raw: dict[str, Any] = {}
-                for pk, pv in batch_result["profile"].items():
-                    if pk == "transform":
-                        if isinstance(pv, (list, tuple)):
-                            # Transposed list: pv[k] is a tensor of shape (batch_size,)
-                            # representing the k-th transform coefficient for all samples.
-                            profile_raw[pk] = [
-                                float(pv[k][i].item() if isinstance(pv[k], torch.Tensor)
-                                      else pv[k][i])
-                                for k in range(len(pv))
-                            ]
-                        elif isinstance(pv, torch.Tensor):
-                            # Stacked (N, 9) tensor: pv[i] is the i-th sample's transform.
-                            profile_raw[pk] = pv[i].tolist()
-                        else:
-                            profile_raw[pk] = pv
-                    elif isinstance(pv, (list, tuple)):
-                        profile_raw[pk] = pv[i]
-                    elif isinstance(pv, torch.Tensor):
-                        profile_raw[pk] = pv[i]
-                    else:
-                        profile_raw[pk] = pv
-                tile_info["profile_raw"] = profile_raw
-
-                # Common mask for NO_DATA
-                if "mask_common" in batch_result:
-                    tile_info["mask_common"] = batch_result["mask_common"][i].cpu()
-                if "water_mask" in batch_result:
-                    tile_info["water_mask"] = batch_result["water_mask"][i].cpu()
-
-                groups[source_key].append(tile_info)
-
-        # --- Reassemble each source image ---
-        assembled: dict[str, dict[str, Any]] = {}
-        blend_window_cache: dict[tuple[int, int], np.ndarray] = {}
-
-        for source_key, tiles in groups.items():
-            # Single-tile source without tile metadata → leave for per-tile path
-            if len(tiles) == 1 and "tile_row_start" not in tiles[0]:
-                continue
-
-            source_h = tiles[0].get("source_height", tiles[0]["original_height"])
-            source_w = tiles[0].get("source_width", tiles[0]["original_width"])
-            num_classes = tiles[0]["probabilities"].shape[0]
-
-            prob_accum = np.zeros((num_classes, source_h, source_w), dtype=np.float64)
-            weight_accum = np.zeros((source_h, source_w), dtype=np.float64)
-            mask_accum = np.zeros((source_h, source_w), dtype=np.float32)
-            water_accum = np.zeros((source_h, source_w), dtype=bool)
-
-            for tile in tiles:
-                r = tile.get("tile_row_start", 0)
-                c = tile.get("tile_col_start", 0)
-                th = tile["original_height"]
-                tw = tile["original_width"]
-
-                # Blend window (cached by tile dimensions)
-                win_key = (th, tw)
-                if win_key not in blend_window_cache:
-                    blend_window_cache[win_key] = self._create_blend_window(
-                        th, tw, overlap_h, overlap_w,
-                    )
-                win = blend_window_cache[win_key]
-
-                probs = tile["probabilities"].numpy()[:, :th, :tw]
-                prob_accum[:, r:r + th, c:c + tw] += probs * win[np.newaxis, :, :]
-                weight_accum[r:r + th, c:c + tw] += win
-
-                # Combine common masks (OR logic: valid in any tile = valid)
-                if "mask_common" in tile:
-                    cm = tile["mask_common"].numpy()
-                    if cm.ndim == 3:
-                        cm = cm.squeeze(0)
-                    mask_accum[r:r + th, c:c + tw] = np.maximum(
-                        mask_accum[r:r + th, c:c + tw], cm[:th, :tw],
-                    )
-                if "water_mask" in tile:
-                    wm = tile["water_mask"].numpy()
-                    if wm.ndim == 3:
-                        wm = wm.squeeze(0)
-                    water_accum[r:r + th, c:c + tw] |= wm[:th, :tw] > 0
-
-            # Normalize blended probabilities
-            weight_accum = np.maximum(weight_accum, 1e-8)
-            blended_probs = (prob_accum / weight_accum[np.newaxis, :, :]).astype(np.float32)
-
-            # Final class prediction
-            pred = np.argmax(blended_probs, axis=0).astype(np.uint16)
-
-            # Re-apply NO_DATA mask
-            invalid = (mask_accum < 0.5) | water_accum
-            pred[invalid] = NO_DATA
-
-            # Build source-level GeoTIFF profile
-            first_tile = tiles[0]
-            source_profile = self._build_source_profile(first_tile, source_h, source_w)
-
-            assembled[source_key] = {
-                "predictions": pred,
-                "probabilities": blended_probs,
-                "source_height": source_h,
-                "source_width": source_w,
-                "profile": source_profile,
-                "cell_id": first_tile.get("cell_id", "unknown"),
-                "pair_id": first_tile.get("pair_id"),
-                "event_id": first_tile.get(
-                    "event_id",
-                    first_tile.get("db_nbac_fire_id", "unknown_event"),
-                ),
-                "event_start_date": first_tile.get("event_start_date"),
-                "event_end_date": first_tile.get("event_end_date"),
-                "beam": first_tile.get("beam"),
-                "sat_pass": first_tile.get("sat_pass"),
-                "output_name": first_tile.get("output_name"),
-                "group_id_pre": first_tile.get("group_id_pre", "all"),
-                "group_id_post": first_tile.get("group_id_post", "all"),
-                "group_date_pre": first_tile.get("group_date_pre", "all"),
-                "group_date_post": first_tile.get("group_date_post", "all"),
-                "pre_post_name": source_key,
-            }
-
-        logger.info(
-            "Reassembled %d source images from overlapping tiles.",
-            len(assembled),
-        )
-        return assembled, bool(assembled)
-
-    @staticmethod
-    def _build_source_profile(
-        tile_info: dict[str, Any],
-        source_h: int,
-        source_w: int,
-    ) -> dict[str, Any]:
-        """Reconstruct the full source image's GeoTIFF profile from a tile's profile.
-
-        Inverts the tile-level transform translation so the saved GeoTIFF
-        covers the original spatial extent.
-        """
-        from rasterio.crs import CRS as RioCRS
-
-        raw_profile = tile_info["profile_raw"]
-        r = tile_info.get("tile_row_start", 0)
-        c = tile_info.get("tile_col_start", 0)
-
-        # Recover transform coefficients — support list/tuple (9 or 6 elements),
-        # 1-D tensor, numpy array, dict with int keys, or Affine object.
-        transform_raw = raw_profile["transform"]
-        if isinstance(transform_raw, dict):
-            try:
-                t_list = [transform_raw[k] for k in range(6)]
-            except KeyError:
-                t_list = [transform_raw.get(k, 0.0) for k in ("a", "b", "c", "d", "e", "f")]
-        elif isinstance(transform_raw, (list, tuple)):
-            t_list = list(transform_raw)
-        else:
-            # tensor, numpy array, Affine, …
-            t_list = list(transform_raw)
-        t_list = [t.item() if isinstance(t, torch.Tensor) else float(t) for t in t_list]
-
-        if len(t_list) < 6:
-            raise ValueError(
-                f"Cannot reconstruct source profile: transform has only {len(t_list)} "
-                f"element(s) — need ≥ 6. "
-                f"type={type(transform_raw).__name__!r}, raw={transform_raw!r}"
-            )
-
-        # Undo tile translation: source_transform = tile_transform * translation(−c, −r)
-        tile_transform = Affine(*t_list[:6])
-        source_transform = tile_transform * Affine.translation(-c, -r)
-
-        # Parse CRS
-        crs_val = raw_profile.get("crs")
-        try:
-            crs_obj = RioCRS.from_user_input(crs_val) if crs_val else RioCRS.from_epsg(3979)
-        except Exception:
-            crs_obj = RioCRS.from_epsg(3979)
-
-        return {
-            "driver": "GTiff",
-            "dtype": "uint16",
-            "count": 1,
-            "nodata": 32767,
-            "height": source_h,
-            "width": source_w,
-            "crs": crs_obj,
-            "transform": source_transform,
-        }
-
-    def _save_assembled_predictions(
-        self,
-        assembled: dict[str, dict[str, Any]],
-        base_dir: Path,
-        predict_date: str,
-    ) -> None:
-        """Save overlap-blended source-level predictions as GeoTIFFs and merge.
-
-        Mirrors the structure of the per-tile path in :meth:`on_predict_end`:
-        individual GeoTIFFs → manifest JSON → group merge → global merge.
-        """
-        from collections import defaultdict
-        import json
-
-        group_tile_paths: dict[tuple[str, ...], list[Path]] = defaultdict(list)
-        event_all_tile_paths: dict[str, list[Path]] = defaultdict(list)
-
-        manifest = {
+    def _new_manifest(self, base_dir: Path, predict_date: str, *, overlap_blended: bool = False) -> dict[str, Any]:
+        """Create the skeleton of the prediction manifest written alongside GeoTIFFs."""
+        manifest: dict[str, Any] = {
             "prediction_date": predict_date,
             "model_name": self.change_detection_model,
             "checkpoint": str(self.weights_from_checkpoint_path or ""),
             "base_dir": str(base_dir),
-            "overlap_blended": True,
             "predictions": [],
         }
+        if overlap_blended:
+            manifest["overlap_blended"] = True
+        return manifest
 
-        for source_key, info in assembled.items():
-            pred_np = info["predictions"]  # [H, W] uint16
-            profile_i = info["profile"]
-            cell_id = str(info["cell_id"])
-            pair_id = info.get("pair_id")
-            event_id = str(info.get("event_id", "unknown_event"))
-            group_id_pre = str(info.get("group_id_pre", "all"))
-            group_id_post = str(info.get("group_id_post", "all"))
-            group_date_pre = str(info.get("group_date_pre", "all"))
-            group_date_post = str(info.get("group_date_post", "all"))
-            event_start_date = info.get("event_start_date")
-            event_end_date = info.get("event_end_date")
-            beam = info.get("beam")
-            sat_pass = info.get("sat_pass")
-            safe_name = Path(source_key.replace("|", "_").replace("/", "_")).stem
-
-            # Directory: base / EVENT_ID / PREDICTION_DATE / cell_id
-            event_date_dir = base_dir / event_id / predict_date
-            tile_dir = event_date_dir / cell_id
-            tile_dir.mkdir(parents=True, exist_ok=True)
-
-            out_name = self._prediction_output_filename(
-                info.get("output_name"), pair_id=pair_id, legacy_name=safe_name,
-            )
-            out_path = tile_dir / out_name
-
-            with rio.open(str(out_path), "w", **profile_i) as dst:
-                dst.write(pred_np[np.newaxis, :, :])
-
-            logger.info(
-                "Saved blended prediction to %s (%dx%d)",
-                out_path, pred_np.shape[1], pred_np.shape[0],
-            )
-
-            # Collect for merge
-            event_date_key = str(event_date_dir)
-            group_tile_paths[self._group_merge_key(
-                event_date_key,
-                event_id,
-                event_start_date,
-                event_end_date,
-                group_id_pre,
-                group_date_pre,
-                group_id_post,
-                group_date_post,
-                beam,
-                sat_pass,
-            )].append(out_path)
-            event_all_tile_paths[event_date_key].append(out_path)
-
-            manifest["predictions"].append({
-                "pair_id": pair_id,
-                "event_id": event_id,
-                "event_start_date": event_start_date,
-                "event_end_date": event_end_date,
-                "cell_id": cell_id,
-                "beam": beam,
-                "sat_pass": sat_pass,
-                "group_id_pre": group_id_pre,
-                "group_id_post": group_id_post,
-                "group_date_pre": group_date_pre,
-                "group_date_post": group_date_post,
-                "output_name": out_name,
-                "tif_path": str(out_path),
-                "overlap_blended": True,
-            })
-
-        # Write manifest
+    @staticmethod
+    def _write_manifest_file(manifest: dict[str, Any], base_dir: Path) -> None:
         manifest_path = base_dir / "manifest.json"
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2, default=str)
         logger.info("Saved prediction manifest to %s", manifest_path)
 
+    @staticmethod
+    def _write_single_geotiff_prediction(  # noqa: PLR0913
+            *,
+            pred_np: np.ndarray,
+            profile: dict[str, Any],
+            base_dir: Path,
+            predict_date: str,
+            cell_id: str,
+            pair_id: str | None,
+            event_id: str,
+            event_start_date: str | None,
+            event_end_date: str | None,
+            beam: str | None,
+            sat_pass: str | None,
+            group_id_pre: str,
+            group_id_post: str,
+            group_date_pre: str,
+            group_date_post: str,
+            output_name: str | None,
+            legacy_name: str,
+            manifest: dict[str, Any],
+            group_tile_paths: dict[tuple[str, ...], list[Path]],
+            event_all_tile_paths: dict[str, list[Path]],
+            overlap_blended: bool = False,
+    ) -> Path:
+        """Write one prediction GeoTIFF, register it for merging, and append its manifest entry.
+
+        Shared by both the per-tile path (:meth:`_write_prediction_batch`)
+        and the overlap-blended path (:meth:`_save_assembled_predictions`)
+        in :meth:`on_predict_end`, which used to duplicate this logic
+        (~100 lines) — including a less defensive affine-transform parser
+        in the per-tile path (see
+        :func:`geo_deep_learning.utils.geotiff_merge.transform_coeffs`).
+        """
+        event_date_dir = base_dir / event_id / predict_date
+        tile_dir = event_date_dir / cell_id
+        tile_dir.mkdir(parents=True, exist_ok=True)
+
+        out_name = prediction_output_filename(output_name, pair_id=pair_id, legacy_name=legacy_name)
+        out_path = tile_dir / out_name
+
+        with rio.open(str(out_path), "w", **profile) as dst:
+            dst.write(pred_np[np.newaxis, :, :])
+
+        logger.info("Saved prediction to %s (%dx%d)", out_path, pred_np.shape[1], pred_np.shape[0])
+
+        event_date_key = str(event_date_dir)
+        merge_key = group_merge_key(
+            event_date_key, event_id, event_start_date, event_end_date,
+            group_id_pre, group_date_pre, group_id_post, group_date_post,
+            beam, sat_pass,
+        )
+        group_tile_paths[merge_key].append(out_path)
+        event_all_tile_paths[event_date_key].append(out_path)
+
+        entry = {
+            "pair_id": pair_id,
+            "event_id": event_id,
+            "event_start_date": event_start_date,
+            "event_end_date": event_end_date,
+            "cell_id": cell_id,
+            "beam": beam,
+            "sat_pass": sat_pass,
+            "group_id_pre": group_id_pre,
+            "group_id_post": group_id_post,
+            "group_date_pre": group_date_pre,
+            "group_date_post": group_date_post,
+            "output_name": out_name,
+            "tif_path": str(out_path),
+        }
+        if overlap_blended:
+            entry["overlap_blended"] = True
+        manifest["predictions"].append(entry)
+        return out_path
+
+    def _save_assembled_predictions(
+            self,
+            assembled: dict[str, dict[str, Any]],
+            base_dir: Path,
+            predict_date: str,
+    ) -> None:
+        """Save overlap-blended source-level predictions as GeoTIFFs and merge.
+
+        Mirrors the structure of the per-tile path in :meth:`on_predict_end`
+        (via the shared :meth:`_write_single_geotiff_prediction` helper):
+        individual GeoTIFFs → manifest JSON → group merge → global merge.
+        """
+        group_tile_paths: dict[tuple[str, ...], list[Path]] = defaultdict(list)
+        event_all_tile_paths: dict[str, list[Path]] = defaultdict(list)
+        manifest = self._new_manifest(base_dir, predict_date, overlap_blended=True)
+
+        for source_key, info in assembled.items():
+            safe_name = Path(source_key.replace("|", "_").replace("/", "_")).stem
+            self._write_single_geotiff_prediction(
+                pred_np=info["predictions"],  # [H, W] uint16
+                profile=info["profile"],
+                base_dir=base_dir,
+                predict_date=predict_date,
+                cell_id=str(info["cell_id"]),
+                pair_id=info.get("pair_id"),
+                event_id=str(info.get("event_id", "unknown_event")),
+                event_start_date=info.get("event_start_date"),
+                event_end_date=info.get("event_end_date"),
+                beam=info.get("beam"),
+                sat_pass=info.get("sat_pass"),
+                group_id_pre=str(info.get("group_id_pre", "all")),
+                group_id_post=str(info.get("group_id_post", "all")),
+                group_date_pre=str(info.get("group_date_pre", "all")),
+                group_date_post=str(info.get("group_date_post", "all")),
+                output_name=info.get("output_name"),
+                legacy_name=safe_name,
+                manifest=manifest,
+                group_tile_paths=group_tile_paths,
+                event_all_tile_paths=event_all_tile_paths,
+                overlap_blended=True,
+            )
+
+        self._write_manifest_file(manifest, base_dir)
         # Merge across cells / groups (same logic as per-tile path)
-        self._merge_predictions(group_tile_paths, event_all_tile_paths)
+        merge_predictions(group_tile_paths, event_all_tile_paths)
         logger.info("All blended predictions saved to %s", base_dir)
 
     def on_predict_end(self) -> None:
@@ -1832,7 +1685,6 @@ class ChangeDetectionChangeFormer(LightningModule):
             output_dir / predictions / EVENT_ID / PREDICTION_DATE / cell_id / image.tif
             output_dir / predictions / EVENT_ID / PREDICTION_DATE / merged.tif
         """
-        from collections import defaultdict
         predictions = self.trainer.predict_loop.predictions
         if not predictions:
             logger.warning("No predictions to save.")
@@ -1840,7 +1692,6 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # --- Base output directory ---
         predict_date = datetime.now().strftime("%Y%m%d_%H%M")
-        logger.info(f"Saving predictions to -- {self.predict_output_dir}")
         if self.predict_output_dir is not None:
             base_dir = Path(self.predict_output_dir)
             if base_dir.name != "predictions":
@@ -1849,13 +1700,18 @@ class ChangeDetectionChangeFormer(LightningModule):
             base_dir = Path(self.trainer.default_root_dir) / "predictions"
 
         base_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Saving predictions to %s", base_dir)
 
         # --- Try overlap-based tile reassembly (cosine blending) ---
-        assembled, used_blending = self._reassemble_overlapping_tiles(predictions)
+        dm = getattr(self.trainer, "datamodule", None)
+        assembled, used_blending = reassemble_overlapping_tiles(
+            predictions,
+            getattr(dm, "tile_size", None),
+            getattr(dm, "tile_stride", None),
+            no_data_value=NO_DATA,
+        )
         if used_blending and assembled:
-            logger.info(
-                "Using overlap blending for %d source images.", len(assembled),
-            )
+            logger.info("Using overlap blending for %d source images.", len(assembled))
             self._save_assembled_predictions(assembled, base_dir, predict_date)
             return
 
@@ -1863,561 +1719,101 @@ class ChangeDetectionChangeFormer(LightningModule):
         # On collecte les chemins par (event_id, predict_date) pour le merge
         group_tile_paths: dict[tuple[str, ...], list[Path]] = defaultdict(list)
         event_all_tile_paths: dict[str, list[Path]] = defaultdict(list)
-
-        logger.info(f"Saving predictions to {base_dir}")
-        base_dir.mkdir(parents=True, exist_ok=True)
-
-        # --- Écrire le manifeste JSON pour l'ingestion DB ---
-        manifest = {
-            "prediction_date": predict_date,
-            "model_name": self.change_detection_model,
-            "checkpoint": str(self.weights_from_checkpoint_path or ""),
-            "base_dir": str(base_dir),
-            "predictions": [],
-        }
+        manifest = self._new_manifest(base_dir, predict_date)
 
         for batch_result in predictions:
-            batch_pair_ids = batch_result.get("pair_id")
-            batch_cell_id = batch_result['cell_id']
-            y_pred = batch_result["predictions"]  # [B, H_padded, W_padded]
-            names = batch_result["pre_post_name"]
-            batch_output_names = batch_result.get("output_name")
-            batch_profiles = batch_result["profile"]
-            orig_heights = batch_result["original_height"]  # Tensor [B] ou list
-            orig_widths = batch_result["original_width"]  # Tensor [B] ou list
-            batch_size = y_pred.shape[0]
-            # event_id : peut être un Tensor, une list, ou absent
-            batch_event_ids = batch_result.get("event_id")
-            # Fallback pour le training dataset qui a db_nbac_fire_id
-            if batch_event_ids is None:
-                batch_event_ids = batch_result.get("db_nbac_fire_id")
+            self._write_prediction_batch(
+                batch_result, base_dir, predict_date, manifest, group_tile_paths, event_all_tile_paths,
+            )
 
-            batch_group_id_pre = batch_result.get("group_id_pre")
-            batch_group_id_post = batch_result.get("group_id_post")
-            batch_group_date_pre = batch_result.get("group_date_pre")
-            batch_group_date_post = batch_result.get("group_date_post")
-            batch_event_start_dates = batch_result.get("event_start_date")
-            batch_event_end_dates = batch_result.get("event_end_date")
-            batch_beams = batch_result.get("beam")
-            batch_sat_passes = batch_result.get("sat_pass")
-
-            for i in range(batch_size):
-                cell_id = batch_cell_id[i]
-                sample_name = names[i].replace('\n', '').replace('|', '_').replace('/', '_')
-                pair_id = self._extract_scalar(batch_pair_ids, i, default=None)
-                event_id = self._extract_scalar(batch_event_ids, i, default="unknown_event")
-                event_start_date = self._extract_scalar(batch_event_start_dates, i, default=None)
-                event_end_date = self._extract_scalar(batch_event_end_dates, i, default=None)
-                beam = self._extract_scalar(batch_beams, i, default=None)
-                sat_pass = self._extract_scalar(batch_sat_passes, i, default=None)
-                group_id_pre = self._extract_scalar(batch_group_id_pre, i, default="all")
-                group_id_post = self._extract_scalar(batch_group_id_post, i, default="all")
-                group_date_pre = self._extract_scalar(batch_group_date_pre, i, default="all")
-                group_date_post = self._extract_scalar(batch_group_date_post, i, default="all")
-
-                # --- Récupérer les dimensions originales ---
-                orig_h = orig_heights[i].item() if isinstance(orig_heights, torch.Tensor) else int(orig_heights[i])
-                orig_w = orig_widths[i].item() if isinstance(orig_widths, torch.Tensor) else int(orig_widths[i])
-
-                # --- Découper le padding (crop au coin supérieur-gauche) ---
-                pred_np = y_pred[i, :orig_h, :orig_w].cpu().numpy().astype(np.uint16)
-
-                # --- Reconstruire le profil rasterio ---
-                crs_val = batch_profiles["crs"][i] if isinstance(batch_profiles["crs"], (list, tuple)) else \
-                batch_profiles["crs"]
-                # Parse CRS back; default to EPSG:3979 if empty/invalid
-                from rasterio.crs import CRS as RioCRS
-                try:
-                    crs_obj = RioCRS.from_user_input(crs_val) if crs_val else RioCRS.from_epsg(3979)
-                except Exception:
-                    logger.warning("Could not parse CRS '%s' for sample %d — using default EPSG:3979.", crs_val, i)
-                    crs_obj = RioCRS.from_epsg(3979)
-
-                transform_raw = batch_profiles["transform"]
-
-                t_list = [transform_raw[k][i].item() for k in range(6)]
-
-                logger.debug("Transform coefficients: %s", t_list)
-
-                profile_i = {
-                    "driver": "GTiff",
-                    "dtype": "uint16",
-                    "count": 1,
-                    "nodata": 32767,
-                    "height": orig_h,  # ← dimensions ORIGINALES, pas paddées
-                    "width": orig_w,  # ← dimensions ORIGINALES, pas paddées
-                    "crs": crs_obj,
-                    "transform": Affine(*t_list),
-                }
-                # --- Chemin : base / EVENT_ID / PREDICTION_DATE / cell_id / image.tif ---
-                event_date_dir = base_dir / event_id / predict_date
-                tile_dir = event_date_dir / cell_id
-                tile_dir.mkdir(parents=True, exist_ok=True)
-                out_name = self._prediction_output_filename(
-                    self._extract_scalar(batch_output_names, i, default=""),
-                    pair_id=pair_id,
-                    legacy_name=f"cell-{cell_id}_{sample_name}",
-                )
-                out_path = tile_dir / out_name
-
-                with rio.open(str(out_path), "w", **profile_i) as dst:
-                    dst.write(pred_np[np.newaxis, :, :])
-
-                # Collecter pour les merges (APRÈS le with)
-                event_date_key = str(event_date_dir)
-                group_tile_paths[self._group_merge_key(
-                    event_date_key,
-                    event_id,
-                    event_start_date,
-                    event_end_date,
-                    group_id_pre,
-                    group_date_pre,
-                    group_id_post,
-                    group_date_post,
-                    beam,
-                    sat_pass,
-                )].append(out_path)
-                event_all_tile_paths[event_date_key].append(out_path)
-
-                logger.info("Saved prediction to %s (%dx%d)", out_path, orig_w, orig_h)
-
-                manifest["predictions"].append({
-                    "pair_id": pair_id,
-                    "event_id": event_id,
-                    "event_start_date": event_start_date,
-                    "event_end_date": event_end_date,
-                    "cell_id": cell_id,
-                    "beam": beam,
-                    "sat_pass": sat_pass,
-                    "group_id_pre": group_id_pre,
-                    "group_id_post": group_id_post,
-                    "group_date_pre": group_date_pre,
-                    "group_date_post": group_date_post,
-                    "output_name": out_name,
-                    "tif_path": str(out_path),
-                })
-
-        # Write manifest once after all batches are processed
-        manifest_path = base_dir / "manifest.json"
-        import json
-        with open(manifest_path, "w") as f:
-            json.dump(manifest, f, indent=2, default=str)
-        logger.info("Saved prediction manifest to %s", manifest_path)
-
-        self._merge_predictions(group_tile_paths, event_all_tile_paths)
+        self._write_manifest_file(manifest, base_dir)
+        merge_predictions(group_tile_paths, event_all_tile_paths)
         logger.info("All predictions saved to %s", base_dir)
 
-    @staticmethod
-    def _group_merge_key(
-        event_date_dir: str,
-        event_id: object,
-        event_start_date: object,
-        event_end_date: object,
-        group_id_pre: object,
-        group_date_pre: object,
-        group_id_post: object,
-        group_date_post: object,
-        beam: object,
-        sat_pass: object,
-    ) -> tuple[str, ...]:
-        """Return the complete provenance key for one cross-cell merge."""
-        return tuple(map(str, (
-            event_date_dir,
-            event_id,
-            event_start_date,
-            event_end_date,
-            group_id_pre,
-            group_date_pre,
-            group_id_post,
-            group_date_post,
-            beam,
-            sat_pass,
-        )))
-
-    @staticmethod
-    def _merge_date(value: object) -> str:
-        """Normalize a date-like metadata value to ``YYYYMMDD`` for filenames."""
-        value_as_string = str(value).strip()
-        digits = "".join(char for char in value_as_string if char.isdigit())
-        return digits[:8] if len(digits) >= 8 else "NA"
-
-    @classmethod
-    def _merged_group_filename(
-        cls,
-        event_id: str,
-        event_start_date: str,
-        event_end_date: str,
-        group_id_pre: str,
-        group_date_pre: str,
-        group_id_post: str,
-        group_date_post: str,
-        beam: str,
-        sat_pass: str,
-    ) -> str:
-        """Build the cross-cell merge name without a ``cell_id`` component."""
-        return (
-            f"event-{event_id}"
-            f"_start-{cls._merge_date(event_start_date)}"
-            f"_end_{cls._merge_date(event_end_date)}"
-            f"_pre-g{group_id_pre}-{cls._merge_date(group_date_pre)}"
-            f"_post-g{group_id_post}-{cls._merge_date(group_date_post)}"
-            f"_beam-{beam}_pass-{sat_pass}.tif"
-        )
-
-    @staticmethod
-    def _prediction_output_filename(
-        output_name: str | None,
-        *,
-        pair_id: str | None,
-        legacy_name: str,
-        suffix: str = "",
-    ) -> str:
-        """Return a safe GeoTIFF filename, preferring the CSV output name.
-
-        ``output_name`` is supplied by the SCANFIRE orchestrator and contains
-        the event, group dates/IDs, cell, beam, and satellite pass.  The
-        legacy fallback preserves compatibility with older prediction CSVs.
-        The standard SCANFIRE name already includes ``cell-{cell_id}``; the
-        legacy fallback receives the cell identifier from the caller as well.
-        """
-        if output_name:
-            requested = Path(str(output_name)).name
-            if requested.lower().endswith(".tif") and requested != ".tif":
-                return f"{Path(requested).stem}{suffix}.tif"
-
-        return f"{pair_id}-{legacy_name}{suffix}.tif" if pair_id else f"{legacy_name}{suffix}.tif"
-
-    @staticmethod
-    def _extract_scalar(batch_field, index: int, default: str = "unknown") -> str:
-        """Extract a scalar string value from a batched field at position index."""
-        if batch_field is None:
-            return default
-        if isinstance(batch_field, torch.Tensor):
-            return str(batch_field[index].item())
-        if isinstance(batch_field, (list, tuple)):
-            return str(batch_field[index])
-        return str(batch_field)
-
-    @staticmethod
-    def _safe_merge(datasets, method="average"):
-        """Merge raster datasets with averaging support for all rasterio versions.
-
-        Standard GeoTIFFs are north-up (pixel height < 0). Some rasterio versions
-        (e.g. 1.4.0) raise MergeError for these. Workaround: flip to positive pixel
-        height in memory, merge, then flip the result back.
-
-        When ``method='average'``, overlapping valid pixels are averaged using
-        sum/count (compatible with all rasterio versions, since ``'average'``
-        was only added in rasterio ≥ 1.4.x).
-
-        Args:
-            datasets: List of rasterio dataset readers to merge.
-            method: ``'average'`` (default) averages valid (non-nodata) pixels.
-                Any other value (``'first'``, ``'last'``, ``'min'``, ``'max'``)
-                is passed directly to ``rasterio.merge``.
-        """
-        from rasterio.merge import merge as rio_merge
-        from rasterio.transform import Affine
-        from rasterio import MemoryFile
-        import numpy as np
-
-        if method == "average":
-            return ChangeDetectionChangeFormer._merge_average(datasets)
-
-        try:
-            return rio_merge(datasets, method=method)
-        except Exception as e:
-            if "negative pixel height" not in str(e):
-                raise
-            return ChangeDetectionChangeFormer._merge_with_flip(
-                datasets, method=method,
-            )
-
-    @staticmethod
-    def _merge_average(datasets):
-        """Merge datasets by averaging overlapping valid pixels.
-
-        Uses two passes of ``rasterio.merge`` with ``method='sum'`` and
-        ``method='count'`` to compute the average.  Falls back to the
-        flip workaround if the rasterio version rejects negative pixel height.
-        """
-        from rasterio.merge import merge as rio_merge
-        import numpy as np
-
-        try:
-            mosaic_sum, transform = rio_merge(datasets, method="sum")
-            # rasterio.DatasetReader is random-access; no seek needed before the
-            # second pass.
-            mosaic_count, _ = rio_merge(datasets, method="count")
-        except Exception as e:
-            if "negative pixel height" not in str(e):
-                raise
-            mosaic_sum, transform = ChangeDetectionChangeFormer._merge_with_flip(
-                datasets, method="sum",
-            )
-            mosaic_count, _ = ChangeDetectionChangeFormer._merge_with_flip(
-                datasets, method="count",
-            )
-
-        # Average: sum / count, avoiding division by zero
-        mask_no_coverage = (mosaic_count == 0)
-        mosaic_count_safe = mosaic_count.astype(np.float64)
-        mosaic_count_safe[mask_no_coverage] = 1.0
-        mosaic = (mosaic_sum.astype(np.float64) / mosaic_count_safe)
-
-        # Restore nodata where no tile contributed
-        nodata = datasets[0].nodata
-        if nodata is not None:
-            mosaic[mask_no_coverage] = nodata
-
-        mosaic = mosaic.astype(datasets[0].dtypes[0])
-        return mosaic, transform
-
-    @staticmethod
-    def _merge_with_flip(datasets, method="first"):
-        """Merge datasets after flipping to positive pixel height.
-
-        Workaround for rasterio, which rejects "upside down" rasters (pixel
-        height ``transform.e > 0``) in :func:`rasterio.merge.merge`.  Such
-        rasters are flipped vertically to north-up (negative ``e``) in memory,
-        merged, then flipped back to preserve the original orientation.
-        """
-        from rasterio.merge import merge as rio_merge
-        from rasterio.transform import Affine
-        from rasterio import MemoryFile
-
-        mem_files = []
-        flipped_datasets = []
-        needs_flip = False
-
-        for ds in datasets:
-            # rasterio rejects rasters whose pixel height is POSITIVE
-            # (``transform.e > 0`` → "upside down"). Flip exactly those to
-            # north-up (negative ``e``) so the merge is accepted.
-            if ds.transform.e > 0:
-                needs_flip = True
-                data = ds.read()[:, ::-1, :]  # flip vertically
-                new_transform = Affine(
-                    ds.transform.a, ds.transform.b, ds.transform.c,
-                    ds.transform.d, -ds.transform.e,
-                    ds.transform.f + ds.transform.e * ds.height,
-                )
-                profile = ds.profile.copy()
-                profile['transform'] = new_transform
-                memfile = MemoryFile()
-                with memfile.open(**profile) as mem_dst:
-                    mem_dst.write(data)
-                flipped_datasets.append(memfile.open())
-                mem_files.append(memfile)
-            else:
-                flipped_datasets.append(ds)
-
-        mosaic, mosaic_transform = rio_merge(flipped_datasets, method=method)
-
-        # Close flipped in-memory datasets
-        for ds in flipped_datasets:
-            if ds not in datasets:
-                ds.close()
-        for mf in mem_files:
-            mf.close()
-
-        # Flip result back to the original "upside down" orientation (positive e)
-        if needs_flip:
-            mosaic = mosaic[:, ::-1, :].copy()
-            mosaic_transform = Affine(
-                mosaic_transform.a, mosaic_transform.b, mosaic_transform.c,
-                mosaic_transform.d, -mosaic_transform.e,
-                mosaic_transform.f + mosaic_transform.e * mosaic.shape[1],
-            )
-
-        return mosaic, mosaic_transform
-
-    @staticmethod
-    def _chunked_merge(
-        tile_paths: list[Path],
-        output_path: Path,
-        chunk_size: int = 100,
-    ) -> None:
-        """Merge many tiles without exceeding the OS open-file limit.
-
-        When *tile_paths* contains more tiles than *chunk_size*, the merge is
-        done in rounds: each chunk is merged into a temporary GeoTIFF, then
-        the intermediate files are merged into the final output.  This avoids
-        the ``Too many open files`` error that occurs when rasterio tries to
-        hold hundreds of file descriptors simultaneously.
-
-        Args:
-            tile_paths: Paths to the individual prediction GeoTIFFs.
-            output_path: Destination path for the merged result.
-            chunk_size: Max number of files to open at once (default 100,
-                conservative to account for FDs used by GDAL, Python, etc.).
-        """
-        import gc
-
-        if len(tile_paths) <= chunk_size:
-            # Small enough → single-pass merge
-            ChangeDetectionChangeFormer._single_merge(tile_paths, output_path)
-            return
-
-        logger.info(
-            "Batched merge: %d tiles in chunks of %d",
-            len(tile_paths), chunk_size,
-        )
-
-        intermediate_paths: list[Path] = []
-        tmp_dir = output_path.parent / "_merge_tmp"
-        tmp_dir.mkdir(exist_ok=True)
-
-        try:
-            # --- Round 1: merge each chunk → intermediate file ---
-            for chunk_idx in range(0, len(tile_paths), chunk_size):
-                chunk = tile_paths[chunk_idx: chunk_idx + chunk_size]
-                if len(chunk) == 1:
-                    # Single tile, no merge needed – use directly
-                    intermediate_paths.append(chunk[0])
-                    continue
-
-                intermediate_path = tmp_dir / f"_chunk_{chunk_idx}.tif"
-                ChangeDetectionChangeFormer._single_merge(chunk, intermediate_path)
-                intermediate_paths.append(intermediate_path)
-                logger.debug(
-                    "  Chunk %d–%d merged → %s",
-                    chunk_idx, chunk_idx + len(chunk) - 1, intermediate_path.name,
-                )
-                # Force-release file descriptors held by rasterio / GDAL
-                gc.collect()
-
-            # --- Round 2: merge intermediates → final output ---
-            if len(intermediate_paths) == 1:
-                # Only one intermediate: just rename/copy
-                import shutil
-                shutil.move(str(intermediate_paths[0]), str(output_path))
-            else:
-                ChangeDetectionChangeFormer._single_merge(
-                    intermediate_paths, output_path,
-                )
-
-        finally:
-            # Clean up intermediate files
-            for p in tmp_dir.glob("_chunk_*.tif"):
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
-            try:
-                tmp_dir.rmdir()
-            except OSError:
-                pass
-
-    @staticmethod
-    def _single_merge(tile_paths: list[Path], output_path: Path) -> None:
-        """Merge a list of tile GeoTIFFs into a single output file.
-
-        All files in *tile_paths* are opened, merged via
-        :func:`_safe_merge`, written to *output_path*, then closed.
-        """
-        datasets_to_merge = []
-        try:
-            datasets_to_merge = [rio.open(str(p)) for p in tile_paths]
-            mosaic, mosaic_transform = ChangeDetectionChangeFormer._safe_merge(
-                datasets_to_merge,
-            )
-
-            merge_profile = datasets_to_merge[0].profile.copy()
-            merge_profile.update({
-                "height": mosaic.shape[1],
-                "width": mosaic.shape[2],
-                "transform": mosaic_transform,
-            })
-
-            with rio.open(str(output_path), "w", **merge_profile) as dst:
-                dst.write(mosaic)
-
-            # Free large arrays immediately
-            del mosaic
-
-        finally:
-            for ds in datasets_to_merge:
-                try:
-                    ds.close()
-                except Exception:
-                    pass
-
-    @staticmethod
-    def _merge_predictions(
+    def _write_prediction_batch(  # noqa: PLR0913
+            self,
+            batch_result: dict[str, Any],
+            base_dir: Path,
+            predict_date: str,
+            manifest: dict[str, Any],
             group_tile_paths: dict[tuple[str, ...], list[Path]],
             event_all_tile_paths: dict[str, list[Path]],
     ) -> None:
-        """Merge tiles in two passes:
-        1. Per event/pre-post pair/beam/pass → one self-describing GeoTIFF
-        2. All tiles in the event/date dir    → merged_all.tif
+        """Write every sample of one predict batch (per-tile, non-blended path)."""
+        y_pred = batch_result["predictions"]  # [B, H_padded, W_padded]
+        names = batch_result["pre_post_name"]
+        batch_cell_id = batch_result["cell_id"]
+        batch_profiles = batch_result["profile"]
+        orig_heights = batch_result["original_height"]  # Tensor [B] ou list
+        orig_widths = batch_result["original_width"]  # Tensor [B] ou list
+        batch_size = y_pred.shape[0]
 
-        Uses :meth:`_chunked_merge` to handle large tile counts without
-        exceeding the OS open-file descriptor limit.
-        """
-        import gc
+        batch_pair_ids = batch_result.get("pair_id")
+        batch_output_names = batch_result.get("output_name")
+        # event_id : peut être un Tensor, une list, ou absent.
+        # Fallback pour le training dataset qui a db_nbac_fire_id.
+        batch_event_ids = batch_result.get("event_id")
+        if batch_event_ids is None:
+            batch_event_ids = batch_result.get("db_nbac_fire_id")
+        batch_group_id_pre = batch_result.get("group_id_pre")
+        batch_group_id_post = batch_result.get("group_id_post")
+        batch_group_date_pre = batch_result.get("group_date_pre")
+        batch_group_date_post = batch_result.get("group_date_post")
+        batch_event_start_dates = batch_result.get("event_start_date")
+        batch_event_end_dates = batch_result.get("event_end_date")
+        batch_beams = batch_result.get("beam")
+        batch_sat_passes = batch_result.get("sat_pass")
 
-        # --- Pass 1 : merge par paire pré/post et configuration SAR ---
-        for (
-            event_date_dir_str,
-            event_id,
-            event_start_date,
-            event_end_date,
-            group_pre,
-            group_date_pre,
-            group_post,
-            group_date_post,
-            beam,
-            sat_pass,
-        ), tile_paths in group_tile_paths.items():
-            event_date_dir = Path(event_date_dir_str)
-            if len(tile_paths) == 1:
-                logger.info(
-                    "Writing single-cell merge for event %s, group %s/%s, beam %s, pass %s",
-                    event_id, group_pre, group_post, beam, sat_pass,
-                )
+        for i in range(batch_size):
+            cell_id = batch_cell_id[i]
+            sample_name = names[i].replace("\n", "").replace("|", "_").replace("/", "_")
 
-            merged_name = ChangeDetectionChangeFormer._merged_group_filename(
-                event_id,
-                event_start_date,
-                event_end_date,
-                group_pre,
-                group_date_pre,
-                group_post,
-                group_date_post,
-                beam,
-                sat_pass,
+            # --- Récupérer les dimensions originales ---
+            orig_h = orig_heights[i].item() if isinstance(orig_heights, torch.Tensor) else int(orig_heights[i])
+            orig_w = orig_widths[i].item() if isinstance(orig_widths, torch.Tensor) else int(orig_widths[i])
+
+            # --- Découper le padding (crop au coin supérieur-gauche) ---
+            pred_np = y_pred[i, :orig_h, :orig_w].cpu().numpy().astype(np.uint16)
+
+            # --- Reconstruire le profil rasterio ---
+            crs_val = batch_profiles["crs"][i] if isinstance(batch_profiles["crs"], (list, tuple)) else batch_profiles["crs"]
+            coeffs = transform_coeffs(batch_profiles["transform"], i)
+            logger.debug("Transform coefficients: %s", coeffs)
+            profile_i = {
+                "driver": "GTiff",
+                "dtype": "uint16",
+                "count": 1,
+                "nodata": 32767,
+                "height": orig_h,  # ← dimensions ORIGINALES, pas paddées
+                "width": orig_w,  # ← dimensions ORIGINALES, pas paddées
+                "crs": parse_crs(crs_val),
+                "transform": Affine(*coeffs),
+            }
+
+            self._write_single_geotiff_prediction(
+                pred_np=pred_np,
+                profile=profile_i,
+                base_dir=base_dir,
+                predict_date=predict_date,
+                cell_id=cell_id,
+                pair_id=extract_scalar(batch_pair_ids, i, default=None),
+                event_id=extract_scalar(batch_event_ids, i, default="unknown_event"),
+                event_start_date=extract_scalar(batch_event_start_dates, i, default=None),
+                event_end_date=extract_scalar(batch_event_end_dates, i, default=None),
+                beam=extract_scalar(batch_beams, i, default=None),
+                sat_pass=extract_scalar(batch_sat_passes, i, default=None),
+                group_id_pre=extract_scalar(batch_group_id_pre, i, default="all"),
+                group_id_post=extract_scalar(batch_group_id_post, i, default="all"),
+                group_date_pre=extract_scalar(batch_group_date_pre, i, default="all"),
+                group_date_post=extract_scalar(batch_group_date_post, i, default="all"),
+                output_name=extract_scalar(batch_output_names, i, default=""),
+                legacy_name=f"cell-{cell_id}_{sample_name}",
+                manifest=manifest,
+                group_tile_paths=group_tile_paths,
+                event_all_tile_paths=event_all_tile_paths,
             )
-            merged_path = event_date_dir / merged_name
-            logger.info("Merging %d tiles → %s/%s", len(tile_paths), event_date_dir, merged_name)
 
-            try:
-                ChangeDetectionChangeFormer._chunked_merge(tile_paths, merged_path)
-                logger.info("Saved merged group to %s", merged_path)
-            except Exception:
-                logger.exception(
-                    "Failed to merge event %s, group %s/%s, beam %s, pass %s in %s",
-                    event_id, group_pre, group_post, beam, sat_pass, event_date_dir,
-                )
 
-        # Force GC between passes to release all FDs from Pass 1
-        gc.collect()
 
-        # --- Pass 2 : merge global par EVENT_ID / PREDICTION_DATE ---
-        for event_date_dir_str, tile_paths in event_all_tile_paths.items():
-            event_date_dir = Path(event_date_dir_str)
-            if len(tile_paths) < 2:
-                logger.info("Skipping global merge for %s (only %d tile)",
-                            event_date_dir, len(tile_paths))
-                continue
-
-            merged_path = event_date_dir / "merged_all.tif"
-            logger.info("Merging all %d tiles → %s", len(tile_paths), merged_path)
-
-            try:
-                ChangeDetectionChangeFormer._chunked_merge(tile_paths, merged_path)
-                logger.info("Saved global merge to %s", merged_path)
-            except Exception:
-                logger.exception("Failed to create global merge in %s", event_date_dir)
 
 
