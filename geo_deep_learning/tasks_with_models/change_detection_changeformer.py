@@ -8,7 +8,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import kornia as krn
 import numpy as np
@@ -27,7 +27,7 @@ from torchmetrics.classification import BinaryJaccardIndex, BinaryPrecision, Bin
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
 
-from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA, BandName  # noqa: F401
+from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA
 from geo_deep_learning.models.change_detection.change_detection_model import ChangeDetectionModel
 from geo_deep_learning.tools.visualization import visualize_prediction
 from geo_deep_learning.utils.geotiff_merge import (
@@ -62,6 +62,37 @@ MIN_BURNED_RATIO_FOR_VISUALIZATION = 0.10
 # artificially "certain" class prediction into the loss — see docstring on
 # ``_sanitize_logits`` for details on why an extreme value here is unsafe.
 NAN_LOGIT_REPLACEMENT = 0.0
+
+# Threshold above which a ``mask-common`` / validity-mask pixel is considered
+# valid (values are floats after augmentation/interpolation, not strict 0/1).
+MASK_VALID_THRESHOLD = 0.5
+
+# Samples with fewer than this fraction of valid pixels are patched with
+# low-amplitude noise and excluded from the loss (see
+# ``_patch_degenerate_samples``) to avoid near-zero LayerNorm variance.
+MIN_VALID_RATIO_FOR_PATCH = 0.05
+
+
+class _ForwardLossOutput(NamedTuple):
+    """Result of :meth:`ChangeDetectionChangeFormer._forward_and_get_loss`.
+
+    Kept as a ``NamedTuple`` (rather than a plain tuple) so each field is
+    self-documenting while remaining fully compatible with the positional
+    unpacking used at every call site (``training_step``, ``validation_step``,
+    ``test_step``).
+    """
+
+    x_pre: Tensor
+    x_post: Tensor
+    y_float: Tensor
+    one_hot: Tensor
+    logits: Tensor
+    main_loss: Tensor
+    focal_loss: Tensor
+    lovasz_loss: Tensor
+    final_head_loss: Tensor
+    batch_size: int
+
 
 class ChangeDetectionChangeFormer(LightningModule):
     """Change Detection with ChangeFormer V6 model."""
@@ -337,12 +368,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         film_metadata_fields = None
         if self.use_metadata_film:
             film_metadata_fields = {
-                "sat_pass": 2,       # ASC / DESC
-                "beam": 4,           # A / B / C / D
-                "pre_season": 13,     # 13 , month number + 0 if undefined
-                "post_season": 13,    # 13 , month number + 0 if undefined
-                "time_delta": 5,     # 0-4d / 4-12d / 12-24d / 24-48d / 48d+
-                "processing_year" : 3   #0 : undefined, 1: 2023, 2: <> 2023
+                "sat_pass": 2,        # ASC / DESC
+                "beam": 4,            # A / B / C / D
+                "pre_season": 13,     # 13, month number + 0 if undefined
+                "post_season": 13,    # 13, month number + 0 if undefined
+                "time_delta": 5,      # 0-4d / 4-12d / 12-24d / 24-48d / 48d+
+                "processing_year": 3,  # 0: undefined, 1: 2023, 2: != 2023
             }
 
         self.model = ChangeDetectionModel(
@@ -384,54 +415,66 @@ class ChangeDetectionChangeFormer(LightningModule):
                 self.hparams["scheduler"]["class_path"]
                 == "torch.optim.lr_scheduler.OneCycleLR"
         ):
-            init_args = self.hparams.get("scheduler", {}).get("init_args", {})
-            max_lr = init_args.get("max_lr")
-            # Récupérer les paramètres optionnels du YAML
-            extra_kwargs = {}
-            for key in ("pct_start", "anneal_strategy", "div_factor", "final_div_factor",
-                        "three_phase", "cycle_momentum"):
-                if key in init_args:
-                    extra_kwargs[key] = init_args[key]
-
-            stepping_batches = self.trainer.estimated_stepping_batches
-            if stepping_batches > -1:
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    total_steps=stepping_batches,
-                    **extra_kwargs,
-                )
-            elif (
-                    stepping_batches == -1
-                    and getattr(self.trainer.datamodule, "epoch_size", None) is not None
-            ):
-                batch_size = self.trainer.datamodule.batch_size
-                epoch_size = self.trainer.datamodule.epoch_size
-                accumulate_grad_batches = self.trainer.accumulate_grad_batches
-                max_epochs = self.trainer.max_epochs
-                steps_per_epoch = math.ceil(
-                    epoch_size / (batch_size * accumulate_grad_batches),
-                )
-                buffer_steps = int(steps_per_epoch * accumulate_grad_batches)
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    steps_per_epoch=steps_per_epoch + buffer_steps,
-                    epochs=max_epochs,
-                    **extra_kwargs,
-                )
-            else:
-                total_steps = init_args.get("total_steps")
-                scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                    optimizer,
-                    max_lr=max_lr,
-                    total_steps=total_steps,
-                    **extra_kwargs,
-                )
+            scheduler = self._build_onecycle_scheduler(optimizer)
         else:
             scheduler = self.scheduler(optimizer)
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
+
+    def _build_onecycle_scheduler(
+            self, optimizer: torch.optim.Optimizer,
+    ) -> torch.optim.lr_scheduler.OneCycleLR:
+        """Build a ``OneCycleLR`` scheduler, inferring ``total_steps`` when needed.
+
+        Lightning's ``trainer.estimated_stepping_batches`` is normally used,
+        but falls back to computing steps from the DataModule's
+        ``epoch_size`` (IterableDataset case) or, failing that, to an
+        explicit ``total_steps`` from the YAML config.
+        """
+        init_args = self.hparams.get("scheduler", {}).get("init_args", {})
+        max_lr = init_args.get("max_lr")
+        extra_kwargs = {
+            key: init_args[key]
+            for key in (
+                "pct_start", "anneal_strategy", "div_factor",
+                "final_div_factor", "three_phase", "cycle_momentum",
+            )
+            if key in init_args
+        }
+
+        stepping_batches = self.trainer.estimated_stepping_batches
+        if stepping_batches > -1:
+            return torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=max_lr,
+                total_steps=stepping_batches,
+                **extra_kwargs,
+            )
+
+        epoch_size = getattr(self.trainer.datamodule, "epoch_size", None)
+        if stepping_batches == -1 and epoch_size is not None:
+            batch_size = self.trainer.datamodule.batch_size
+            accumulate_grad_batches = self.trainer.accumulate_grad_batches
+            max_epochs = self.trainer.max_epochs
+            steps_per_epoch = math.ceil(
+                epoch_size / (batch_size * accumulate_grad_batches),
+            )
+            buffer_steps = int(steps_per_epoch * accumulate_grad_batches)
+            return torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=max_lr,
+                steps_per_epoch=steps_per_epoch + buffer_steps,
+                epochs=max_epochs,
+                **extra_kwargs,
+            )
+
+        total_steps = init_args.get("total_steps")
+        return torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=max_lr,
+            total_steps=total_steps,
+            **extra_kwargs,
+        )
 
     def forward(
             self,
@@ -462,7 +505,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             return outputs  # list[Tensor]
         return outputs[-1]  # Tensor [B, C, H, W]
 
-    def on_after_batch_transfer(self, batch, dataloader_idx):
+    def on_after_batch_transfer(self, batch: dict[str, Any], dataloader_idx: int) -> dict[str, Any]:  # noqa: ARG002
         if not self.trainer.training:
             return batch
         device = batch["image"].device
@@ -481,20 +524,15 @@ class ChangeDetectionChangeFormer(LightningModule):
         for key in transformed:
             batch[key] = transformed[key].to(device, non_blocking=True)
 
-        # 2. Intensity augmentations on images only (generic)
+        # 2. Intensity augmentations + SAR-specific multiplicative speckle noise,
+        # both applied per image key (generic, images only).
         for img_key in ["image_pre", "image"]:
             batch[img_key] = self._intensity_aug({img_key: batch[img_key]})[img_key]
-
-        # 3. SAR-specific: multiplicative speckle noise
-        if self.speckle_noise_std > 0:
-            for img_key in ["image_pre", "image"]:
-                batch[img_key] = self._apply_speckle_noise(
-                    batch[img_key], self.speckle_noise_std
-                )
+            if self.speckle_noise_std > 0:
+                batch[img_key] = self._apply_speckle_noise(batch[img_key], self.speckle_noise_std)
 
         return batch
 
-    # TODO : Modifier pour avoir image pre/post
     def training_step(
             self,
             batch: dict[str, Any],
@@ -522,22 +560,41 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # --- Calcul des métriques différé (pour éviter de casser autograd) ---
         with torch.no_grad():
-            common_mask = batch["mask-common"]  # [B, 1, H, W]
-            # Count each source pixel once across overlapping tiles (no-op if untiled)
-            common_mask = self._apply_tile_ownership(batch, common_mask)
-            valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
-
-            # On accumule les prédictions pour calculer les métriques à la fin
-            valid_mask = valid_preds != IGNORE_MASK_INDEX
-            if valid_mask.any():
-                vp = valid_preds[valid_mask]
-                vt = valid_targets[valid_mask]
-                self.train_iou.update(vp, vt)
-                self.train_f1.update(vp, vt)
-                self.train_precision.update(vp, vt)
-                self.train_recall.update(vp, vt)
+            self._update_split_metrics("train", batch, logits, one_hot)
 
         return main_loss
+
+    def _update_split_metrics(
+            self,
+            split: str,
+            batch: dict[str, Any],
+            logits: Tensor,
+            one_hot: Tensor,
+            *,
+            classwise: ClasswiseWrapper | None = None,
+    ) -> None:
+        """Update the IoU/F1/Precision/Recall metrics for one data split.
+
+        Shared by ``training_step``/``validation_step``/``test_step``, which
+        previously duplicated this block. Restricts to valid, tile-owned
+        pixels (see :meth:`_apply_tile_ownership`) and skips the update
+        entirely when no valid pixel remains in the batch. Uses ``.update()``
+        (never ``metric(...)``) so no per-step ``compute()`` is wasted.
+        """
+        common_mask = self._apply_tile_ownership(batch, batch["mask-common"])
+        valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
+
+        valid_mask = valid_preds != IGNORE_MASK_INDEX
+        if not valid_mask.any():
+            return
+
+        vp, vt = valid_preds[valid_mask], valid_targets[valid_mask]
+        if classwise is not None:
+            classwise.update(vp, vt)
+        getattr(self, f"{split}_iou").update(vp, vt)
+        getattr(self, f"{split}_f1").update(vp, vt)
+        getattr(self, f"{split}_precision").update(vp, vt)
+        getattr(self, f"{split}_recall").update(vp, vt)
 
     @staticmethod
     def _extract_valid_pixels(
@@ -560,7 +617,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             all_targets: [M] target class indices (invalid pixels = IGNORE_MASK_INDEX)
         """
         # valid_pixels : [B, H, W] booléen
-        valid_pixels = (common_mask.squeeze(1) > 0.5)  # robust to float imprecision
+        valid_pixels = common_mask.squeeze(1) > MASK_VALID_THRESHOLD  # robust to float imprecision
 
         # Prédictions et targets en indices de classe : [B, H, W]
         preds = torch.argmax(logits, dim=1)  # [B, H, W]
@@ -593,8 +650,21 @@ class ChangeDetectionChangeFormer(LightningModule):
             starts.append(last)
         return sorted(set(starts))
 
-    @classmethod
-    def _axis_ownership_end(cls, starts: list[int], start: int, tile: int) -> int:
+    @staticmethod
+    def _scalar_at(field: Any, index: int) -> int:
+        """Return ``int(field[index])``, handling both Tensor and list/tuple batches.
+
+        Batched per-sample scalar fields (e.g. ``tile_row_start``,
+        ``buffer_size``, ``original_height``) may arrive as a ``Tensor`` or as
+        a plain Python list depending on the collate function. This was
+        previously reimplemented ad hoc in three places
+        (``_mask_buffer_zone``, ``_tile_ownership_mask``, ``_write_prediction_batch``).
+        """
+        value = field[index]
+        return int(value.item()) if isinstance(field, torch.Tensor) else int(value)
+
+    @staticmethod
+    def _axis_ownership_end(starts: list[int], start: int, tile: int) -> int:
         """Local exclusive end index of the region a tile *exclusively* owns.
 
         A source pixel is owned by the tile with the **largest** start that
@@ -629,14 +699,11 @@ class ChangeDetectionChangeFormer(LightningModule):
         b, _, h, w = ref_shape
         mask = torch.zeros((b, 1, h, w), dtype=torch.float32)
 
-        def _to_int(field: Any, i: int) -> int:
-            return int(field[i].item() if isinstance(field, torch.Tensor) else field[i])
-
         for i in range(b):
-            r = _to_int(batch["tile_row_start"], i)
-            c = _to_int(batch["tile_col_start"], i)
-            sh = _to_int(batch["source_height"], i)
-            sw = _to_int(batch["source_width"], i)
+            r = self._scalar_at(batch["tile_row_start"], i)
+            c = self._scalar_at(batch["tile_col_start"], i)
+            sh = self._scalar_at(batch["source_height"], i)
+            sw = self._scalar_at(batch["source_width"], i)
 
             row_starts = self._axis_tile_starts(sh, tile_h, stride_h)
             col_starts = self._axis_tile_starts(sw, tile_w, stride_w)
@@ -654,19 +721,45 @@ class ChangeDetectionChangeFormer(LightningModule):
             return common_mask
         return common_mask * own.to(common_mask.device, common_mask.dtype)
 
-    def on_train_epoch_end(self):
-        self.log("train_iou", self.train_iou.compute(), prog_bar=True, sync_dist=True)
-        self.log("train_f1", self.train_f1.compute(), prog_bar=True, sync_dist=True)
-        self.log("train_precision", self.train_precision.compute(), prog_bar=True, sync_dist=True)
-        self.log("train_recall", self.train_recall.compute(), prog_bar=True, sync_dist=True)
+    # ------------------------------------------------------------------
+    # Shared epoch-end metric logging helpers (used by on_{train,val,test}_epoch_end)
+    # ------------------------------------------------------------------
+
+    def _log_epoch_metrics(self, prefix: str) -> dict[str, Tensor]:
+        """Compute, log, and return the IoU/F1/Precision/Recall metrics for one split.
+
+        Returns the computed values keyed by short metric name so callers
+        needing an extra derived log line (e.g. ``val_recall_burn``) can
+        reuse them instead of calling ``.compute()`` a second time.
+        """
+        values = {
+            "iou": getattr(self, f"{prefix}_iou").compute(),
+            "f1": getattr(self, f"{prefix}_f1").compute(),
+            "precision": getattr(self, f"{prefix}_precision").compute(),
+            "recall": getattr(self, f"{prefix}_recall").compute(),
+        }
+        for name, value in values.items():
+            self.log(f"{prefix}_{name}", value, prog_bar=True, sync_dist=True)
+        return values
+
+    def _log_classwise_iou(self, prefix: str, classwise_metric: ClasswiseWrapper) -> None:
+        """Log one ``{prefix}_iou_{class_name}`` line per class."""
+        for class_name, value in classwise_metric.compute().items():
+            self.log(f"{prefix}_iou_{class_name}", value, prog_bar=False, sync_dist=True)
+
+    @staticmethod
+    def _reset_metrics(*metrics: Any) -> None:
+        """Reset every metric passed in, in one call."""
+        for metric in metrics:
+            metric.reset()
+
+    def on_train_epoch_end(self) -> None:
+        self._log_epoch_metrics("train")
 
         lr = self.trainer.optimizers[0].param_groups[0]["lr"]
         self.log("lr", lr, prog_bar=True)
 
-        self.train_iou.reset()
-        self.train_f1.reset()
-        self.train_precision.reset()
-        self.train_recall.reset()
+        self._reset_metrics(self.train_iou, self.train_f1, self.train_precision, self.train_recall)
 
     def on_validation_epoch_start(self) -> None:
         """Reset visualization counter at the start of each validation epoch."""
@@ -695,24 +788,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             rank_zero_only=True,
         )
         with torch.no_grad():
-            # Masquer les pixels invalides avant de mettre à jour les métriques
-            common_mask = batch["mask-common"]  # [B, 1, H, W]
-            # Count each source pixel once across overlapping tiles (no-op if untiled)
-            common_mask = self._apply_tile_ownership(batch, common_mask)
-            valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
-
-            if valid_preds.numel() > 0:
-                # Filtrer les pixels valides (exclure IGNORE_MASK_INDEX)
-                # car BinaryJaccardIndex et MeanIoU n'acceptent pas de valeurs hors [0, num_classes-1]
-                valid_mask = valid_preds != IGNORE_MASK_INDEX
-                if valid_mask.any():
-                    vp = valid_preds[valid_mask]
-                    vt = valid_targets[valid_mask]
-                    self.val_iou_classwise.update(vp, vt)
-                    self.val_iou(vp, vt)
-                    self.val_f1(vp, vt)
-                    self.val_precision(vp, vt)
-                    self.val_recall(vp, vt)
+            self._update_split_metrics("val", batch, logits, one_hot, classwise=self.val_iou_classwise)
 
         # --- Visualisations en validation ---
         if self._total_samples_visualized < self.max_samples:
@@ -729,31 +805,15 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         return logits
 
-    def on_validation_epoch_end(self):
-        # Classwise IoU
-        classwise_iou = self.val_iou_classwise.compute()
-        for class_name, value in classwise_iou.items():
-            self.log(f"val_iou_{class_name}", value, prog_bar=False, sync_dist=True)
-
-        # Global metrics
-        val_iou = self.val_iou.compute()
-        val_f1 = self.val_f1.compute()
-        val_precision = self.val_precision.compute()
-        val_recall = self.val_recall.compute()
-
-        self.log("val_iou", val_iou, prog_bar=True, sync_dist=True)
-        self.log("val_f1", val_f1, prog_bar=True, sync_dist=True)
-        self.log("val_precision", val_precision, prog_bar=True, sync_dist=True)
-        self.log("val_recall", val_recall, prog_bar=True, sync_dist=True)
+    def on_validation_epoch_end(self) -> None:
+        self._log_classwise_iou("val", self.val_iou_classwise)
+        values = self._log_epoch_metrics("val")
         # In binary setup this recall corresponds to class 1 (burned).
-        self.log("val_recall_burn", val_recall, prog_bar=True, sync_dist=True)
+        self.log("val_recall_burn", values["recall"], prog_bar=True, sync_dist=True)
 
-        # Reset all
-        self.val_iou_classwise.reset()
-        self.val_iou.reset()
-        self.val_f1.reset()
-        self.val_precision.reset()
-        self.val_recall.reset()
+        self._reset_metrics(
+            self.val_iou_classwise, self.val_iou, self.val_f1, self.val_precision, self.val_recall,
+        )
 
     def on_test_epoch_start(self) -> None:
         """Reset visualization counter at the start of each test epoch."""
@@ -765,32 +825,15 @@ class ChangeDetectionChangeFormer(LightningModule):
             batch_idx: int,  # noqa: ARG002
     ) -> None:
         """Run test step."""
-
         has_mask = batch.get("has_mask", torch.tensor([True]))
         if not has_mask.any():
             return None
 
         x_pre, x_post, y, one_hot, logits, main_loss, _focal, _lovasz, _final_head, batch_size = self._forward_and_get_loss(batch)
-        y_pred = torch.argmax(logits, dim=1)
-        y_true = torch.argmax(one_hot, dim=1)
 
         # --- Update metrics ---
         with torch.no_grad():
-            common_mask = batch["mask-common"]  # [B, 1, H, W]
-            # Count each source pixel once across overlapping tiles (no-op if untiled)
-            common_mask = self._apply_tile_ownership(batch, common_mask)
-            valid_preds, valid_targets = self._extract_valid_pixels(logits, one_hot, common_mask)
-
-            if valid_preds.numel() > 0:
-                valid_mask = valid_preds != IGNORE_MASK_INDEX
-                if valid_mask.any():
-                    vp = valid_preds[valid_mask]
-                    vt = valid_targets[valid_mask]
-                    self.test_iou_classwise.update(vp, vt)
-                    self.test_iou.update(vp, vt)
-                    self.test_f1.update(vp, vt)
-                    self.test_precision.update(vp, vt)
-                    self.test_recall.update(vp, vt)
+            self._update_split_metrics("test", batch, logits, one_hot, classwise=self.test_iou_classwise)
 
         # --- Log test loss (epoch-aggregated) ---
         self.log(
@@ -816,36 +859,21 @@ class ChangeDetectionChangeFormer(LightningModule):
                 epoch_suffix=False,
             )
 
-    def on_test_epoch_end(self):
-        # --- Classwise IoU ---
-        classwise_metrics = self.test_iou_classwise.compute()
-        for class_name, value in classwise_metrics.items():
-            self.log(
-                f"test_iou_{class_name}",
-                value,
-                prog_bar=False,
-                sync_dist=True,
-            )
-
-        # --- Global metrics ---
-        self.log("test_iou", self.test_iou.compute(), prog_bar=True, sync_dist=True)
-        self.log("test_f1", self.test_f1.compute(), prog_bar=True, sync_dist=True)
-        self.log("test_precision", self.test_precision.compute(), prog_bar=True, sync_dist=True)
-        self.log("test_recall", self.test_recall.compute(), prog_bar=True, sync_dist=True)
-        # --- Reset metrics ---
-        self.test_iou_classwise.reset()
-        self.test_iou.reset()
-        self.test_f1.reset()
-        self.test_precision.reset()
-        self.test_recall.reset()
+    def on_test_epoch_end(self) -> None:
+        self._log_classwise_iou("test", self.test_iou_classwise)
+        self._log_epoch_metrics("test")
+        self._reset_metrics(
+            self.test_iou_classwise, self.test_iou, self.test_f1, self.test_precision, self.test_recall,
+        )
 
     def _forward_and_get_loss(
             self, batch: dict[str, Any],
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, int]:
+    ) -> _ForwardLossOutput:
         """Run the forward pass and compute the (possibly deep-supervised) loss.
 
-        Returns a 10-tuple of ``(x_pre, x_post, y_float, one_hot, logits,
-        main_loss, focal_loss, lovasz_loss, final_head_loss, batch_size)``.
+        Returns a :class:`_ForwardLossOutput` — behaves like a plain 10-tuple
+        for the positional unpacking used at every call site, but each field
+        is named for readability.
         """
         x_pre, x_post = batch["image_pre"], batch["image"]
         y = batch["mask"]
@@ -914,7 +942,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 (batch_size, num_classes, x_post.shape[2], x_post.shape[3]),
                 device=logits.device, dtype=logits.dtype,
             )
-            return x_pre, x_post, y_float, dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, zero_loss, batch_size
+            return _ForwardLossOutput(x_pre, x_post, y_float, dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, zero_loss, batch_size)
 
         logits_no_nan = self._sanitize_logits(logits)
 
@@ -924,7 +952,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         # Vérifier qu'il reste des pixels valides
         if common_data_mask.sum() == 0:
             zero = torch.tensor(0.0, device=logits_no_nan.device, dtype=logits_no_nan.dtype, requires_grad=True)
-            return x_pre, x_post, y_float, one_hot, logits_no_nan, zero, zero, zero, zero, batch_size
+            return _ForwardLossOutput(x_pre, x_post, y_float, one_hot, logits_no_nan, zero, zero, zero, zero, batch_size)
 
         # Vérifier entrées de la loss
         if not torch.isfinite(one_hot).all():
@@ -955,7 +983,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 f"burn_penalty={burn_penalty.detach().cpu().item()}"
             )
 
-        return (
+        return _ForwardLossOutput(
             x_pre, x_post, y_float, one_hot, logits_no_nan,
             main_loss, focal_loss_val, lovasz_loss_val, final_head_loss, batch_size,
         )
@@ -993,7 +1021,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             return common_data_mask
 
         buf_raw = batch["buffer_size"]
-        buf = int(buf_raw[0].item() if isinstance(buf_raw, torch.Tensor) else buf_raw[0])
+        buf = ChangeDetectionChangeFormer._scalar_at(buf_raw, 0)
         if buf <= 0:
             return common_data_mask
 
@@ -1013,12 +1041,14 @@ class ChangeDetectionChangeFormer(LightningModule):
             tile_h, tile_w = common_data_mask.shape[2], common_data_mask.shape[3]
             orig_h_batch = batch["cell_orig_height"]
             orig_w_batch = batch["cell_orig_width"]
+            tile_row_start = batch["tile_row_start"]
+            tile_col_start = batch["tile_col_start"]
 
             for i in range(batch_size):
-                tr = int(batch["tile_row_start"][i].item() if isinstance(batch["tile_row_start"], torch.Tensor) else batch["tile_row_start"][i])
-                tc = int(batch["tile_col_start"][i].item() if isinstance(batch["tile_col_start"], torch.Tensor) else batch["tile_col_start"][i])
-                oh = int(orig_h_batch[i].item() if isinstance(orig_h_batch, torch.Tensor) else orig_h_batch[i])
-                ow = int(orig_w_batch[i].item() if isinstance(orig_w_batch, torch.Tensor) else orig_w_batch[i])
+                tr = ChangeDetectionChangeFormer._scalar_at(tile_row_start, i)
+                tc = ChangeDetectionChangeFormer._scalar_at(tile_col_start, i)
+                oh = ChangeDetectionChangeFormer._scalar_at(orig_h_batch, i)
+                ow = ChangeDetectionChangeFormer._scalar_at(orig_w_batch, i)
 
                 # Valid rows/cols in tile-local coordinates
                 vr_start = max(0, buf - tr)
@@ -1073,15 +1103,14 @@ class ChangeDetectionChangeFormer(LightningModule):
         0), and their target zeroed out.
         """
         valid_ratio = common_data_mask.flatten(1).mean(dim=1)  # [B]
-        min_valid_ratio = 0.05  # au moins 5% de pixels valides
-        bad_mask = valid_ratio < min_valid_ratio  # [B] booléen
+        bad_mask = valid_ratio < MIN_VALID_RATIO_FOR_PATCH  # [B] booléen
         if not bad_mask.any():
             return
 
         n_bad = bad_mask.sum().item()
         logger.warning(
             "Patching %d/%d samples with <%.0f%% valid pixels (ratios: %s)",
-            n_bad, batch_size, min_valid_ratio * 100,
+            n_bad, batch_size, MIN_VALID_RATIO_FOR_PATCH * 100,
             [f"{r:.3f}" for r, b in zip(valid_ratio.tolist(), bad_mask.tolist()) if b],
         )
         # Remplir les samples quasi-vides avec du bruit uniforme [0, 0.01]
@@ -1114,7 +1143,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         one_hot = F.one_hot(y_one_hot.long(), num_classes=num_classes)
         one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
 
-        invalid_pixels = common_data_mask < 0.5  # [B, 1, H, W], True=invalid  # noqa: PLR2004
+        invalid_pixels = common_data_mask < MASK_VALID_THRESHOLD  # [B, 1, H, W], True=invalid
         one_hot_for_loss = one_hot.clone()
         one_hot_for_loss.masked_fill_(invalid_pixels.expand_as(one_hot), IGNORE_MASK_INDEX)
         return one_hot, one_hot_for_loss
@@ -1286,7 +1315,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
                 mask_i_for_filter = mask_batch[i]  # [H, W], values: 0=unburn, 1=burn, 255=ignore
                 if common_mask is not None:
-                    valid_pixels = (common_mask[i].squeeze(0) > 0.5)  # [H, W]
+                    valid_pixels = (common_mask[i].squeeze(0) > MASK_VALID_THRESHOLD)  # [H, W]
                 else:
                     valid_pixels = (mask_i_for_filter != IGNORE_MASK_INDEX)
 
@@ -1316,7 +1345,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 # Prediction with water/no-data masking
                 pred = torch.argmax(outputs[i], dim=0)  # [H, W]
                 if common_mask is not None:
-                    invalid = (common_mask[i].squeeze(0) < 0.5)  # [H, W]
+                    invalid = (common_mask[i].squeeze(0) < MASK_VALID_THRESHOLD)  # [H, W]
                     # Use a distinct value (255) for visualization of masked pixels
                     pred = pred.clone()
                     pred[invalid] = self.changed_num_classes  # = 2 → index du gris dans la colormap
@@ -1386,7 +1415,6 @@ class ChangeDetectionChangeFormer(LightningModule):
         detections. Note: unlike the training augmentations, 90°/270°
         rotations are *not* included here (see :meth:`_tta_forward`).
         """
-
         x_pre = batch["image_pre"]
         x_post = batch["image"]
 
@@ -1401,14 +1429,10 @@ class ChangeDetectionChangeFormer(LightningModule):
                 processing_year=batch.get("processing_year"),
             )
 
-        # Convertir en probabilités et en classes prédites
-        if self.num_classes == 1:
-            # Binaire : 2 classes (0=no-change, 1=change)
-            probs = torch.softmax(logits, dim=1)  # [B, 2, H, W]
-            y_pred = torch.argmax(probs, dim=1)  # [B, H, W]
-        else:
-            probs = torch.softmax(logits, dim=1)
-            y_pred = torch.argmax(probs, dim=1)
+        # Convertir en probabilités et en classes prédites (binaire: 2 classes
+        # 0=no-change/1=change, ou multiclasse: identique via softmax+argmax)
+        probs = torch.softmax(logits, dim=1)  # [B, C, H, W]
+        y_pred = torch.argmax(probs, dim=1)  # [B, H, W]
 
         # --- Exclure les pixels invalides et l'eau avec NO_DATA (32767) ---
         # ``mask-common`` décrit la validité des acquisitions SAR, mais ne
@@ -1417,7 +1441,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         invalid_mask = torch.zeros_like(y_pred, dtype=torch.bool)
         if "mask-common" in batch:
             common_mask = batch["mask-common"]  # [B, 1, H, W] bool ou float
-            invalid_mask |= common_mask.squeeze(1) < 0.5
+            invalid_mask |= common_mask.squeeze(1) < MASK_VALID_THRESHOLD
         if "water_mask" in batch:
             water_mask = batch["water_mask"]  # [B, 1, H, W]
             invalid_mask |= water_mask.squeeze(1) > 0  # eau = valeur > 0
@@ -1475,7 +1499,6 @@ class ChangeDetectionChangeFormer(LightningModule):
             **metadata_kwargs: Tensor,
     ) -> Tensor:
         """Average predictions over geometric transformations."""
-
         transforms = [
             lambda t: t,
             lambda t: torch.flip(t, dims=(-1,)),
@@ -1769,8 +1792,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             sample_name = names[i].replace("\n", "").replace("|", "_").replace("/", "_")
 
             # --- Récupérer les dimensions originales ---
-            orig_h = orig_heights[i].item() if isinstance(orig_heights, torch.Tensor) else int(orig_heights[i])
-            orig_w = orig_widths[i].item() if isinstance(orig_widths, torch.Tensor) else int(orig_widths[i])
+            orig_h = self._scalar_at(orig_heights, i)
+            orig_w = self._scalar_at(orig_widths, i)
 
             # --- Découper le padding (crop au coin supérieur-gauche) ---
             pred_np = y_pred[i, :orig_h, :orig_w].cpu().numpy().astype(np.uint16)
@@ -1812,8 +1835,4 @@ class ChangeDetectionChangeFormer(LightningModule):
                 group_tile_paths=group_tile_paths,
                 event_all_tile_paths=event_all_tile_paths,
             )
-
-
-
-
 
