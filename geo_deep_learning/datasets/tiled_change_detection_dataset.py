@@ -116,10 +116,7 @@ class TiledChangeDetectionDataset(ChangeDetectionDataset):
             self._build_cell_grid_index(files)
 
         if self.tile_size is not None:
-            if self._predict_overlap_buffer > 0:
-                files = self._expand_files_with_tiles_buffered(files)
-            else:
-                files = self._expand_files_with_tiles(files)
+            files = self._expand_files_with_tiles(files, padding=self._predict_overlap_buffer)
 
         return files
 
@@ -144,11 +141,19 @@ class TiledChangeDetectionDataset(ChangeDetectionDataset):
     # Tiling helpers
     # ------------------------------------------------------------------
 
-    def _expand_files_with_tiles(self, files: list[dict]) -> list[dict]:
+    def _expand_files_with_tiles(self, files: list[dict], padding: int = 0) -> list[dict]:
         """Split images larger than *tile_size* into a grid of tiles.
 
-        Images that already fit within *tile_size* are kept as-is.
-        Edge tiles are shifted inward so every tile is exactly *tile_size*.
+        Images that already fit within *tile_size* (after adding *padding* on
+        every side, used by the buffered / predict-overlap path) are kept
+        as-is. Edge tiles are shifted inward so every tile is exactly
+        *tile_size*.
+
+        Args:
+            files: raw per-sample file dicts.
+            padding: extra pixels added on every side before computing the
+                tile grid, matching the spatial-context buffer size. ``0``
+                (the default) reproduces the plain, unbuffered behaviour.
         """
         tile_h, tile_w = self.tile_size
         stride_h, stride_w = self.tile_stride
@@ -156,81 +161,49 @@ class TiledChangeDetectionDataset(ChangeDetectionDataset):
 
         expanded: list[dict] = []
         for entry in files:
-            with rio.open(entry["image"]) as src:
-                img_h, img_w = src.height, src.width
+            src_h, src_w = self._get_raster_dimensions(entry["image"])
+            img_h, img_w = src_h + 2 * padding, src_w + 2 * padding
 
             if img_h <= tile_h and img_w <= tile_w:
                 expanded.append(entry)
                 continue
 
-            rows = sorted(set(
-                list(range(0, max(img_h - tile_h, 0) + 1, stride_h))
-                + ([max(0, img_h - tile_h)] if img_h > tile_h else [0])
-            ))
-            cols = sorted(set(
-                list(range(0, max(img_w - tile_w, 0) + 1, stride_w))
-                + ([max(0, img_w - tile_w)] if img_w > tile_w else [0])
-            ))
-
-            for r in rows:
-                for c in cols:
+            for r in self._tile_origins(img_h, tile_h, stride_h):
+                for c in self._tile_origins(img_w, tile_w, stride_w):
                     tile_entry = entry.copy()
-                    tile_entry["_tile_row"] = r
-                    tile_entry["_tile_col"] = c
-                    tile_entry["_source_h"] = img_h
-                    tile_entry["_source_w"] = img_w
+                    tile_entry.update(_tile_row=r, _tile_col=c, _source_h=img_h, _source_w=img_w)
                     expanded.append(tile_entry)
 
         if len(expanded) != n_files:
             logger.info(
-                "Tile expansion: %d files → %d tiles (tile_size=%s, stride=%s)",
+                "Tile expansion%s: %d files → %d tiles (tile_size=%s, stride=%s%s)",
+                " (buffered)" if padding else "",
                 n_files, len(expanded), self.tile_size, self.tile_stride,
+                f", buffer={padding}" if padding else "",
             )
         return expanded
 
-    def _expand_files_with_tiles_buffered(self, files: list[dict]) -> list[dict]:
-        """Like :meth:`_expand_files_with_tiles` but uses the effective buffered size."""
-        buf = self._predict_overlap_buffer
-        tile_h, tile_w = self.tile_size
-        stride_h, stride_w = self.tile_stride
-        n_files = len(files)
+    @staticmethod
+    def _get_raster_dimensions(path: str) -> tuple[int, int]:
+        """Return ``(height, width)`` of a raster without reading pixel data."""
+        with rio.open(path) as src:
+            return src.height, src.width
 
-        expanded: list[dict] = []
-        for entry in files:
-            with rio.open(entry["image"]) as src:
-                file_h, file_w = src.height, src.width
-            img_h = file_h + 2 * buf
-            img_w = file_w + 2 * buf
+    @staticmethod
+    def _tile_origins(source: int, tile: int, stride: int) -> list[int]:
+        """Return the sorted, deduplicated tile-origin offsets covering *source*.
 
-            if img_h <= tile_h and img_w <= tile_w:
-                expanded.append(entry)
-                continue
-
-            rows = sorted(set(
-                list(range(0, max(img_h - tile_h, 0) + 1, stride_h))
-                + ([max(0, img_h - tile_h)] if img_h > tile_h else [0])
-            ))
-            cols = sorted(set(
-                list(range(0, max(img_w - tile_w, 0) + 1, stride_w))
-                + ([max(0, img_w - tile_w)] if img_w > tile_w else [0])
-            ))
-
-            for r in rows:
-                for c in cols:
-                    tile_entry = entry.copy()
-                    tile_entry["_tile_row"] = r
-                    tile_entry["_tile_col"] = c
-                    tile_entry["_source_h"] = img_h
-                    tile_entry["_source_w"] = img_w
-                    expanded.append(tile_entry)
-
-        if len(expanded) != n_files:
-            logger.info(
-                "Tile expansion (buffered): %d files → %d tiles "
-                "(tile_size=%s, stride=%s, buffer=%d)",
-                n_files, len(expanded), self.tile_size, self.tile_stride, buf,
-            )
-        return expanded
+        Mirrored by ``ChangeDetectionChangeFormer._axis_tile_starts`` so the
+        model can reconstruct tile positions from ``source_height`` /
+        ``source_width`` alone — keep both implementations in sync.
+        """
+        if source <= tile:
+            return [0]
+        starts = list(range(0, (source - tile) + 1, stride))
+        last = source - tile
+        if last not in starts:
+            starts.append(last)
+        return sorted(set(starts))
 
     def _apply_tile_crop(self, sample: dict, data: dict) -> dict:
         """Crop spatial tensors and adjust the GeoTIFF profile for a tile.
@@ -363,13 +336,10 @@ class TiledChangeDetectionDataset(ChangeDetectionDataset):
 
         center_pre, _ = self._read_image_and_get_no_data(data["image_pre"])
         center_post, _ = self._read_image_and_get_no_data(data["image"])
-        C, orig_h, orig_w = center_pre.shape
+        _, orig_h, orig_w = center_pre.shape
 
-        exp_h, exp_w = orig_h + 2 * buf, orig_w + 2 * buf
-        exp_pre  = np.full((C, exp_h, exp_w), no_data, dtype=center_pre.dtype)
-        exp_post = np.full((C, exp_h, exp_w), no_data, dtype=center_post.dtype)
-        exp_pre [:, buf:buf + orig_h, buf:buf + orig_w] = center_pre
-        exp_post[:, buf:buf + orig_h, buf:buf + orig_w] = center_post
+        exp_pre = self._expand_center(center_pre, buf, no_data)
+        exp_post = self._expand_center(center_post, buf, no_data)
 
         rc = self._parse_cell_id(data["cell_id"])
         if rc is not None:
@@ -378,17 +348,16 @@ class TiledChangeDetectionDataset(ChangeDetectionDataset):
                 self._get_neighbor_slices(buf, orig_h, orig_w).items()
             ):
                 nb_rc = (r + dr, c_idx + dc)
-                pre_path  = self._find_neighbor_path(data, nb_rc, "image_pre")
+                pre_path = self._find_neighbor_path(data, nb_rc, "image_pre")
                 post_path = self._find_neighbor_path(data, nb_rc, "image")
                 if pre_path is None or post_path is None:
                     continue
-                try:
-                    n_pre,  _ = self._read_image_and_get_no_data(pre_path)
-                    n_post, _ = self._read_image_and_get_no_data(post_path)
-                    exp_pre [:, dst_r, dst_c] = n_pre [:, src_r, src_c]
-                    exp_post[:, dst_r, dst_c] = n_post[:, src_r, src_c]
-                except Exception as e:
-                    logger.debug("Could not load neighbour %s: %s", nb_rc, e)
+                n_pre = self._read_neighbor_array(pre_path, nb_rc, "image_pre")
+                n_post = self._read_neighbor_array(post_path, nb_rc, "image")
+                if n_pre is None or n_post is None:
+                    continue
+                exp_pre[:, dst_r, dst_c] = n_pre[:, src_r, src_c]
+                exp_post[:, dst_r, dst_c] = n_post[:, src_r, src_c]
 
         common = torch.from_numpy((exp_pre[0] == 1) & (exp_post[0] == 1)).unsqueeze(0)
         return (
@@ -469,14 +438,11 @@ class TiledChangeDetectionDataset(ChangeDetectionDataset):
         if path is not None and Path(str(path)).exists():
             center, _ = self._read_image_and_get_no_data(str(path), np.int32)
         else:
-            with rio.open(data["image"]) as src:
-                height, width = src.height, src.width
+            height, width = self._get_raster_dimensions(data["image"])
             center = np.zeros((1, height, width), dtype=np.int32)
 
         _, orig_h, orig_w = center.shape
-        exp_h, exp_w = orig_h + 2 * buf, orig_w + 2 * buf
-        exp = np.full((1, exp_h, exp_w), fill_value, dtype=center.dtype)
-        exp[:, buf:buf + orig_h, buf:buf + orig_w] = center[:1]
+        exp = self._expand_center(center[:1], buf, fill_value)
 
         rc = self._parse_cell_id(data["cell_id"])
         if rc is not None:
@@ -488,16 +454,50 @@ class TiledChangeDetectionDataset(ChangeDetectionDataset):
                 nb_path = self._find_neighbor_path(data, nb_rc, image_key)
                 if nb_path is None:
                     continue
-                try:
-                    n_arr, _ = self._read_image_and_get_no_data(nb_path, np.int32)
-                    exp[:, dst_r, dst_c] = n_arr[:1, src_r, src_c]
-                except Exception as e:  # noqa: BLE001
-                    logger.debug(
-                        "Could not load neighbour %s for %s: %s", nb_rc, image_key, e,
-                    )
+                n_arr = self._read_neighbor_array(nb_path, nb_rc, image_key, dtype=np.int32)
+                if n_arr is None:
+                    continue
+                exp[:, dst_r, dst_c] = n_arr[:1, src_r, src_c]
 
         name = Path(str(path)).name if path is not None else f"no_{image_key}"
         return torch.from_numpy(exp).float(), name
+
+    @staticmethod
+    def _expand_center(center: np.ndarray, buf: int, fill_value: float) -> np.ndarray:
+        """Place a ``[C, H, W]`` array at the centre of a *buf*-pixel padded array.
+
+        The padding ring is initialised to *fill_value*; callers typically
+        overwrite parts of it with neighbouring-cell data afterwards (see
+        :meth:`_read_neighbor_array`).
+        """
+        channels, height, width = center.shape
+        expanded = np.full(
+            (channels, height + 2 * buf, width + 2 * buf), fill_value, dtype=center.dtype,
+        )
+        expanded[:, buf:buf + height, buf:buf + width] = center
+        return expanded
+
+    def _read_neighbor_array(
+        self,
+        path: str,
+        neighbor_rc: tuple[int, int],
+        image_key: str,
+        dtype: np.dtype = np.int16,
+    ) -> np.ndarray | None:
+        """Read a neighbouring cell's raster, returning ``None`` on failure.
+
+        Centralises the best-effort error handling shared by
+        :meth:`_load_image_with_buffer` and
+        :meth:`_load_static_raster_with_buffer`: a single missing/corrupt
+        neighbour file only skips that one buffer cell instead of failing
+        the whole sample.
+        """
+        try:
+            arr, _ = self._read_image_and_get_no_data(path, dtype)
+            return arr
+        except Exception as exc:  # noqa: BLE001 - best-effort neighbour loading
+            logger.debug("Could not load neighbour %s for %s: %s", neighbor_rc, image_key, exc)
+            return None
 
     # ------------------------------------------------------------------
     # _finalize_sample  — called at the END of every subclass __getitem__

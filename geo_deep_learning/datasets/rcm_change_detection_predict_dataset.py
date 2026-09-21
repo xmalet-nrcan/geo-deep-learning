@@ -5,22 +5,16 @@ pair_id, pre_input_file, event_id, …) and the metadata returned.
 All spatial-context buffer and tiling logic is inherited from the base class.
 """
 import logging
-from pathlib import Path
-from typing import Optional, List, Any
+from typing import Any, List, Optional
 
 from geo_deep_learning.datasets.rcm_change_detection_dataset import (
+    Beams,
     RCMChangeDetectionDataset,
     SatellitePass,
-    Beams,
 )
 
-logger = logging.getLogger("RCM-PrePost RCMChangeDetectionOnPredictDataset")
-ch = logging.StreamHandler()
-ch.setLevel(logging.DEBUG)
-formatter = logging.Formatter('[%(asctime)s - %(name)s - [%(levelname)s] ] - %(message)s')
-ch.setFormatter(formatter)
-logger.addHandler(ch)
-logger.setLevel(logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 
 class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
     """Predict-time dataset with optional spatial context from neighbouring grid cells.
@@ -67,61 +61,42 @@ class RCMChangeDetectionOnPredictDataset(RCMChangeDetectionDataset):
         ``db_nbac_fire_id``; no ``mask`` column.
         """
         df_csv = self._get_input_dataset_as_dataframe()
+        columns = [
+            "pre_input_file", "post_input_file", "pair_id",
+            "group_id_pre", "group_id_post", "event_id", "cell_id",
+            "group_date_pre", "group_date_post", "beam", "sat_pass",
+            "event_start_date", "event_end_date", "output_name",
+        ]
 
         files = []
-        for (img_pre,
-             img,
-             pair_id,
-             group_id_pre,
-             group_id_post,
-             event_id,
-             cell_id,
-             group_date_pre,
-             group_date_post,
-             beam,
-             sat_pass,
-              event_start_date,
-              event_end_date,
-              output_name) in df_csv[
-            ['pre_input_file',
-             'post_input_file',
-             "pair_id",
-             'group_id_pre',
-             'group_id_post',
-             'event_id',
-             'cell_id',
-             'group_date_pre',
-             'group_date_post',
-             'beam',
-             'sat_pass',
-              'event_start_date',
-              'event_end_date',
-              'output_name']
-        ].itertuples(index=False):
-            img_pre_path = img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip()
-            img_post_path = img.replace("$ROOT_PATH", self.patches_root_folder).strip()
-            if Path(img_pre_path).exists() and Path(img_post_path).exists():
-                files.append({
-                    "image_pre": img_pre_path,
-                    "image": img_post_path,
-                    "water_mask": self._get_water_mask_path(cell_id),
-                    "pair_id": pair_id,
-                    "cell_id": cell_id,
-                    "event_id": event_id,
-                    "group_date_pre": group_date_pre,
-                    "group_date_post": group_date_post,
-                    "beam": beam,
-                    "sat_pass": sat_pass,
-                    "group_id_pre": group_id_pre,
-                    "group_id_post": group_id_post,
-                    "event_start_date": event_start_date,
-                    "event_end_date": event_end_date,
-                    "output_name": output_name,
-                })
+        for (img_pre, img, pair_id, group_id_pre, group_id_post, event_id,
+             cell_id, group_date_pre, group_date_post, beam, sat_pass,
+             event_start_date, event_end_date, output_name) in df_csv[columns].itertuples(index=False):
+            resolved = self._resolve_pre_post_paths(img_pre, img)
+            if resolved is None:
+                continue
+            img_pre_path, img_post_path = resolved
+            files.append({
+                "image_pre": img_pre_path,
+                "image": img_post_path,
+                "water_mask": self._get_water_mask_path(cell_id),
+                "pair_id": pair_id,
+                "cell_id": cell_id,
+                "event_id": event_id,
+                "group_date_pre": group_date_pre,
+                "group_date_post": group_date_post,
+                "beam": beam,
+                "sat_pass": sat_pass,
+                "group_id_pre": group_id_pre,
+                "group_id_post": group_id_post,
+                "event_start_date": event_start_date,
+                "event_end_date": event_end_date,
+                "output_name": output_name,
+            })
 
         logger.info(
-            f"Loaded {len(files)} files for {len(df_csv)} rows. "
-            f"Nb of event : {len(df_csv['event_id'].unique())}"
+            "Loaded %d files for %d rows. Nb of event : %d",
+            len(files), len(df_csv), df_csv["event_id"].nunique(),
         )
 
         return files

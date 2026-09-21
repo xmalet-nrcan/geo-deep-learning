@@ -11,28 +11,22 @@ Hierarchy
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from typing import Optional, List, Any
+from typing import Any, List, Optional
 
 import numpy as np
 import pandas as pd
 import rasterio as rio
 import torch
-from enum import Enum
-from numpy import ndarray
 from pandas import DataFrame
 from torch import Tensor
 
 from geo_deep_learning.datasets.tiled_change_detection_dataset import TiledChangeDetectionDataset
 from geo_deep_learning.utils.tensors import manage_bands
 
-logger = logging.getLogger("RCM-PrePost ChangeDetectionDataset")
-ch = logging.StreamHandler()
-ch.setLevel(logging.DEBUG)
-formatter = logging.Formatter('[%(asctime)s - %(name)s - [%(levelname)s] ] - %(message)s')
-ch.setFormatter(formatter)
-logger.addHandler(ch)
-logger.setLevel(logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +47,7 @@ class SatellitePass(Enum):
         try:
             return cls[translate[s.upper()].upper()]
         except KeyError:
-            raise ValueError(f"Satellite pass {s!r} not recognized.")
+            raise ValueError(f"Satellite pass {s!r} not recognized.") from None
 
 
 class BandName(Enum):
@@ -109,7 +103,7 @@ def band_names_to_indices(band_names: Optional[List[Any]]) -> Optional[List[int]
     """Convert a list of band names (str or BandName) to integer indices."""
     if band_names is None:
         return None
-    logger.info(f"TREATING BANDS : {band_names}")
+    logger.info("Treating bands: %s", band_names)
     indices = []
     for name in band_names:
         if isinstance(name, BandName):
@@ -118,7 +112,7 @@ def band_names_to_indices(band_names: Optional[List[Any]]) -> Optional[List[int]
             try:
                 indices.append(BandName[name].value)
             except KeyError:
-                raise ValueError(f"Unknown band name: {name!r}")
+                raise ValueError(f"Unknown band name: {name!r}") from None
         else:
             raise TypeError(f"Unsupported type for band_names: {type(name)}")
     return indices
@@ -177,7 +171,7 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
             for idx in bands:
                 try:
                     self.band_names.append(BandName(idx).name)
-                except Exception:
+                except ValueError:
                     self.band_names.append(str(idx))
         else:
             self.bands = [i.value for i in BandName]
@@ -226,25 +220,26 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
              'db_nbac_fire_id', 'cell_id', 'group_date_pre', 'group_date_post',
              'beam', 'sat_pass', 'fire_start_date', 'fire_end_date']
         ].itertuples(index=False):
-            img_pre_path  = img_pre.replace("$ROOT_PATH", self.patches_root_folder).strip()
-            img_post_path = img.replace("$ROOT_PATH", self.patches_root_folder).strip()
-            if Path(img_pre_path).exists() and Path(img_post_path).exists():
-                files.append({
-                    "image_pre":       img_pre_path,
-                    "image":           img_post_path,
-                    "mask":            self._get_mask_path(cell_id, group_date_post),
-                    "water_mask":      self._get_water_mask_path(cell_id),
-                    "cell_id":         cell_id,
-                    "db_nbac_fire_id": db_nbac_fire_id,
-                    "group_date_pre":  group_date_pre,
-                    "group_date_post": group_date_post,
-                    "beam":            beam,
-                    "sat_pass":        sat_pass,
-                    "group_id_pre":    group_id_pre,
-                    "group_id_post":   group_id_post,
-                    "fire_start_date": fire_start_date,
-                    "fire_end_date":   fire_end_date,
-                })
+            resolved = self._resolve_pre_post_paths(img_pre, img)
+            if resolved is None:
+                continue
+            img_pre_path, img_post_path = resolved
+            files.append({
+                "image_pre":       img_pre_path,
+                "image":           img_post_path,
+                "mask":            self._get_mask_path(cell_id, group_date_post),
+                "water_mask":      self._get_water_mask_path(cell_id),
+                "cell_id":         cell_id,
+                "db_nbac_fire_id": db_nbac_fire_id,
+                "group_date_pre":  group_date_pre,
+                "group_date_post": group_date_post,
+                "beam":            beam,
+                "sat_pass":        sat_pass,
+                "group_id_pre":    group_id_pre,
+                "group_id_post":   group_id_post,
+                "fire_start_date": fire_start_date,
+                "fire_end_date":   fire_end_date,
+            })
 
         logger.info(
             "Loaded %d entries (%d with mask, %d without mask)",
@@ -257,6 +252,18 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
     # ------------------------------------------------------------------
     # Path helpers
     # ------------------------------------------------------------------
+
+    def _resolve_pre_post_paths(self, raw_pre: str, raw_post: str) -> tuple[str, str] | None:
+        """Resolve ``$ROOT_PATH`` placeholders and verify both files exist.
+
+        Returns ``None`` when either file is missing so the caller can skip
+        the CSV row. Shared by the training and predict-time CSV loaders.
+        """
+        pre_path = raw_pre.replace("$ROOT_PATH", self.patches_root_folder).strip()
+        post_path = raw_post.replace("$ROOT_PATH", self.patches_root_folder).strip()
+        if Path(pre_path).exists() and Path(post_path).exists():
+            return pre_path, post_path
+        return None
 
     def _get_water_mask_path(self, cell_id) -> Path | None:
         p = (
@@ -281,16 +288,6 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
     # ------------------------------------------------------------------
     # Image / mask loaders
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _read_image_and_get_no_data(
-        path: str,
-        in_dtype: np.dtype = np.int16,
-    ) -> tuple[ndarray, ndarray]:
-        """Read a GeoTIFF; return ``(array [C,H,W], bitmask [H,W])``."""
-        with rio.open(path) as src:
-            arr = src.read().astype(in_dtype)
-        return arr, (arr[0, :, :] == 1)
 
     def _load_mask(self, index: int) -> tuple[Tensor, str]:
         mask, name = self._load_image_by_name(index, "mask")
@@ -318,17 +315,8 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
         if path is not None and Path(str(path)).exists():
             arr, _ = self._read_image_and_get_no_data(str(path), as_type)
             return torch.from_numpy(arr).float(), Path(str(path)).name
-        with rio.open(data["image"]) as src:
-            H, W = src.height, src.width
-        return torch.zeros((1, H, W), dtype=torch.float32), f"no_{key}"
-
-    @staticmethod
-    def _apply_common_mask_to_tensor(
-        common_mask_tensor: Tensor,
-        in_image_tensor: Tensor,
-        fill_value=np.nan,
-    ) -> Tensor:
-        return in_image_tensor.masked_fill_(~common_mask_tensor, fill_value)
+        height, width = self._get_raster_dimensions(data["image"])
+        return torch.zeros((1, height, width), dtype=torch.float32), f"no_{key}"
 
     # ------------------------------------------------------------------
     # CSV filtering
@@ -361,91 +349,30 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
     # __getitem__
     # ------------------------------------------------------------------
 
-    def __getitem__(self, index: int) -> dict:  # noqa: C901
+    def __getitem__(self, index: int) -> dict:
         data = self.files[index]
         image_pre, image_post, common_mask_tensor, image_pre_name, image_post_name = (
             self._load_image(index)
         )
 
-        # Ground-truth fire mask
-        mask_path = data.get("mask")
-        has_mask = mask_path is not None and Path(str(mask_path)).exists()
-        if has_mask:
-            mask, mask_name = self._load_mask(index)
-            mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, IGNORE_INDEX)
-        else:
-            H, W = image_pre.shape[1], image_pre.shape[2]
-            mask, mask_name = torch.zeros((1, H, W), dtype=torch.float32), "no_mask"
+        mask, mask_name, has_mask = self._load_ground_truth_mask(index, common_mask_tensor, image_pre)
 
-        image_pre  = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre,  IGNORE_INDEX)
+        image_pre = self._apply_common_mask_to_tensor(common_mask_tensor, image_pre, IGNORE_INDEX)
         image_post = self._apply_common_mask_to_tensor(common_mask_tensor, image_post, IGNORE_INDEX)
 
-        # Save BITMASK_CROPPED (channel 0) before band selection so it can be
-        # prepended afterwards — the model always expects it as channel 0.
-        bitmask_pre  = image_pre [:1, :, :]   # [1, H, W]
-        bitmask_post = image_post[:1, :, :]   # [1, H, W]
-
         bands_index = self._get_bands_to_load()
-        if bands_index is not None:
-            image_pre  = manage_bands(image_pre,  bands_index)   # [N_bands, H, W]
-            image_post = manage_bands(image_post, bands_index)
-            # Prepend BITMASK_CROPPED → [1 + N_bands, H, W]  (matches in_channels comment)
-            image_pre  = torch.cat([bitmask_pre,  image_pre],  dim=0)
-            image_post = torch.cat([bitmask_post, image_post], dim=0)
+        image_pre, image_post = self._select_bands_with_bitmask(image_pre, image_post, bands_index)
 
         # Normalise BEFORE adding categorical bands so the stats always
         # match the selected SAR channels only.
         water_mask, _ = self._load_water_mask(index)
-        image_pre, image_post, mean, std, mins, maxs = self._normalize_and_standardize(
-            image_post, image_pre
+        image_post, image_pre, mean, std, mins, maxs = self._normalize_and_standardize(image_post, image_pre)
+
+        image_pre, image_post, band_names, film_values = self._build_conditioning_bands(
+            image_pre, image_post, common_mask_tensor, data, bands_index,
         )
 
-        # Initialise FiLM metadata to safe defaults; only populated in separate_metadata mode
-        sat_pass_value: int | None = None
-        beam_value:     int | None = None
-        pre_month_value:   int = 0
-        post_month_value:  int = 0
-        time_delta_bin:    int = len(TIME_DELTA_BINS)
-        decoded_year:      int = 0
-
-        if self.separate_metadata:
-            # Channel 0 is always BITMASK_CROPPED; remaining channels are the selected bands.
-            band_names = (
-                ['BITMASK_CROPPED'] + self.band_names
-                if bands_index is not None else [i.name for i in BandName]
-            )
-            sat_pass_value   = data["sat_pass"].value
-            beam_value       = data["beam"].value
-            pre_month_value  = self._extract_month(data.get("group_date_pre"))
-            post_month_value = self._extract_month(data.get("group_date_post"))
-            time_delta_bin   = self._extract_time_delta_bin(
-                data.get("group_date_pre"), data.get("group_date_post"),
-            )
-            decoded_year = self._decode_year_processing(data.get("group_date_pre"))
-        else:
-            image_pre  = torch.cat([common_mask_tensor, image_pre],  dim=0)
-            image_post = torch.cat([common_mask_tensor, image_post], dim=0)
-            image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
-            band_names = (
-                ['COMMON_MASK']
-                + (['BITMASK_CROPPED'] + self.band_names if bands_index is not None else [i.name for i in BandName])
-                + [SATELLITE_PASS_BAND_NAME, BEAM_BAND_NAME]
-            )
-            sat_pass_value = beam_value = None
-
-        # GeoTIFF profile for output TIFs
-        with rio.open(data['image']) as src:
-            image_profile = src.profile
-        image_profile['count'] = len(band_names)
-        raw_crs = image_profile.get('crs')
-        if raw_crs is not None:
-            epsg = raw_crs.to_epsg()
-            image_profile['crs'] = f"EPSG:{epsg}" if epsg else "EPSG:3979"
-        else:
-            image_profile['crs'] = "EPSG:3979"
-        image_profile['transform'] = list(image_profile['transform'])
-        if image_profile.get('nodata') is None:
-            image_profile['nodata'] = float(NO_DATA)
+        image_profile = self._build_output_profile(data["image"], len(band_names))
 
         sample = {
             "image":           image_post,
@@ -471,20 +398,106 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
             "original_width":  image_post.shape[2],
         }
 
-        if sat_pass_value is not None:
-            sample.update({
-                "sat_pass_value":  sat_pass_value,
-                "beam_value":      beam_value,
-                "pre_season":      pre_month_value,
-                "post_season":     post_month_value,
-                "time_delta_bin":  time_delta_bin,
-                "processing_year": decoded_year,
-            })
+        if film_values:
+            sample.update(film_values)
 
         sample.update(self._get_metadata(data))
 
         # Tile crop + buffer metadata — handled by TiledChangeDetectionDataset
         return self._finalize_sample(sample, data)
+
+    # ------------------------------------------------------------------
+    # __getitem__ helpers
+    # ------------------------------------------------------------------
+
+    def _load_ground_truth_mask(
+        self, index: int, common_mask_tensor: Tensor, reference_image: Tensor,
+    ) -> tuple[Tensor, str, bool]:
+        """Load the ground-truth fire mask, or an all-zero placeholder if absent."""
+        data = self.files[index]
+        mask_path = data.get("mask")
+        has_mask = mask_path is not None and Path(str(mask_path)).exists()
+        if has_mask:
+            mask, mask_name = self._load_mask(index)
+            mask = self._apply_common_mask_to_tensor(common_mask_tensor, mask, IGNORE_INDEX)
+        else:
+            height, width = reference_image.shape[1], reference_image.shape[2]
+            mask, mask_name = torch.zeros((1, height, width), dtype=torch.float32), "no_mask"
+        return mask, mask_name, has_mask
+
+    @staticmethod
+    def _select_bands_with_bitmask(
+        image_pre: Tensor, image_post: Tensor, bands_index: list[int] | None,
+    ) -> tuple[Tensor, Tensor]:
+        """Select the requested bands, always keeping BITMASK_CROPPED as channel 0.
+
+        BITMASK_CROPPED (channel 0) is saved before band selection and
+        prepended afterwards, since the model always expects it as channel 0.
+        """
+        if bands_index is None:
+            return image_pre, image_post
+        bitmask_pre = image_pre[:1, :, :]
+        bitmask_post = image_post[:1, :, :]
+        image_pre = torch.cat([bitmask_pre, manage_bands(image_pre, bands_index)], dim=0)
+        image_post = torch.cat([bitmask_post, manage_bands(image_post, bands_index)], dim=0)
+        return image_pre, image_post
+
+    def _build_conditioning_bands(
+        self,
+        image_pre: Tensor,
+        image_post: Tensor,
+        common_mask_tensor: Tensor,
+        data: dict,
+        bands_index: list[int] | None,
+    ) -> tuple[Tensor, Tensor, list[str], dict[str, int]]:
+        """Attach FiLM conditioning metadata, or fold pass/beam in as extra bands.
+
+        Returns the (possibly modified) pre/post tensors, the resulting band
+        name list, and a dict of FiLM scalar values (empty when
+        ``separate_metadata`` is disabled, since pass/beam are instead
+        concatenated as image bands).
+        """
+        selected_band_names = (
+            ['BITMASK_CROPPED'] + self.band_names
+            if bands_index is not None else [i.name for i in BandName]
+        )
+
+        if self.separate_metadata:
+            # Channel 0 is always BITMASK_CROPPED; remaining channels are the selected bands.
+            film_values = {
+                "sat_pass_value": data["sat_pass"].value,
+                "beam_value": data["beam"].value,
+                "pre_season": self._extract_month(data.get("group_date_pre")),
+                "post_season": self._extract_month(data.get("group_date_post")),
+                "time_delta_bin": self._extract_time_delta_bin(
+                    data.get("group_date_pre"), data.get("group_date_post"),
+                ),
+                "processing_year": self._decode_year_processing(data.get("group_date_pre")),
+            }
+            return image_pre, image_post, selected_band_names, film_values
+
+        image_pre = torch.cat([common_mask_tensor, image_pre], dim=0)
+        image_post = torch.cat([common_mask_tensor, image_post], dim=0)
+        image_pre, image_post = self.add_pass_and_beam_in_out_bands(image_pre, image_post, data)
+        band_names = ['COMMON_MASK'] + selected_band_names + [SATELLITE_PASS_BAND_NAME, BEAM_BAND_NAME]
+        return image_pre, image_post, band_names, {}
+
+    @staticmethod
+    def _build_output_profile(reference_path: str, band_count: int) -> dict:
+        """Build the GeoTIFF profile for output predictions from a reference raster."""
+        with rio.open(reference_path) as src:
+            profile = src.profile
+        profile['count'] = band_count
+        raw_crs = profile.get('crs')
+        if raw_crs is not None:
+            epsg = raw_crs.to_epsg()
+            profile['crs'] = f"EPSG:{epsg}" if epsg else "EPSG:3979"
+        else:
+            profile['crs'] = "EPSG:3979"
+        profile['transform'] = list(profile['transform'])
+        if profile.get('nodata') is None:
+            profile['nodata'] = float(NO_DATA)
+        return profile
 
     # ------------------------------------------------------------------
     # Metadata hooks
@@ -513,21 +526,20 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
     def _normalize_and_standardize(
         self, image_post: Tensor, image_pre: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Z-score standardise pre/post images using the (optionally band-subset) stats."""
         bands = getattr(self, "bands", None)
 
-        def _t(key):
+        def _stat(key: str) -> Tensor:
             vals = self.norm_stats[key]
             if bands is not None:
                 # Channel 0 is always BITMASK_CROPPED (index 0); then the selected bands.
                 vals = [vals[0]] + [vals[b] for b in bands]
-            return torch.tensor(
-                vals, dtype=torch.float32, device=image_pre.device,
-            ).view(-1, 1, 1)
+            return torch.tensor(vals, dtype=torch.float32, device=image_pre.device).view(-1, 1, 1)
 
-        mean, std, mins, maxs = _t("mean"), _t("std"), _t("min"), _t("max")
-        image_pre  = (image_pre  - mean) / (std + 1e-8)
+        mean, std, mins, maxs = _stat("mean"), _stat("std"), _stat("min"), _stat("max")
+        image_pre = (image_pre - mean) / (std + 1e-8)
         image_post = (image_post - mean) / (std + 1e-8)
-        return image_pre, image_post, mean, std, mins, maxs
+        return image_post, image_pre, mean, std, mins, maxs
 
     def _get_bands_to_load(self) -> list[int] | None:
         return getattr(self, "bands", None)
@@ -535,11 +547,12 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
     def add_pass_and_beam_in_out_bands(
         self, image_pre: Tensor, image_post: Tensor, data: dict,
     ) -> tuple[Tensor, Tensor]:
-        H, W = image_pre.shape[1], image_pre.shape[2]
-        sat = torch.full((1, H, W), data["sat_pass"].value, dtype=image_pre.dtype)
-        bm  = torch.full((1, H, W), data["beam"].value,     dtype=image_pre.dtype)
-        image_pre  = torch.cat([image_pre,  sat, bm], dim=0)
-        image_post = torch.cat([image_post, sat, bm], dim=0)
+        """Append the satellite-pass and beam values as two constant-value bands."""
+        height, width = image_pre.shape[1], image_pre.shape[2]
+        sat = torch.full((1, height, width), data["sat_pass"].value, dtype=image_pre.dtype)
+        beam = torch.full((1, height, width), data["beam"].value, dtype=image_pre.dtype)
+        image_pre = torch.cat([image_pre, sat, beam], dim=0)
+        image_post = torch.cat([image_post, sat, beam], dim=0)
         return image_pre, image_post
 
     # ------------------------------------------------------------------
@@ -560,15 +573,15 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
         if pre is None or post is None:
             return len(TIME_DELTA_BINS)
         try:
-            from datetime import datetime
-            def _p(d):
+            def _parse(d: str) -> datetime:
                 return datetime.strptime(str(d).replace("-", ""), "%Y%m%d")
-            delta = abs((_p(post) - _p(pre)).days)
+
+            delta = abs((_parse(post) - _parse(pre)).days)
             for i, boundary in enumerate(TIME_DELTA_BINS):
                 if delta < boundary:
                     return i
             return len(TIME_DELTA_BINS)
-        except Exception:
+        except (ValueError, TypeError):
             return len(TIME_DELTA_BINS)
 
     @staticmethod
@@ -585,7 +598,6 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
         if date_str is None:
             return 0
         try:
-            from datetime import datetime
             year = datetime.strptime(str(date_str).replace("-", ""), "%Y%m%d").year
             return 1 if year == 2023 else 2
         except (ValueError, IndexError):

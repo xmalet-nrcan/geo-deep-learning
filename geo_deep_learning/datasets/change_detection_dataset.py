@@ -1,25 +1,16 @@
 import logging
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
 import rasterio as rio
 import torch
-from numpy import ndarray, dtype
-from pytorch_lightning.utilities import rank_zero_only
 from torch import Tensor
 
 from geo_deep_learning.datasets.csv_dataset import CSVDataset
 from geo_deep_learning.utils.tensors import normalization, standardization
 
 logger = logging.getLogger(__name__)
-
-
-@rank_zero_only
-def log_dataset(split: str, patch_count: int) -> None:
-    """Log dataset."""
-    logger.info("Created dataset for %s split with %s patches", split, patch_count)
 
 
 class ChangeDetectionDataset(CSVDataset):
@@ -60,17 +51,12 @@ class ChangeDetectionDataset(CSVDataset):
                  patches_root_folder: str,
                  split_or_csv_file_name: str = None,
                  norm_stats: dict[str, list[float]] | None = None) -> None:
+        super().__init__(csv_root_folder, patches_root_folder, split_or_csv_file_name, norm_stats)
 
-        super().__init__(csv_root_folder
-                         , patches_root_folder
-                         , split_or_csv_file_name
-                         , norm_stats)
-
-    def _get_csv_path(self):
-        if self.split.endswith(".csv"):
-            csv_path = Path(self.csv_root_folder) / self.split
-        else:
-            csv_path = Path(self.csv_root_folder) / f"{self.split}.csv"
+    def _get_csv_path(self) -> Path:
+        """Resolve the CSV path, accepting either a split name or a file name."""
+        file_name = self.split if self.split.endswith(".csv") else f"{self.split}.csv"
+        csv_path = Path(self.csv_root_folder) / file_name
         if not csv_path.exists():
             msg = f"CSV file {csv_path} not found."
             raise FileNotFoundError(msg)
@@ -111,7 +97,7 @@ class ChangeDetectionDataset(CSVDataset):
             index (int): index of the sample to return
 
         Returns:
-            Tuple[Tensor, Tensor]: image and mask tensors
+            dict[str, Tensor]: image, mask and associated metadata tensors
 
         """
         image_pre, image_post, common_mask_tensor, image_pre_name, image_post_name = self._load_image(index)
@@ -123,16 +109,16 @@ class ChangeDetectionDataset(CSVDataset):
 
         image_post, image_pre, mean, std = self._normalize_and_standardize(image_post, image_pre)
 
-        sample = {"image": image_post,
-                  "image_pre": image_pre,
-                  "mask": mask,
-                  "image_pre_name": image_pre_name,
-                  "image_name": image_post_name,
-                  "mask_name": mask_name,
-                  "mean": mean,
-                  "std": std}
-
-        return sample
+        return {
+            "image": image_post,
+            "image_pre": image_pre,
+            "mask": mask,
+            "image_pre_name": image_pre_name,
+            "image_name": image_post_name,
+            "mask_name": mask_name,
+            "mean": mean,
+            "std": std,
+        }
 
     def _normalize_and_standardize(self, image_post: Tensor, image_pre: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         image_pre, image_post = normalization(image_pre), normalization(image_post)
@@ -148,8 +134,11 @@ class ChangeDetectionDataset(CSVDataset):
     # ----------------------------------------------------------------------
 
     def _load_image(self, index: int) -> tuple[Tensor, Tensor, Tensor, str, str]:
-        """Load pre-post images.
-        return : Tensor pre, Tensor post, str pre_name, str post_name
+        """Load pre/post images and compute their common validity mask.
+
+        Returns:
+            image_pre, image_post, common_mask (``[1, H, W]`` bool), pre_name, post_name
+
         """
         data_at_index = self.files[index]
         image_pre = data_at_index["image_pre"]
@@ -160,36 +149,34 @@ class ChangeDetectionDataset(CSVDataset):
         image_pre_tensor, pre_data_mask = self.convert_tif_to_tensor(image_pre)
         image_post_tensor, post_data_mask = self.convert_tif_to_tensor(image_post)
 
-        # Common mask = areas where both masks == 1
         if pre_data_mask is not None and post_data_mask is not None:
-            common_mask_tensor = (pre_data_mask == 1) & (post_data_mask == 1)
-            common_mask_tensor = torch.from_numpy(common_mask_tensor).unsqueeze(0)
+            # Common mask = areas where both the pre and post data masks are valid.
+            common_mask = (pre_data_mask == 1) & (post_data_mask == 1)
+            common_mask_tensor = torch.from_numpy(common_mask).unsqueeze(0)
         else:
-            # Pas de masque → on considère tous les pixels comme valides
-            H, W = image_pre_tensor.shape[1], image_pre_tensor.shape[2]
-            common_mask_tensor = torch.ones((1, H, W), dtype=torch.bool)  # déjà (1, H, W)
-
-
+            # No data mask available: consider every pixel valid.
+            height, width = image_pre_tensor.shape[1], image_pre_tensor.shape[2]
+            common_mask_tensor = torch.ones((1, height, width), dtype=torch.bool)
 
         return image_pre_tensor, image_post_tensor, common_mask_tensor, image_pre_name, image_post_name
 
     @staticmethod
-    def _apply_common_mask_to_tensor(common_mask_tensor: Tensor, in_image_tensor: Tensor, fill_value=np.nan) -> Tensor:
-        in_image_tensor = in_image_tensor.masked_fill_(~common_mask_tensor, fill_value)
-        return in_image_tensor
+    def _apply_common_mask_to_tensor(
+        common_mask_tensor: Tensor, in_image_tensor: Tensor, fill_value: float = np.nan,
+    ) -> Tensor:
+        """Fill pixels outside the common validity mask with *fill_value* (in place)."""
+        return in_image_tensor.masked_fill_(~common_mask_tensor, fill_value)
 
     @staticmethod
-    def _read_image_and_get_no_data(path: str, in_dtype:np.dtype):
-        """Read image and return array and no data mask (0 = no data; 1 = data).
-        """
-        with rio.open(path, ) as src:
-            arr = src.read().astype(in_dtype)  # shape (C,H,W)
+    def _read_image_and_get_no_data(path: str, in_dtype: np.dtype) -> tuple[np.ndarray, np.ndarray]:
+        """Read image and return array and no data mask (0 = no data; 1 = data)."""
+        with rio.open(path) as src:
+            arr = src.read().astype(in_dtype)  # shape (C, H, W)
             mask = ~np.isnan(arr[0, :, :])
-
         return arr, mask
 
-    def convert_tif_to_tensor(self, in_image: str, in_dtype=np.int32) -> tuple[Tensor, bool | ndarray[tuple[Any, ...], dtype[Any]] | Any]:
-
+    def convert_tif_to_tensor(self, in_image: str, in_dtype: np.dtype = np.int32) -> tuple[Tensor, np.ndarray]:
+        """Read a GeoTIFF and convert it to a float tensor, along with its no-data mask."""
         img_array, no_data_mask = self._read_image_and_get_no_data(in_image, in_dtype=in_dtype)
         img_as_tensor = torch.from_numpy(img_array).float()
         return img_as_tensor, no_data_mask
