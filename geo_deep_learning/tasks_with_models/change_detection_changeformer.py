@@ -939,6 +939,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             pre_season=batch.get("pre_season"),
             post_season=batch.get("post_season"),
             time_delta=batch.get("time_delta_bin"),
+            processing_year=batch.get("processing_year"),
         )
 
         # Deep supervision: raw_output is a list during training, single Tensor otherwise
@@ -1278,6 +1279,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 pre_season=batch.get("pre_season"),
                 post_season=batch.get("post_season"),
                 time_delta=batch.get("time_delta_bin"),
+                processing_year=batch.get("processing_year"),
             )
 
         # Convertir en probabilités et en classes prédites

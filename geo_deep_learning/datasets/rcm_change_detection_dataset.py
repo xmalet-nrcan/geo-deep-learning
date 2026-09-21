@@ -573,10 +573,20 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
 
     @staticmethod
     def _decode_year_processing(date_str: str | None) -> int:
+        """Encode the acquisition year as a FiLM category index.
+
+        Must match ``film_metadata_fields["processing_year"] = 3`` in
+        ``ChangeDetectionChangeFormer.configure_model``:
+            0 = undefined, 1 = year 2023, 2 = any other year.
+        Returning the raw calendar year (e.g. 2023, 2025) here would index
+        out of bounds in ``nn.Embedding(3, ...)`` once this value is fed to
+        the FiLM conditioner.
+        """
         if date_str is None:
             return 0
         try:
             from datetime import datetime
-            return datetime.strptime(str(date_str).replace("-", ""), "%Y%m%d").year
+            year = datetime.strptime(str(date_str).replace("-", ""), "%Y%m%d").year
+            return 1 if year == 2023 else 2
         except (ValueError, IndexError):
             return 0
