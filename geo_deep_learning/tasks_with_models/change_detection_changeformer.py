@@ -53,6 +53,15 @@ IGNORE_MASK_INDEX = 255
 # Intermediate heads get decreasing weight; the final head gets the most.
 DEEP_SUPERVISION_WEIGHTS = [0.1, 0.1, 0.15, 0.2, 1.0]
 
+# Default ascending probability thresholds defining exclusive confidence bands
+# for probability-zone vectorization (see ``predict_step``/``_new_manifest``).
+# Pixels below the first threshold (0.3) are left unclassified/unzoned.
+DEFAULT_PROBABILITY_ZONE_THRESHOLDS = (0.3, 0.5, 0.7, 0.8, 0.9, 1.0)
+
+# Sentinel written to probability GeoTIFFs for invalid/masked pixels.
+# Probabilities live in [0, 1], so a negative value is an unambiguous nodata.
+PROBABILITY_NODATA = -1.0
+
 # Only visualize samples with at least this fraction of valid pixels labeled
 # "burned" (class 1) — keeps validation/test figures informative.
 MIN_BURNED_RATIO_FOR_VISUALIZATION = 0.10
@@ -132,6 +141,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             use_signed_difference: bool = False,
             signed_difference_channels: int | None = None,
             signed_difference_normalize: bool = False,
+            probability_zone_thresholds: list[float] | None = None,
+            probability_zone_class_index: int = -1,
             **kwargs: object,  # noqa: ARG002
     ) -> None:
         """Initialize the model.
@@ -167,6 +178,17 @@ class ChangeDetectionChangeFormer(LightningModule):
                 difference (in_channels) is appended.
             signed_difference_normalize: If True, bound the signed-difference
                 channels to [-1, 1] via tanh.
+            probability_zone_thresholds: Ascending probability thresholds (in
+                ``[0, 1]``) defining the exclusive confidence bands written to the
+                prediction manifest for downstream probability-zone vectorization
+                (see scanfire's ``SegmentationIngestionService``). Pixels whose
+                probability falls below the first threshold are considered
+                unclassified and excluded from zoning. Defaults to
+                :data:`DEFAULT_PROBABILITY_ZONE_THRESHOLDS`.
+            probability_zone_class_index: Channel index into the per-class softmax
+                probabilities used as the "positive" (e.g. burn/change) class
+                probability surface for zoning. Defaults to ``-1`` (last class),
+                which is correct for the standard binary no-change/change setup.
         """
         super().__init__()
         self.save_hyperparameters()
@@ -211,6 +233,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         self.use_signed_difference = use_signed_difference
         self.signed_difference_channels = signed_difference_channels
         self.signed_difference_normalize = signed_difference_normalize
+        self.probability_zone_thresholds = (
+            list(probability_zone_thresholds)
+            if probability_zone_thresholds
+            else list(DEFAULT_PROBABILITY_ZONE_THRESHOLDS)
+        )
+        self.probability_zone_class_index = probability_zone_class_index
 
         self.changed_num_classes = num_classes + 1 if num_classes == 1 else num_classes
         self.labels = (
@@ -1003,6 +1031,29 @@ class ChangeDetectionChangeFormer(LightningModule):
         return torch.nan_to_num(logits, nan=NAN_LOGIT_REPLACEMENT, posinf=1.0, neginf=0.0)
 
     @staticmethod
+    def _buffer_valid_region(
+            buf: int, tr: int, tc: int, tile_h: int, tile_w: int, oh: int, ow: int,
+    ) -> tuple[int, int, int, int]:
+        """Valid (non-buffer) region of one tile, in tile-local pixel coordinates.
+
+        Returns ``(row_start, row_end, col_start, col_end)`` bounding the
+        pixels of a ``tile_h x tile_w`` tile — cropped from an expanded
+        ``(cell + 2*buf)`` image at offset ``(tr, tc)`` — that fall inside
+        the true, un-buffered ``oh x ow`` cell. Either span collapses
+        (``*_end <= *_start``) when the tile lies entirely within the
+        neighbour-context buffer ring, i.e. it owns zero true-cell pixels.
+
+        The non-tiled case is the special case ``tr = tc = 0`` and
+        ``tile_h, tile_w = oh + 2*buf, ow + 2*buf`` (the whole buffered
+        image treated as a single "tile").
+        """
+        row_start = max(0, buf - tr)
+        row_end = min(tile_h, buf + oh - tr)
+        col_start = max(0, buf - tc)
+        col_end = min(tile_w, buf + ow - tc)
+        return row_start, row_end, col_start, col_end
+
+    @staticmethod
     def _mask_buffer_zone(
             batch: dict[str, Any],
             common_data_mask: Tensor,
@@ -1050,11 +1101,9 @@ class ChangeDetectionChangeFormer(LightningModule):
                 oh = ChangeDetectionChangeFormer._scalar_at(orig_h_batch, i)
                 ow = ChangeDetectionChangeFormer._scalar_at(orig_w_batch, i)
 
-                # Valid rows/cols in tile-local coordinates
-                vr_start = max(0, buf - tr)
-                vr_end = min(tile_h, buf + oh - tr)
-                vc_start = max(0, buf - tc)
-                vc_end = min(tile_w, buf + ow - tc)
+                vr_start, vr_end, vc_start, vc_end = ChangeDetectionChangeFormer._buffer_valid_region(
+                    buf, tr, tc, tile_h, tile_w, oh, ow,
+                )
 
                 if vr_start > 0:
                     common_data_mask[i, :, :vr_start, :] = 0.0
@@ -1434,6 +1483,11 @@ class ChangeDetectionChangeFormer(LightningModule):
         probs = torch.softmax(logits, dim=1)  # [B, C, H, W]
         y_pred = torch.argmax(probs, dim=1)  # [B, H, W]
 
+        # Positive-class probability surface, used downstream to vectorize
+        # probability zones (exclusive confidence bands) rather than a single
+        # binary mask — see ``probability_zone_thresholds``/``_new_manifest``.
+        y_prob = probs[:, self.probability_zone_class_index, :, :].clone()
+
         # --- Exclure les pixels invalides et l'eau avec NO_DATA (32767) ---
         # ``mask-common`` décrit la validité des acquisitions SAR, mais ne
         # contient pas nécessairement l'eau. Apply both masks even when the
@@ -1446,10 +1500,12 @@ class ChangeDetectionChangeFormer(LightningModule):
             water_mask = batch["water_mask"]  # [B, 1, H, W]
             invalid_mask |= water_mask.squeeze(1) > 0  # eau = valeur > 0
         y_pred = y_pred.masked_fill(invalid_mask, NO_DATA)
+        y_prob = y_prob.masked_fill(invalid_mask, PROBABILITY_NODATA)
 
         # Retourner un dict avec tout ce qu'il faut pour sauvegarder après
         result = {
             "predictions": y_pred,  # [B, H, W] classes entières
+            "probability": y_prob,  # [B, H, W] proba classe positive, pour zonage
             "probabilities": probs,  # [B, C, H, W] probabilités par classe
             "logits": logits,  # [B, C, H, W] logits bruts
             "pre_post_name": batch["pre_post_name"],
@@ -1481,7 +1537,10 @@ class ChangeDetectionChangeFormer(LightningModule):
                     'tile_row_start',
                     'tile_col_start',
                     'source_height',
-                    'source_width'):
+                    'source_width',
+                    'buffer_size',
+                    'cell_orig_height',
+                    'cell_orig_width'):
             if key in batch:
                 result[key] = batch[key]
 
@@ -1566,6 +1625,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             "model_name": self.change_detection_model,
             "checkpoint": str(self.weights_from_checkpoint_path or ""),
             "base_dir": str(base_dir),
+            # Thresholds used to define exclusive probability-zone bands, consumed
+            # by scanfire's ``vectorize_probability_zones``/``SegmentationIngestionService``
+            # when a ``probability_tif_path`` is present in a prediction entry.
+            "probability_thresholds": self.probability_zone_thresholds,
             "predictions": [],
         }
         if overlap_blended:
@@ -1603,6 +1666,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             group_tile_paths: dict[tuple[str, ...], list[Path]],
             event_all_tile_paths: dict[str, list[Path]],
             overlap_blended: bool = False,
+            prob_np: np.ndarray | None = None,
     ) -> Path:
         """Write one prediction GeoTIFF, register it for merging, and append its manifest entry.
 
@@ -1612,6 +1676,12 @@ class ChangeDetectionChangeFormer(LightningModule):
         (~100 lines) — including a less defensive affine-transform parser
         in the per-tile path (see
         :func:`geo_deep_learning.utils.geotiff_merge.transform_coeffs`).
+
+        When ``prob_np`` is provided, a sibling single-band ``float32``
+        probability GeoTIFF (positive/burn-class probability, nodata
+        :data:`PROBABILITY_NODATA`) is written next to the class raster and
+        referenced in the manifest entry as ``probability_tif_path``, for
+        downstream probability-zone vectorization.
         """
         event_date_dir = base_dir / event_id / predict_date
         tile_dir = event_date_dir / cell_id
@@ -1624,6 +1694,14 @@ class ChangeDetectionChangeFormer(LightningModule):
             dst.write(pred_np[np.newaxis, :, :])
 
         logger.info("Saved prediction to %s (%dx%d)", out_path, pred_np.shape[1], pred_np.shape[0])
+
+        prob_path: Path | None = None
+        if prob_np is not None:
+            prob_path = out_path.with_name(f"{out_path.stem}_prob{out_path.suffix}")
+            prob_profile = {**profile, "dtype": "float32", "nodata": PROBABILITY_NODATA, "count": 1}
+            with rio.open(str(prob_path), "w", **prob_profile) as dst:
+                dst.write(prob_np[np.newaxis, :, :].astype(np.float32))
+            logger.info("Saved probability raster to %s", prob_path)
 
         event_date_key = str(event_date_dir)
         merge_key = group_merge_key(
@@ -1649,6 +1727,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             "output_name": out_name,
             "tif_path": str(out_path),
         }
+        if prob_path is not None:
+            entry["probability_tif_path"] = str(prob_path)
         if overlap_blended:
             entry["overlap_blended"] = True
         manifest["predictions"].append(entry)
@@ -1694,6 +1774,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 group_tile_paths=group_tile_paths,
                 event_all_tile_paths=event_all_tile_paths,
                 overlap_blended=True,
+                prob_np=info.get("probability"),
             )
 
         self._write_manifest_file(manifest, base_dir)
@@ -1732,6 +1813,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             getattr(dm, "tile_size", None),
             getattr(dm, "tile_stride", None),
             no_data_value=NO_DATA,
+            positive_class_index=self.probability_zone_class_index,
         )
         if used_blending and assembled:
             logger.info("Using overlap blending for %d source images.", len(assembled))
@@ -1753,6 +1835,53 @@ class ChangeDetectionChangeFormer(LightningModule):
         merge_predictions(group_tile_paths, event_all_tile_paths)
         logger.info("All predictions saved to %s", base_dir)
 
+    def _crop_prediction_to_cell(
+            self,
+            pred_np: np.ndarray,
+            transform: Affine,
+            batch_result: dict[str, Any],
+            tile_h: int,
+            tile_w: int,
+            index: int,
+    ) -> tuple[np.ndarray | None, Affine, int, int]:
+        """Crop the neighbour-context buffer ring off a saved prediction tile.
+
+        Mirrors the training-time masking in :meth:`_mask_buffer_zone`: without
+        this, pixels computed from a *neighbouring* cell's territory (added
+        only to give the model spatial context — see ``predict_overlap_buffer``)
+        leaked into the saved GeoTIFF, overlapping the neighbour cell's own,
+        independently-produced prediction once everything is mosaicked into
+        ``merged.tif``. No-op when buffer metadata is absent (unbuffered runs).
+
+        Returns ``(None, transform, 0, 0)`` when the tile lies entirely inside
+        the buffer ring (owns zero true-cell pixels) — the caller should then
+        skip writing that tile.
+        """
+        buf_raw = batch_result.get("buffer_size")
+        cell_h_raw = batch_result.get("cell_orig_height")
+        cell_w_raw = batch_result.get("cell_orig_width")
+        if buf_raw is None or cell_h_raw is None or cell_w_raw is None:
+            return pred_np, transform, tile_h, tile_w
+
+        buf = self._scalar_at(buf_raw, index)
+        if buf <= 0:
+            return pred_np, transform, tile_h, tile_w
+
+        oh = self._scalar_at(cell_h_raw, index)
+        ow = self._scalar_at(cell_w_raw, index)
+        tile_row_starts = batch_result.get("tile_row_start")
+        tile_col_starts = batch_result.get("tile_col_start")
+        tr = self._scalar_at(tile_row_starts, index) if tile_row_starts is not None else 0
+        tc = self._scalar_at(tile_col_starts, index) if tile_col_starts is not None else 0
+
+        row_start, row_end, col_start, col_end = self._buffer_valid_region(buf, tr, tc, tile_h, tile_w, oh, ow)
+        if row_end <= row_start or col_end <= col_start:
+            return None, transform, 0, 0
+
+        cropped = pred_np[row_start:row_end, col_start:col_end]
+        shifted = transform * Affine.translation(col_start, row_start)
+        return cropped, shifted, row_end - row_start, col_end - col_start
+
     def _write_prediction_batch(  # noqa: PLR0913
             self,
             batch_result: dict[str, Any],
@@ -1764,6 +1893,7 @@ class ChangeDetectionChangeFormer(LightningModule):
     ) -> None:
         """Write every sample of one predict batch (per-tile, non-blended path)."""
         y_pred = batch_result["predictions"]  # [B, H_padded, W_padded]
+        y_prob = batch_result.get("probability")  # [B, H_padded, W_padded] float32 ou None
         names = batch_result["pre_post_name"]
         batch_cell_id = batch_result["cell_id"]
         batch_profiles = batch_result["profile"]
@@ -1802,15 +1932,32 @@ class ChangeDetectionChangeFormer(LightningModule):
             crs_val = batch_profiles["crs"][i] if isinstance(batch_profiles["crs"], (list, tuple)) else batch_profiles["crs"]
             coeffs = transform_coeffs(batch_profiles["transform"], i)
             logger.debug("Transform coefficients: %s", coeffs)
+
+            # --- Retirer l'anneau de contexte voisin (predict_overlap_buffer) ---
+            pred_np, transform, out_h, out_w = self._crop_prediction_to_cell(
+                pred_np, Affine(*coeffs), batch_result, orig_h, orig_w, i,
+            )
+            if pred_np is None:
+                logger.debug("Tile %s owns no true-cell pixels (fully inside buffer ring); skipping.", sample_name)
+                continue
+
+            # --- Same crop applied to the probability surface, if available ---
+            prob_np = None
+            if y_prob is not None:
+                raw_prob_np = y_prob[i, :orig_h, :orig_w].cpu().numpy().astype(np.float32)
+                prob_np, _, _, _ = self._crop_prediction_to_cell(
+                    raw_prob_np, Affine(*coeffs), batch_result, orig_h, orig_w, i,
+                )
+
             profile_i = {
                 "driver": "GTiff",
                 "dtype": "uint16",
                 "count": 1,
                 "nodata": 32767,
-                "height": orig_h,  # ← dimensions ORIGINALES, pas paddées
-                "width": orig_w,  # ← dimensions ORIGINALES, pas paddées
+                "height": out_h,  # ← dimensions ORIGINALES, pas paddées
+                "width": out_w,  # ← dimensions ORIGINALES, pas paddées
                 "crs": parse_crs(crs_val),
-                "transform": Affine(*coeffs),
+                "transform": transform,
             }
 
             self._write_single_geotiff_prediction(
@@ -1834,5 +1981,6 @@ class ChangeDetectionChangeFormer(LightningModule):
                 manifest=manifest,
                 group_tile_paths=group_tile_paths,
                 event_all_tile_paths=event_all_tile_paths,
+                prob_np=prob_np,
             )
 

@@ -111,7 +111,8 @@ def _collect_tile_info(batch_result: dict[str, Any], index: int) -> dict[str, An
         v = batch_result[dim_key]
         tile_info[dim_key] = v[index].item() if isinstance(v, torch.Tensor) else int(v[index])
 
-    for key in ("tile_row_start", "tile_col_start", "source_height", "source_width"):
+    for key in ("tile_row_start", "tile_col_start", "source_height", "source_width",
+                "buffer_size", "cell_orig_height", "cell_orig_width"):
         if key in batch_result:
             v = batch_result[key]
             tile_info[key] = v[index].item() if isinstance(v, torch.Tensor) else int(v[index])
@@ -151,6 +152,7 @@ def _blend_tile_group(
     blend_window_cache: dict[tuple[int, int], np.ndarray],
     *,
     no_data_value: int,
+    positive_class_index: int = -1,
 ) -> dict[str, Any]:
     """Blend one group of overlapping tiles into a single source-level prediction."""
     source_h = tiles[0].get("source_height", tiles[0]["original_height"])
@@ -197,12 +199,35 @@ def _blend_tile_group(
     pred[invalid] = no_data_value
 
     first_tile = tiles[0]
+    profile = build_source_profile(first_tile, source_h, source_w)
+    out_h, out_w = source_h, source_w
+
+    # --- Crop off the neighbour-context buffer ring (predict_overlap_buffer) ---
+    # Without this, blended predictions still cover the expanded
+    # (cell + 2*buf) extent, overlapping the neighbouring cells' own
+    # independently-produced rasters once mosaicked into ``merged.tif``.
+    # No-op when buffer metadata is absent (unbuffered runs).
+    buf = first_tile.get("buffer_size", 0)
+    cell_h = first_tile.get("cell_orig_height")
+    cell_w = first_tile.get("cell_orig_width")
+    if buf and cell_h and cell_w:
+        pred = pred[buf:buf + cell_h, buf:buf + cell_w]
+        blended_probs = blended_probs[:, buf:buf + cell_h, buf:buf + cell_w]
+        profile["transform"] = profile["transform"] * Affine.translation(buf, buf)
+        profile["height"] = cell_h
+        profile["width"] = cell_w
+        out_h, out_w = cell_h, cell_w
+
     return {
         "predictions": pred,
         "probabilities": blended_probs,
-        "source_height": source_h,
-        "source_width": source_w,
-        "profile": build_source_profile(first_tile, source_h, source_w),
+        # Positive/burn-class probability surface (already buffer-cropped
+        # above alongside ``blended_probs``), used downstream for
+        # probability-zone vectorization — see ``probability_zone_thresholds``.
+        "probability": blended_probs[positive_class_index],
+        "source_height": out_h,
+        "source_width": out_w,
+        "profile": profile,
         "cell_id": first_tile.get("cell_id", "unknown"),
         "pair_id": first_tile.get("pair_id"),
         "event_id": first_tile.get("event_id", first_tile.get("db_nbac_fire_id", "unknown_event")),
@@ -224,6 +249,7 @@ def reassemble_overlapping_tiles(
     tile_stride: tuple[int, int] | None,
     *,
     no_data_value: int,
+    positive_class_index: int = -1,
 ) -> tuple[dict[str, dict[str, Any]], bool]:
     """Reassemble overlapping tiles into source-level predictions with cosine blending.
 
@@ -237,6 +263,10 @@ def reassemble_overlapping_tiles(
         tile_size: ``(tile_h, tile_w)`` used by the datamodule, or ``None``.
         tile_stride: ``(stride_h, stride_w)`` used by the datamodule, or ``None``.
         no_data_value: Value written to pixels invalid in every contributing tile.
+        positive_class_index: Channel index of the "positive" (e.g. burn/change)
+            class within the blended per-class probabilities, exposed on each
+            assembled result as ``"probability"`` for probability-zone
+            vectorization downstream.
 
     Returns:
         Tuple of:
@@ -280,7 +310,8 @@ def reassemble_overlapping_tiles(
             continue
 
         assembled_source = _blend_tile_group(
-            tiles, overlap_h, overlap_w, blend_window_cache, no_data_value=no_data_value,
+            tiles, overlap_h, overlap_w, blend_window_cache,
+            no_data_value=no_data_value, positive_class_index=positive_class_index,
         )
         assembled_source["pre_post_name"] = source_key
         assembled[source_key] = assembled_source
