@@ -412,16 +412,24 @@ class RcmChangeDetectionDataModule(LightningDataModule):
                 split_name, sorted(fire_ids),
             )
 
-            # Save CSV
+            # Save CSV (best-effort diagnostic only — must never crash training,
+            # e.g. if csv_root_folder is a shared/read-restricted mount owned
+            # by a different uid than the container's).
             csv_path = Path(self.csv_root_folder) / f"split_contents_{split_name}.csv"
             fieldnames = ["split", "db_nbac_fire_id", "group_id_pre", "group_id_post",
                           "cell_id", "beam", "sat_pass"]
-            with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(rows)
-
-            logger.info("  Saved split details to %s", csv_path.resolve())
+            try:
+                with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(rows)
+            except OSError as exc:
+                logger.warning(
+                    "  Could not save split details to %s (%s) — continuing without it.",
+                    csv_path, exc,
+                )
+            else:
+                logger.info("  Saved split details to %s", csv_path.resolve())
 
     def train_dataloader(self) -> DataLoader[Any]:
         """Dataloader for training."""

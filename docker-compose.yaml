@@ -12,8 +12,8 @@ x-gpu-service: &gpu-defaults
     - CLI_COMMAND=fit
   volumes: &train-volumes
     - "/mnt/geospatial/projet_RCM_scanfire:/mnt/geospatial/projet_RCM_scanfire:rw"
-    - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/models_checkpoints:rw"
-    - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
+    - "./models_checkpoints:/app/models_checkpoints:rw"
+    - "./lightning_logs:/app/lightning_logs:rw"
   entrypoint: &train-entrypoint >
     sh -c '
       echo "Running in mode $$CLI_COMMAND";
@@ -39,8 +39,8 @@ services:
       # TRAIN_CONFIG lets scripts (e.g. scripts/run_band_sweep.sh) swap the active
       # config without editing this file; defaults to the usual prod config.
       - "${TRAIN_CONFIG:-/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection_changestar2_cosine_restarts.yaml}:/app/configs/model_conf.yaml"
-      - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/models_checkpoints:rw"
-      - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
+      - "./models_checkpoints:/app/models_checkpoints:rw"
+      - "./lightning_logs:/app/lightning_logs:rw"
 
   # === Training: ChangeStar2 ===
   geo-deep-learning-cs2:
@@ -49,8 +49,8 @@ services:
     volumes:
       - "/mnt/geospatial/projet_RCM_scanfire:/mnt/geospatial/projet_RCM_scanfire:rw"
       - "/home/xmalet/projects/geo-deep-learning/configs/rcm_change_detection_changestar2.yaml:/app/configs/model_conf.yaml"
-      - "/home/xmalet/projects/geo-deep-learning/models_checkpoints:/app/models_checkpoints:rw"
-      - "/home/xmalet/projects/geo-deep-learning/lightning_logs:/app/lightning_logs:rw"
+      - "./models_checkpoints:/app/models_checkpoints:rw"
+      - "./lightning_logs:/app/lightning_logs:rw"
 
   # === Event Detection Orchestrator ===
   event_detection_orchestrator:
