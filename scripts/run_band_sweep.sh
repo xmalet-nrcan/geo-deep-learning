@@ -63,7 +63,7 @@ for cfg in "${CONFIGS[@]}"; do
   compose rm -f -s "$SERVICE" >/dev/null 2>&1 || true
 
   # Foreground run: blocks until the one-shot fit+test entrypoint exits.
-  if ! compose up --build --abort-on-container-exit "$SERVICE" 2>&1 | tee "$log_file"; then
+  if ! compose up -d --build --abort-on-container-exit "$SERVICE" 2>&1 | tee "$log_file"; then
     echo "!! Training failed for $cfg — see $log_file" >&2
     failures+=("$cfg")
   fi
