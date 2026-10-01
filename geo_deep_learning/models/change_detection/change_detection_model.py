@@ -1,4 +1,5 @@
 """Change Detection Model segmentation model."""
+import logging
 from typing import Any, Callable
 
 import torch
@@ -18,6 +19,8 @@ from geo_deep_learning.models.change_detection.sub_models.changestar2 import (
     ChangeStar2Base, ChangeStar2Large, ChangeStar2Small,
 )
 from geo_deep_learning.models.segmentation.base import BaseSegmentationModel
+
+logger = logging.getLogger(__name__)
 
 # All currently supported backbones share the same default construction kwargs.
 _DEFAULT_BACKBONE_KWARGS: dict[str, Any] = {"decoder_softmax": False, "embed_dim": 256}
@@ -115,6 +118,10 @@ class ChangeDetectionModel(BaseSegmentationModel):
 
         self.change_detection_model = self._build_backbone(
             change_detection_model, encoder_in_channels, out_channels, **kwargs,
+        )
+        logger.info(
+            "Using change_detection_model=%s (in_channels=%d, encoder_in_channels=%d, out_channels=%d)",
+            change_detection_model, in_channels, encoder_in_channels, out_channels,
         )
 
         # FiLM conditioner for acquisition metadata

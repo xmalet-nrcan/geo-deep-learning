@@ -24,7 +24,10 @@ SERVICE ?= $(SERVICE_DEFAULT)
 TRAIN_CMD ?= fit
 
 .PHONY: help build up stop restart ps status logs logs-follow logs-service logs-follow-service \
-        train train-cs2 orchestrator-start down cleanup
+        train train-cs2 orchestrator-start down cleanup extract-metrics sweep-bands
+
+# Output CSV for extract-metrics (one row appended per training run)
+METRICS_CSV ?= results/test_metrics.csv
 
 help:
 	@echo "Available targets:"
@@ -38,6 +41,8 @@ help:
 	@echo "  logs-service        Show logs for one service (SERVICE=...)"
 	@echo "  logs-follow-service Follow logs for one service (SERVICE=...)"
 	@echo "  train               Run default training service once (SERVICE_DEFAULT)"
+	@echo "  extract-metrics     Parse SERVICE logs (test metrics + best ckpt) into METRICS_CSV"
+	@echo "  sweep-bands         Train sequentially on all 5 band-combo configs, log results to CSV"
 	@echo "  orchestrator-start  Start orchestrator service in detached mode"
 	@echo "  down                Stop and remove containers/networks"
 	@echo "  cleanup             down + remove orphan containers and volumes"
@@ -48,6 +53,7 @@ help:
 	@echo "  SERVICE_ORCH=$(SERVICE_ORCH)"
 	@echo "  SERVICE=$(SERVICE)"
 	@echo "  TRAIN_CMD=$(TRAIN_CMD)"
+	@echo "  METRICS_CSV=$(METRICS_CSV)"
 
 build:
 	$(COMPOSE) build
@@ -79,8 +85,23 @@ logs-follow-service:
 train:
 	$(COMPOSE) up -d --build $(SERVICE_DEFAULT)
 
+logs-train:
+	$(COMPOSE) logs -f --tail=200 $(SERVICE_DEFAULT)
+
+
+
 orchestrator-start:
 	$(COMPOSE) up -d --build $(SERVICE_ORCH)
+
+# Extract test metrics + best checkpoint path from the last run's logs into a CSV.
+# Usage: make extract-metrics [SERVICE=geo-deep-learning] [METRICS_CSV=results/test_metrics.csv]
+extract-metrics:
+	$(COMPOSE) logs --no-color $(SERVICE) | python3 scripts/extract_test_metrics.py - --csv $(METRICS_CSV)
+
+# Train sequentially on every band-combo config, one after another, appending
+# each run's test metrics + best checkpoint path to results/band_sweep_metrics.csv.
+sweep-bands:
+	bash scripts/run_band_sweep.sh
 
 logs-orchestrator:
 	$(COMPOSE) logs -f --tail=200 $(SERVICE_ORCH)
