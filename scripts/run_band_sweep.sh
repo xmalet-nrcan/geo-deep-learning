@@ -62,9 +62,17 @@ for cfg in "${CONFIGS[@]}"; do
   # Remove any stray container from a previous run that shares container_name.
   compose rm -f -s "$SERVICE" >/dev/null 2>&1 || true
 
-  # Foreground run: blocks until the one-shot fit+test entrypoint exits.
-  if ! compose up -d --build --abort-on-container-exit "$SERVICE" 2>&1 | tee "$log_file"; then
-    echo "!! Training failed for $cfg — see $log_file" >&2
+  # Start detached (-d), then follow its logs synchronously: `logs -f` returns
+  # on its own once the one-shot fit+test entrypoint stops the container, so
+  # the loop still waits for completion without needing --abort-on-container-exit
+  # (which cannot be combined with --detach).
+  compose up -d --build "$SERVICE"
+  cid="$(compose ps -q "$SERVICE")"
+  compose logs -f --no-color "$SERVICE" 2>&1 | tee "$log_file" || true
+
+  exit_code="$(docker inspect "$cid" --format='{{.State.ExitCode}}' 2>/dev/null || echo 1)"
+  if [[ "$exit_code" != "0" ]]; then
+    echo "!! Training failed for $cfg (exit code $exit_code) — see $log_file" >&2
     failures+=("$cfg")
   fi
 
