@@ -1157,7 +1157,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             return
 
         n_bad = bad_mask.sum().item()
-        logger.warning(
+        logger.debug(
             "Patching %d/%d samples with <%.0f%% valid pixels (ratios: %s)",
             n_bad, batch_size, MIN_VALID_RATIO_FOR_PATCH * 100,
             [f"{r:.3f}" for r, b in zip(valid_ratio.tolist(), bad_mask.tolist()) if b],
