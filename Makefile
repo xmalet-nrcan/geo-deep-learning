@@ -103,6 +103,15 @@ extract-metrics:
 sweep-bands:
 	bash scripts/run_band_sweep.sh
 
+log-sweep-bands:
+	tail -f logs/band_sweep/sweep.log
+
+log-all-sweep-bands:
+	tail -f logs/band_sweep/*.log
+
+kill-sweep-bands:
+	kill "$(cat run/band_sweep.pid)"
+
 logs-orchestrator:
 	$(COMPOSE) logs -f --tail=200 $(SERVICE_ORCH)
 
