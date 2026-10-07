@@ -6,6 +6,11 @@ from geo_deep_learning.datasets.rcm_change_detection_dataset import  RCMChangeDe
 class RCMChangeDetectionDatasetMergePrePost(RCMChangeDetectionDataset):
     """RCM Change Detection Dataset with one band."""
 
+    @classmethod
+    def num_input_channels(cls, *args, **kwargs) -> int:
+        """Pre and post are stacked along the channel axis → twice the channels."""
+        return 2 * super().num_input_channels(*args, **kwargs)
+
 
     def __getitem__(self, index: int) -> dict:
         sample = super().__getitem__(index)

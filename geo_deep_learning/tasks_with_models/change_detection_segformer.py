@@ -1,4 +1,24 @@
-"""Segmentation SegFormer model."""
+"""Change detection with SegFormer.
+
+Two LightningModules live here:
+
+* :class:`ChangeDetectionSegformer` (recommended) — bi-temporal SegFormer
+  (siamese Mix-Transformer encoder + per-scale fusion + MLP decoder) plugged
+  into the :class:`ChangeDetectionChangeFormer` pipeline. It accepts exactly
+  the same YAML configuration as ``configs/rcm_change_detection_changeformer_*.yaml``
+  (FiLM, CBAM, channel dropout, DFA, signed difference, deep supervision,
+  focal/lovasz losses, tiling, predict-to-GeoTIFF, ...) plus a few SegFormer
+  specific arguments (``encoder``, ``encoder_weights``, ``fusion``,
+  ``decoder_embed_dim``, ``decoder_dropout``, ``freeze_encoder``).
+
+  The same model is also reachable directly from
+  ``ChangeDetectionChangeFormer`` with ``change_detection_model: segformer``
+  (or ``segformer_b0`` … ``segformer_b5``) and ``backbone_kwargs``.
+
+* :class:`ChangeDetectionSegmentationSegformer` (legacy) — single-image
+  SegFormer segmentation on stacked bands, kept for backward compatibility
+  with ``configs/seg_former_rcm_change_detection.yaml``.
+"""
 import logging
 import warnings
 from pathlib import Path
@@ -16,6 +36,7 @@ from torch.nn import BCEWithLogitsLoss
 from torchmetrics import JaccardIndex, F1Score
 from torchmetrics.classification import BinaryJaccardIndex
 
+from geo_deep_learning.tasks_with_models.change_detection_changeformer import ChangeDetectionChangeFormer
 from geo_deep_learning.tasks_with_models.segmentation_segformer import SegmentationSegformer
 from geo_deep_learning.tools.visualization import visualize_prediction
 
@@ -26,9 +47,86 @@ warnings.filterwarnings(
 
 logger = logging.getLogger(__name__)
 
+# SegFormer reference decoder embedding dims (paper: 256 for b0/b1, 768 for b2+).
+SEGFORMER_DEFAULT_EMBED_DIM = {
+    "mit_b0": 256,
+    "mit_b1": 256,
+    "mit_b2": 768,
+    "mit_b3": 768,
+    "mit_b4": 768,
+    "mit_b5": 768,
+}
+
+
+class ChangeDetectionSegformer(ChangeDetectionChangeFormer):
+    """Bi-temporal SegFormer change detection using the ChangeFormer pipeline.
+
+    Every argument of :class:`ChangeDetectionChangeFormer` is supported and
+    behaves identically. Only the backbone differs: it is forced to the
+    SegFormer change-detection model and configured with the arguments below.
+
+    Args:
+        change_detection_model: Backbone registry key. Defaults to
+            ``"segformer"``; must start with ``"segformer"``.
+        encoder: Mix-Transformer variant (``"mit_b0"`` … ``"mit_b5"``).
+            Ignored when ``change_detection_model`` pins it (``segformer_bX``).
+        encoder_weights: Pretrained encoder weights (``"imagenet"``) or
+            ``None``. With ``in_channels != 3`` the first patch embedding is
+            expanded from the RGB kernels.
+        fusion: Bi-temporal fusion mode (``"concat_diff"``, ``"concat"``,
+            ``"diff"``, ``"signed_diff"``).
+        decoder_embed_dim: MLP decoder embedding dim. ``None`` → SegFormer
+            reference value for the chosen encoder (256 for b0/b1, 768 otherwise).
+        decoder_dropout: Dropout ratio before the final classifier.
+        freeze_encoder: Freeze all encoder parameters.
+    """
+
+    def __init__(  # noqa: PLR0913
+            self,
+            change_detection_model: str = "segformer",
+            *,
+            encoder: str = "mit_b2",
+            encoder_weights: str | None = None,
+            fusion: str = "concat_diff",
+            decoder_embed_dim: int | None = None,
+            decoder_dropout: float = 0.1,
+            freeze_encoder: bool = False,
+            backbone_kwargs: dict[str, Any] | None = None,
+            **kwargs: Any,
+    ) -> None:
+        if not change_detection_model.startswith("segformer"):
+            msg = (
+                f"ChangeDetectionSegformer requires a 'segformer*' backbone, "
+                f"got change_detection_model={change_detection_model!r}. "
+                f"Use ChangeDetectionChangeFormer for other backbones."
+            )
+            raise ValueError(msg)
+
+        # Resolve the effective encoder (segformer_bX pins it).
+        suffix = change_detection_model.removeprefix("segformer").lstrip("_")
+        effective_encoder = f"mit_{suffix}" if suffix else encoder
+        embed_dim = decoder_embed_dim or SEGFORMER_DEFAULT_EMBED_DIM.get(effective_encoder, 256)
+
+        segformer_kwargs: dict[str, Any] = {
+            "encoder": effective_encoder,
+            "encoder_weights": encoder_weights,
+            "fusion": fusion,
+            "embed_dim": embed_dim,
+            "decoder_dropout": decoder_dropout,
+            "freeze_encoder": freeze_encoder,
+        }
+        # Explicit backbone_kwargs from the YAML win over the convenience args.
+        segformer_kwargs.update(backbone_kwargs or {})
+
+        super().__init__(
+            change_detection_model,
+            backbone_kwargs=segformer_kwargs,
+            **kwargs,
+        )
+
 
 class ChangeDetectionSegmentationSegformer(SegmentationSegformer):
-    """Segmentation SegFormer model."""
+    """Legacy single-image SegFormer segmentation (stacked bands)."""
 
     def __init__(self, encoder: str, *,
                  image_size: tuple[int, int],

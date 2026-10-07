@@ -143,11 +143,16 @@ class ChangeDetectionChangeFormer(LightningModule):
             signed_difference_normalize: bool = False,
             probability_zone_thresholds: list[float] | None = None,
             probability_zone_class_index: int = -1,
+            backbone_kwargs: dict[str, Any] | None = None,
             **kwargs: object,  # noqa: ARG002
     ) -> None:
         """Initialize the model.
 
         Args:
+            in_channels: Number of data channels per image. Optional — when
+                omitted (recommended) it is inferred from the DataModule's
+                ``band_names`` (``len(band_names) + 1`` for BITMASK_CROPPED,
+                ``+3`` more when ``separate_metadata=False``).
             deep_supervision: Use all ChangeFormer decoder heads for loss computation.
                 The decoder produces 5 outputs (4 intermediate + 1 final); when enabled,
                 losses from intermediate heads are weighted and summed.
@@ -189,6 +194,16 @@ class ChangeDetectionChangeFormer(LightningModule):
                 probabilities used as the "positive" (e.g. burn/change) class
                 probability surface for zoning. Defaults to ``-1`` (last class),
                 which is correct for the standard binary no-change/change setup.
+            backbone_kwargs: Extra keyword arguments forwarded to the backbone
+                constructor selected by ``change_detection_model`` (they override
+                the shared defaults ``decoder_softmax=False, embed_dim=256``).
+                E.g. for ``change_detection_model: segformer``::
+
+                    backbone_kwargs:
+                      encoder: mit_b2
+                      encoder_weights: imagenet   # or null
+                      embed_dim: 256
+                      fusion: concat_diff         # concat | diff | signed_diff
         """
         super().__init__()
         self.save_hyperparameters()
@@ -239,6 +254,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             else list(DEFAULT_PROBABILITY_ZONE_THRESHOLDS)
         )
         self.probability_zone_class_index = probability_zone_class_index
+        self.backbone_kwargs = dict(backbone_kwargs or {})
 
         self.changed_num_classes = num_classes + 1 if num_classes == 1 else num_classes
         self.labels = (
@@ -406,7 +422,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         self.model = ChangeDetectionModel(
             change_detection_model=self.change_detection_model,
-            in_channels=self.in_channels,
+            in_channels=self._resolve_in_channels(),
             out_channels=self.num_classes + 1 if self.num_classes == 1 else self.num_classes,
             use_metadata_film=self.use_metadata_film,
             film_embed_dim=self.film_embed_dim,
@@ -420,6 +436,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             use_signed_difference=self.use_signed_difference,
             signed_difference_channels=self.signed_difference_channels,
             signed_difference_normalize=self.signed_difference_normalize,
+            **self.backbone_kwargs,
         )
 
         if self.weights_from_checkpoint_path:
@@ -435,6 +452,46 @@ class ChangeDetectionChangeFormer(LightningModule):
                 load_parts=load_parts,
                 map_location=map_location,
             )
+
+    def _resolve_in_channels(self) -> int:
+        """Return ``in_channels``, inferring it from the DataModule when possible.
+
+        ``configure_model`` runs after ``datamodule.setup()``, so the
+        DataModule's ``num_input_channels`` (``len(band_names) + 1`` in FiLM
+        mode) is available. It takes precedence over the YAML value because
+        it reflects the actual tensor shape; a mismatch only logs a warning.
+        The resolved value is written back into ``hparams`` so checkpoints
+        are self-contained (``load_from_checkpoint`` / predict without a
+        DataModule keep working).
+        """
+        trainer = getattr(self, "_trainer", None)  # ``self.trainer`` raises if detached
+        datamodule = getattr(trainer, "datamodule", None) if trainer is not None else None
+        inferred = getattr(datamodule, "num_input_channels", None)
+
+        if inferred is None:
+            if self.in_channels is None:
+                msg = (
+                    "in_channels could not be inferred: no DataModule exposing "
+                    "`num_input_channels` is attached. Set `model.init_args.in_channels` "
+                    "explicitly (len(band_names) + 1 in FiLM mode)."
+                )
+                raise ValueError(msg)
+            return self.in_channels
+
+        if self.in_channels is not None and self.in_channels != inferred:
+            logger.warning(
+                "in_channels=%d from the config does not match the DataModule "
+                "(band_names → %d channels). Using %d.",
+                self.in_channels, inferred, inferred,
+            )
+        elif self.in_channels is None:
+            logger.info("in_channels inferred from DataModule band_names: %d", inferred)
+
+        self.in_channels = inferred
+        self.hparams["in_channels"] = inferred
+        if getattr(self, "_hparams_initial", None) is not None:
+            self._hparams_initial["in_channels"] = inferred
+        return inferred
 
     def configure_optimizers(self) -> list[list[dict[str, Any]]]:
         """Configure optimizers."""

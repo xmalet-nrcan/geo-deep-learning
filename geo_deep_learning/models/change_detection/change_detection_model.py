@@ -18,6 +18,15 @@ from geo_deep_learning.models.change_detection.sub_models.changemask import Chan
 from geo_deep_learning.models.change_detection.sub_models.changestar2 import (
     ChangeStar2Base, ChangeStar2Large, ChangeStar2Small,
 )
+from geo_deep_learning.models.change_detection.sub_models.segformer_cd import (
+    SegFormerChangeDetection,
+    SegFormerChangeDetectionB0,
+    SegFormerChangeDetectionB1,
+    SegFormerChangeDetectionB2,
+    SegFormerChangeDetectionB3,
+    SegFormerChangeDetectionB4,
+    SegFormerChangeDetectionB5,
+)
 from geo_deep_learning.models.segmentation.base import BaseSegmentationModel
 
 logger = logging.getLogger(__name__)
@@ -46,6 +55,15 @@ _MODEL_REGISTRY: dict[str, Callable[..., torch.nn.Module]] = {
     "changestar2_small": ChangeStar2Small,
     "changestar2_base": ChangeStar2Base,
     "changestar2_large": ChangeStar2Large,
+    # SegFormer (siamese MiT encoder + MLP decoder). "segformer" uses the
+    # ``encoder`` kwarg (default mit_b2); the suffixed keys pin the encoder.
+    "segformer": SegFormerChangeDetection,
+    "segformer_b0": SegFormerChangeDetectionB0,
+    "segformer_b1": SegFormerChangeDetectionB1,
+    "segformer_b2": SegFormerChangeDetectionB2,
+    "segformer_b3": SegFormerChangeDetectionB3,
+    "segformer_b4": SegFormerChangeDetectionB4,
+    "segformer_b5": SegFormerChangeDetectionB5,
 }
 
 
@@ -77,7 +95,8 @@ class ChangeDetectionModel(BaseSegmentationModel):
         """Initialize Change Detection segmentation model.
 
         Args:
-            change_detection_model: Model variant key ('changeformer', 'changeformer_5', 'changeformer_6').
+            change_detection_model: Model variant key (see ``_MODEL_REGISTRY``, e.g.
+                'changeformer_7', 'hdanet', 'changestar2', 'segformer_b2').
             in_channels: Number of *data-only* input channels (excluding metadata bands).
             out_channels: Number of output classes.
             use_metadata_film: If True, create a FiLM conditioner for metadata.
@@ -291,6 +310,10 @@ if __name__ == '__main__':
     # HDANet backbone
     model_hda = ChangeDetectionModel(change_detection_model='hdanet', in_channels=9, out_channels=2)
     _print_output_shape("HDANet", model_hda(x1_sm, x2_sm))
+
+    # SegFormer backbone
+    model_seg = ChangeDetectionModel(change_detection_model='segformer_b0', in_channels=9, out_channels=2)
+    _print_output_shape("SegFormer-b0", model_seg(x1_sm, x2_sm))
 
     # FiLM metadata conditioning
     model_film = ChangeDetectionModel(

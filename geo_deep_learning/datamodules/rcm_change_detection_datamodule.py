@@ -130,6 +130,23 @@ class RcmChangeDetectionDataModule(LightningDataModule):
         elif isinstance(split_on_columns, Iterable):
             self._split_on_columns = list(split_on_columns)
 
+    @property
+    def num_input_channels(self) -> int | None:
+        """Channels per image tensor, derived from ``band_names`` / ``bands``.
+
+        Used by the change-detection LightningModules to infer ``in_channels``
+        automatically (``len(band_names) + 1`` in FiLM / ``separate_metadata``
+        mode). Returns ``None`` if the dataset class cannot tell.
+        """
+        compute = getattr(self.dataset_class, "num_input_channels", None)
+        if compute is None:
+            return None
+        return compute(
+            bands=self.bands,
+            band_names=self.band_names,
+            separate_metadata=self.separate_metadata,
+        )
+
     def setup(self, stage: str | None = None) -> None:
         """Create dataset."""
         is_predict = (stage == "predict")

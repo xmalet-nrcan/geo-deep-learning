@@ -141,6 +141,29 @@ class RCMChangeDetectionDataset(TiledChangeDetectionDataset):
 
     NO_DATA = NO_DATA  # re-expose module constant as class attribute
 
+    @classmethod
+    def num_input_channels(
+        cls,
+        bands: Optional[List[int]] = None,
+        band_names: Optional[List[str]] = None,
+        separate_metadata: bool = True,
+    ) -> int:
+        """Number of channels of ``image`` / ``image_pre`` produced by ``__getitem__``.
+
+        Mirrors :meth:`_select_bands_with_bitmask` and
+        :meth:`_build_conditioning_bands`:
+
+        * ``band_names`` (or ``bands``) given → ``BITMASK_CROPPED`` + selected bands
+          = ``len(band_names) + 1``;
+        * neither given → every band of the file (``len(BandName)``, bitmask included);
+        * ``separate_metadata=False`` → ``+3`` (COMMON_MASK, SATELLITE_PASS, BEAM).
+        """
+        selected = band_names if band_names is not None else bands
+        n_channels = len(selected) + 1 if selected is not None else len(BandName)
+        if not separate_metadata:
+            n_channels += 3
+        return n_channels
+
     def __init__(
         self,
         csv_root_folder: str,
