@@ -1,0 +1,157 @@
+seed_everything: true
+
+# SegFormer (siamese MiT encoder + per-scale fusion + MLP decoder) dans le pipeline ChangeFormer.
+# Même configuration que rcm_change_detection_changeformer_all9bands.yaml, seul le backbone change.
+# band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'RR','RL','NDSV','RFDI' ]
+#
+# Alternative équivalente avec la classe ChangeFormer :
+#   class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
+#   init_args:
+#     change_detection_model: "segformer"   # ou segformer_b0 ... segformer_b5
+#     backbone_kwargs:
+#       encoder: mit_b2
+#       encoder_weights: null
+#       embed_dim: 768
+#       fusion: concat_diff
+
+trainer:
+  accelerator: "gpu"
+  devices: -1
+  strategy: auto
+
+  gradient_clip_val: 1.0
+  precision: "bf16-mixed"
+  sync_batchnorm: false
+  gradient_clip_algorithm: "norm"
+  logger:
+    class_path: lightning.pytorch.loggers.TensorBoardLogger
+    init_args:
+      save_dir: ./lightning_logs
+      name: 2026/segformer/tiled/sf_b2_A_y23-25_film8-cbam_focal-lovasz_cosine-restarts_bands-all9
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: "val_loss"
+        mode: "min"
+        verbose: True
+        patience: 40
+        min_delta: 1e-3
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: ./models_checkpoints/2026/segformer/tiled/bands_all9/
+        monitor: "val_loss"
+        mode: "min"
+        save_top_k: 5
+        filename: "sf_b2_A_y23-25_cosine-restarts-tiled-bands-all9-{epoch:02d}-{val_loss:.3f}"
+    - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
+      init_args:
+        max_samples: 50
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: "epoch"
+
+  accumulate_grad_batches: 4
+  max_epochs: 240
+  check_val_every_n_epoch: 1
+
+model:
+  class_path: tasks_with_models.change_detection_segformer.ChangeDetectionSegformer
+  init_args:
+    change_detection_model: "segformer"
+    # --- SegFormer specific ---
+    encoder: "mit_b2"             # mit_b0 ... mit_b5
+    encoder_weights: null         # "imagenet" -> patch embedding étendu à in_channels
+    fusion: "concat_diff"         # concat_diff | concat | diff | signed_diff
+    decoder_embed_dim: null       # null -> 256 (b0/b1) ou 768 (b2+)
+    decoder_dropout: 0.1
+    freeze_encoder: false
+
+    # --- Identique à ChangeFormer ---
+    image_size: [256,256]
+    in_channels: 10  # len(band_names)=9 + 1 (BITMASK_CROPPED)
+    max_samples: 10
+    num_classes: 1
+    deep_supervision: true
+    speckle_noise_std: 0.15
+
+    use_metadata_film: true
+    film_embed_dim: 8
+
+    use_cbam: true
+    cbam_reduction: 4
+
+    use_channel_dropout: true
+    channel_dropout_prob: 0.3
+
+    use_dfa: false
+    dfa_gate_hidden: 16
+
+    use_signed_difference: true
+    signed_difference_channels: null
+    signed_difference_normalize: true
+
+    burned_class_weight: 3.0
+    main_loss:
+      class_path: segmentation_models_pytorch.losses.FocalLoss
+      init_args:
+        mode: "binary"
+        gamma: 1.5
+        ignore_index: 255
+    secondary_loss:
+      class_path: segmentation_models_pytorch.losses.LovaszLoss
+      init_args:
+        mode: "binary"
+        ignore_index: 255
+    loss_ratio:
+      - 0.6
+      - 0.4
+    optimizer:
+      class_path: torch.optim.AdamW
+      init_args:
+        lr: 5e-4
+        weight_decay: 0.05
+        betas:
+        - 0.9
+        - 0.999
+    scheduler:
+      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
+      init_args:
+        T_0: 30
+        T_mult: 2
+        eta_min: 1e-6
+    scheduler_config:
+      interval: "epoch"
+      frequency: 1
+
+    class_labels: [ "unburn", "burn" ]
+    class_colors: [ "#000000", "#FF0000" ]
+
+data:
+  class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
+  init_args:
+    batch_size: 8
+    num_workers: 10
+    separate_metadata: true
+    patch_size:
+    - 256
+    - 256
+    train_overlap_buffer: 50
+    tile_size: [ 256, 256 ]
+    tile_stride: [ 256, 256 ]
+    burned_oversample_factor: 2.0
+    burned_tile_min_ratio: 0.0
+    split_on_columns: db_nbac_fire_id
+    csv_root_folder: /mnt/geospatial/projet_RCM_scanfire/
+    patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
+    csv_file_name: tbl_input_pre_post_data.csv
+    split_ratios: [0.7 ,0.15, 0.15]
+
+    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'RR','RL','NDSV','RFDI' ]
+
+    beams:
+    - 'A'
+    satellite_pass:
+    dataset_years:
+    - 2025
+    - 2023
