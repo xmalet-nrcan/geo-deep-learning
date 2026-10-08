@@ -24,7 +24,7 @@ trainer:
         monitor: "val_loss"
         mode: "min"
         verbose: True
-        patience: 40
+        patience: 20
         min_delta: 1e-3
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
@@ -49,7 +49,6 @@ model:
   init_args:
     change_detection_model: "changeformer_7"
     image_size: [256,256]
-    in_channels: 5  # len(band_names)=4 + 1 (BITMASK_CROPPED)
     max_samples: 10
     num_classes: 1
     deep_supervision: true

@@ -49,7 +49,6 @@ model:
   init_args:
     change_detection_model: "changeformer_7"
     image_size: [256,256]
-    in_channels: 4  # len(band_names)=3 + 1 (BITMASK_CROPPED)
     max_samples: 10
     num_classes: 1
     deep_supervision: true

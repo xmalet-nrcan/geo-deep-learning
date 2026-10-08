@@ -60,7 +60,6 @@ model:
     # set to the number of band_names in the datamodule + 1 for BITMASK_CROPPED (always loaded)
     # With separate_metadata=true, COMMON_MASK / SAT_PASS / BEAM are NOT
     # counted as image channels — they use FiLM conditioning instead.
-    in_channels: 10 # len(band_names) + 1 (BITMASK_CROPPED)
     max_samples: 50
     num_classes: 1  # binary change detection
     burned_class_weight: 5.0  # >1 penalizes false negatives on class burn (1)
@@ -79,6 +78,10 @@ model:
 
     use_dfa: true                 # Difference Feature Attention (decoder)
     dfa_gate_hidden: 16           # taille du MLP de gating
+
+    use_signed_difference: true       # ajoute (x1 - x2) signé en canaux d'entrée (direction du changement)
+    signed_difference_channels: null  # null = ajoute toutes les bandes ; ex. 3 = projection 1x1 apprise
+    signed_difference_normalize: false # true = borne les canaux signés à [-1, 1] via tanh
 
 
     main_loss:

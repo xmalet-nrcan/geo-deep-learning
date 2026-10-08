@@ -47,7 +47,6 @@ model:
   init_args:
     change_detection_model: "changestar2"
     image_size: [256,256]
-    in_channels: 8  # LEN (BAND_NAMES) + 1
     max_samples: 10
     num_classes: 1
     deep_supervision: true

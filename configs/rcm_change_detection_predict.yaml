@@ -18,7 +18,6 @@ model:
   init_args:
     change_detection_model: "changestar2"
     image_size: [256, 256]
-    in_channels: 10           # 9 band_names + 1 BITMASK_CROPPED (FiLM mode)
     max_samples: 10
     num_classes: 1
     burned_class_weight: 3.0  # >1 penalizes false negatives on class burn (1)

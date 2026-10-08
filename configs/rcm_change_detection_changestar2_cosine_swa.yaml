@@ -61,7 +61,6 @@ model:
   init_args:
     change_detection_model: "changestar2"
     image_size: [256,256]
-    in_channels: 10
     max_samples: 10
     num_classes: 1
     deep_supervision: true
@@ -77,6 +76,10 @@ model:
 
     use_dfa: false
     dfa_gate_hidden: 16
+
+    use_signed_difference: true       # ajoute (x1 - x2) signé en canaux d'entrée (direction du changement)
+    signed_difference_channels: null  # null = ajoute toutes les bandes ; ex. 3 = projection 1x1 apprise
+    signed_difference_normalize: true # borne les canaux signés à [-1, 1] via tanh
 
     burned_class_weight: 3.0
     main_loss:

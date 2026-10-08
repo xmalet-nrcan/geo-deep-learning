@@ -68,12 +68,8 @@ model:
   init_args:
     change_detection_model: "changeformer"
     image_size: [256,256]
-    # set to; it will be set to the number of band_names in the datamodule +
-    # 1 for COMMON MASK
-    # 1 for BITMASK
-    # 1 for SAT_PASS encoding
-    # 1 for BEAM encoding
-    in_channels: 13 # Should be the length of data.band_names + 4
+    # in_channels is inferred from data.band_names:
+    #   len(band_names) + 1 (BITMASK) [+3 if separate_metadata: false]
     max_samples: 50
     num_classes: 1  # binary change detection
     burned_class_weight: 5.0  # >1 penalizes false negatives on class burn (1)
