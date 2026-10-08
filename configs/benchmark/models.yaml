@@ -1,0 +1,27 @@
+# =============================================================================
+# Registre des modèles du benchmark predict (dev plan P5)
+# Doc : configs/benchmark/README.md — validation :
+#   python scripts/validate_benchmark_configs.py [--cli] [--load-weights]
+#
+# output_root : racine des sorties → <output_root>/<name>/<event_id>/<output_name>.tif
+#               (surchargeable par BENCHMARK_OUTPUT_DIR côté orchestrateur)
+# models[]    :
+#   name        ^[A-Za-z0-9_.-]+$, unique — nom du dossier de sortie et de test_runs.model_name
+#   config      config predict ; chemin relatif = relatif à CE fichier
+#   enabled     false ⇒ ignoré par l'orchestrateur et la validation (sauf --include-disabled)
+#   description optionnel
+# =============================================================================
+output_root: /mnt/geospatial/projet_RCM_scanfire/benchmark_outputs
+
+models:
+  - name: cs2base_cosine_restarts_e24
+    config: cs2base_cosine_restarts_e24_predict.yaml
+    enabled: true
+    description: >-
+      Modèle de production (référence) — ChangeStar2, beam A, 2023-2025,
+      FiLM 8, CBAM, signed-diff, cosine restarts, epoch 24.
+
+  # Ajouter les modèles inventoriés en P0 (§12.1 du plan) à partir de _template_predict.yaml :
+  # - name: changeformer_v7_all9bands
+  #   config: changeformer_v7_all9bands_predict.yaml
+  #   enabled: true

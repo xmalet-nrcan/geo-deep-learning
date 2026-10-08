@@ -1,0 +1,96 @@
+# =============================================================================
+# Benchmark predict config — cs2base_cosine_restarts_e24
+# -----------------------------------------------------------------------------
+# Modèle de PRODUCTION actuel (référence du benchmark), dérivé de
+# configs/rcm_change_detection_predict.yaml.
+#
+# Ne PAS renseigner ici (injecté par l'orchestrateur via benchmark_override.yaml,
+# voir README.md §Override) :
+#   model.init_args.predict_output_dir / predict_output_layout / predict_run_name /
+#   predict_write_merged_all / weights_strict (forcé à true), data.init_args.dataset_class / csv_root_folder /
+#   csv_file_name, trainer.devices / callbacks / logger.
+#
+# Tout ce qui touche à l'architecture (change_detection_model, use_*, film_embed_dim,
+# signed_difference_*, backbone_kwargs) et aux entrées (band_names,
+# separate_metadata, beams, tile_*, predict_overlap_buffer) DOIT matcher
+# l'entraînement du checkpoint → vérifié par scripts/validate_benchmark_configs.py.
+# =============================================================================
+seed_everything: true
+
+trainer:
+  accelerator: "gpu"
+  devices: 1
+  strategy: auto
+  precision: "bf16-mixed"
+  callbacks: []
+
+model:
+  class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
+  init_args:
+    change_detection_model: "changestar2"
+    image_size: [256, 256]
+    max_samples: 10
+    num_classes: 1
+    burned_class_weight: 3.0
+
+    speckle_noise_std: 0.15
+    use_metadata_film: true
+    film_embed_dim: 8
+
+    use_cbam: true
+    cbam_reduction: 4
+
+    use_channel_dropout: true
+    channel_dropout_prob: 0.3
+
+    use_dfa: false
+    dfa_gate_hidden: 16
+
+    use_signed_difference: true
+    signed_difference_channels: null
+    signed_difference_normalize: true
+
+    # Requis par le constructeur, inutilisés en predict
+    main_loss:
+      class_path: segmentation_models_pytorch.losses.FocalLoss
+      init_args:
+        mode: "binary"
+        gamma: 1.5
+        ignore_index: 255
+    secondary_loss:
+      class_path: segmentation_models_pytorch.losses.LovaszLoss
+      init_args:
+        mode: "binary"
+        ignore_index: 255
+    loss_ratio: [0.6, 0.4]
+    optimizer:
+      class_path: torch.optim.AdamW
+      init_args:
+        lr: 1e-5
+        weight_decay: 0.01
+    scheduler:
+      class_path: torch.optim.lr_scheduler.ConstantLR
+    class_labels: ["unburn", "burn"]
+    class_colors: ["#000000", "#FF0000"]
+    weights_from_checkpoint_path: /app/models_checkpoints/2026/changestar2/tiled/new/cs2base_A_y23_25_water-film8-all-cosine-restarts-tiled-epoch=24-val_loss=0.484.ckpt
+
+data:
+  class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
+  init_args:
+    # Placeholders — remplacés par l'override du benchmark (README.md §Override)
+    csv_root_folder: __set_by_benchmark_override__
+    csv_file_name: __set_by_benchmark_override__
+    patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
+    batch_size: 8
+    num_workers: 10
+    separate_metadata: true
+    patch_size: [256, 256]
+    predict_overlap_buffer: 50
+    tile_size: [256, 256]
+    tile_stride: [256, 256]
+    band_names: ['LOCALINCANGLE', 'PDN', 'PSN', 'PVN', 'S0', 'NDSV', 'RFDI', 'RR', 'RL']
+    # Filtres conservés tels quels (décision 5) : un modèle entraîné beam A ne reçoit pas de B
+    beams:
+      - 'A'
+    satellite_pass:
+    dataset_years:

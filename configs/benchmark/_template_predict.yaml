@@ -1,0 +1,84 @@
+# =============================================================================
+# TEMPLATE — config predict d'un modèle du benchmark
+# -----------------------------------------------------------------------------
+# 1. Copier ce fichier en configs/benchmark/<model_name>_predict.yaml
+#    (<model_name> = `name` dans models.yaml, ^[A-Za-z0-9_.-]+$).
+# 2. Remplacer chaque TODO par la valeur de la config d'ENTRAÎNEMENT du checkpoint
+#    (procédure complète : README.md §Dériver une config predict).
+# 3. Ajouter l'entrée dans models.yaml, puis :
+#      python scripts/validate_benchmark_configs.py --model <model_name> --cli
+#
+# Ne PAS renseigner ce que l'orchestrateur injecte (README.md §Override).
+# Ce fichier n'est pas référencé par models.yaml (préfixe "_").
+# =============================================================================
+seed_everything: true
+
+trainer:
+  accelerator: "gpu"
+  devices: 1
+  strategy: auto
+  precision: "bf16-mixed"          # TODO: comme l'entraînement
+  callbacks: []
+
+model:
+  class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
+  init_args:
+    # --- Architecture : DOIT matcher l'entraînement (vérifié vs hparams du checkpoint) ---
+    change_detection_model: "TODO"   # changestar2 | changestar2_base | changeformer_7 | hdanet | ...
+    num_classes: 1
+    use_metadata_film: true          # TODO ; true ⇒ data.separate_metadata: true
+    film_embed_dim: 8                # TODO
+    use_cbam: false                  # TODO
+    cbam_reduction: 4
+    use_dfa: false                   # TODO
+    dfa_gate_hidden: 16
+    use_signed_difference: false     # TODO
+    signed_difference_channels: null # TODO
+    signed_difference_normalize: false  # TODO
+    # backbone_kwargs: {}            # TODO si utilisé à l'entraînement (ex. segformer)
+    # in_channels: ne pas renseigner (inféré de band_names ; vérifié vs checkpoint)
+
+    # --- Inférence ---
+    image_size: [256, 256]           # TODO
+    max_samples: 10
+    speckle_noise_std: 0.15          # train only
+    use_channel_dropout: false       # train only
+
+    # --- Requis par le constructeur, inutilisés en predict ---
+    main_loss:
+      class_path: segmentation_models_pytorch.losses.FocalLoss
+      init_args:
+        mode: "binary"
+        ignore_index: 255
+    secondary_loss:
+      class_path: segmentation_models_pytorch.losses.LovaszLoss
+      init_args:
+        mode: "binary"
+        ignore_index: 255
+    optimizer:
+      class_path: torch.optim.AdamW
+    scheduler:
+      class_path: torch.optim.lr_scheduler.ConstantLR
+    class_labels: ["unburn", "burn"]
+    class_colors: ["#000000", "#FF0000"]
+    weights_from_checkpoint_path: /app/models_checkpoints/TODO.ckpt
+
+data:
+  class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
+  init_args:
+    csv_root_folder: __set_by_benchmark_override__
+    csv_file_name: __set_by_benchmark_override__
+    patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
+    batch_size: 8
+    num_workers: 10
+    # --- Entrées : DOIVENT matcher l'entraînement ---
+    separate_metadata: true          # TODO
+    band_names: ['TODO']             # TODO : même liste, même ordre
+    patch_size: [256, 256]           # TODO
+    predict_overlap_buffer: 50       # TODO (train_overlap_buffer de l'entraînement)
+    tile_size: [256, 256]            # TODO ou null
+    tile_stride: [256, 256]          # TODO ou null
+    # --- Filtres (conservés, jamais surchargés par le benchmark) ---
+    beams: ['A']                     # TODO
+    satellite_pass:
+    dataset_years:

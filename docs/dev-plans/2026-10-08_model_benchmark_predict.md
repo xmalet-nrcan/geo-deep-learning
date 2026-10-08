@@ -1,7 +1,7 @@
 # Plan de développement — Benchmark multi-modèles en production (predict)
 
-- **Date** : 2026-10-08 (rév. 2 — décisions §11 tranchées)
-- **Statut** : ✅ Validé — prêt à implémenter (aucun code écrit)
+- **Date** : 2026-10-08 (rév. 4 — P1 → P5 réalisés)
+- **Statut** : 🚧 En cours — P1 ✅, P2 ✅ (testés sur PostGIS 17), P3 ✅, P4 ✅, P5 ✅ (structure + modèle de référence ; autres modèles après P0) ; P0 reporté ; P6→P9 à faire
 - **Dépôts impactés** : `geo-deep-learning` (task + docker-compose + configs), `scanfire` (SQL + orchestrateur)
 - **Tâche Lightning** : `geo_deep_learning/tasks_with_models/change_detection_changeformer.py` → `ChangeDetectionChangeFormer`
 
@@ -146,8 +146,9 @@ Colonnes identiques à `event_detection.event_pre_post_pairs` (`pair_id` identit
      à `grid_20km` ; `set_config('scanfire.skip_pair_trigger','on',true)` comme en prod.
   3. Idempotent ; `RAISE NOTICE` avec compteurs (paires groupe / cellule, combinaisons rejetées).
 - `model_benchmark.fct_reset_test_case_pairs(p_test_case_id int, p_regenerate bool default true)`
-  — supprime `test_group_pairs` (cascade) puis régénère. Appelée par l'orchestrateur avant export
-  quand `test_cases.updated_at` > dernière génération.
+  — supprime `test_group_pairs` (cascade) puis régénère (nouveaux `pair_id`). Remise à zéro manuelle
+  uniquement ; l'orchestrateur appelle `fct_generate_test_pairs` (incrémental) quand
+  `test_cases.updated_at` > `pairs_generated_at`.
 
 ### 3.6 Vues
 - `model_benchmark.vw_input_files_for_model_test` — **même SQL que
@@ -231,6 +232,7 @@ model:
     predict_output_layout: benchmark
     predict_run_name: <model_name>
     predict_write_merged_all: false
+    weights_strict: true          # décision 6 : meilleurs poids, même archi → échec si incohérence
 data:
   init_args:
     dataset_class: datasets.rcm_change_detection_predict_dataset.RCMChangeDetectionOnPredictDataset
@@ -254,7 +256,7 @@ Nouveaux `init_args` (défauts = comportement prod **inchangé**) :
 |---|---|---|
 | `predict_output_layout` | `Literal["production","benchmark"] = "production"` | Arborescence de sortie |
 | `predict_run_name` | `str \| None = None` | Ajouté au manifest (`run_name`) |
-| `predict_write_merged_all` | `bool = True` | Désactive `merged_all.tif` |
+| `predict_write_merged_all` | `bool \| None = None` | Désactive `merged_all.tif` ; `None` ⇒ `True` en `production`, `False` en `benchmark` |
 
 Comportement `benchmark` :
 - `on_predict_end` : `base_dir = Path(predict_output_dir)` **sans** suffixe `/predictions`.
@@ -293,7 +295,7 @@ Points de vigilance :
   _poll_and_process():
       models = load_registry(BENCHMARK_MODELS_FILE)          # enabled only
       for tc in active test cases (filtre --test-case):
-          if tc.updated_at > last generation: fct_reset_test_case_pairs(tc)   # §3.5
+          if vw_test_case_summary.needs_pair_generation: fct_generate_test_pairs(tc)   # §3.5
       for model in models:
           df = query_pending(model)                         # §3.7 + vw_input_files_for_model_test
           if df.empty: continue
@@ -387,11 +389,11 @@ Makefile : `benchmark-start` (`$(COMPOSE) --profile benchmark run --rm model_ben
 | Phase | Titre | Dépôt | Dépend de | Effort | Parallélisable avec |
 |---|---|---|---|---|---|
 | **P0** | Préparation & cadrage | les deux | — | S | — |
-| **P1** | Refacto rétrocompatible `fct_validate_pre_post_pair` | scanfire (SQL) | P0 | S | P3, P4 |
-| **P2** | Schéma `model_benchmark` (tables, fonctions, vues) | scanfire (SQL) | P1 | L | P3, P4, P5 |
-| **P3** | Extraction `prediction_naming` | scanfire (Python) | P0 | S | P1, P2, P4 |
-| **P4** | Layout `benchmark` dans `ChangeDetectionChangeFormer` | geo-deep-learning | P0 | M | P1, P2, P3 |
-| **P5** | Registre modèles + configs predict par modèle | geo-deep-learning | P4 | M | P2 |
+| **P1** ✅ | Refacto rétrocompatible `fct_validate_pre_post_pair` | scanfire (SQL) | — | S | P3, P4 |
+| **P2** ✅ | Schéma `model_benchmark` (tables, fonctions, vues) | scanfire (SQL) | P1 | L | P3, P4, P5 |
+| **P3** ✅ | Extraction `prediction_naming` | scanfire (Python) | P0 | S | P1, P2, P4 |
+| **P4** ✅ | Layout `benchmark` dans `ChangeDetectionChangeFormer` | geo-deep-learning | P0 | M | P1, P2, P3 |
+| **P5** ✅ | Registre modèles + configs predict par modèle | geo-deep-learning | P4 | M | P2 |
 | **P6** | `ModelBenchmarkOrchestrator` | scanfire (Python) | P2, P3 | L | P5 |
 | **P7** | Intégration Docker / Makefile | geo-deep-learning | P5, P6 | S | — |
 | **P8** | Recette bout-en-bout | les deux | P7 | M | — |
@@ -416,7 +418,7 @@ et `rcm_change_detection_predict.yaml` inchangés en comportement).
 **Objectif** : réunir les données d'entrée du benchmark avant tout code.
 
 Tâches :
-- [ ] Créer les branches `feature/model-benchmark` (geo-deep-learning à partir de la branche `xm/changeformer-add-segformer`, scanfire).
+- [ ] Créer les branches `feature/model-benchmark` (geo-deep-learning à partir de la branche `xm/changeformer`, scanfire).
 - [ ] Lister les modèles à comparer : `name`, config d'entraînement d'origine, checkpoint `.ckpt`, `band_names`, flags (FiLM, CBAM, signed-diff, …), `beams`.
 - [ ] Choisir 1–2 événements de test (`event_detection.events`) et leurs groupes pre / active-post
       (`SELECT … FROM event_detection.vw_available_groups_per_event_cell WHERE event_id = …`).
@@ -480,6 +482,40 @@ Tâches clés :
 **Critère de sortie** : `install.sql` idempotent sur staging ; `tests/test_model_benchmark.sql` vert ;
 `seed_example.sql` → `vw_input_files_for_model_test` non vide avec des chemins de fichiers existants.
 
+#### ✅ Journal de réalisation P1 + P2 (2026-10-08)
+
+Livré dans `scanfire/database_schemas/` :
+- `event_detection/fct_validate_pre_post_pair.sql` — argument `TG_ARGV[0]` optionnel ; sans argument,
+  **SQL statique identique** à l'ancienne version (pas de SQL dynamique en prod) ; table inconnue ⇒ `EXCEPTION`.
+- `model_benchmark/` : `schema.sql`, `fct_validate_test_case.sql`, `test_cases.sql`,
+  `fct_validate_test_case_group.sql`, `fct_touch_test_case.sql`, `test_case_groups.sql`,
+  `test_group_pairs.sql`, `test_pre_post_pairs.sql`, `test_runs.sql`, `fct_generate_test_pairs.sql`,
+  `fct_reset_test_case_pairs.sql`, `vw_input_files_for_model_test.sql`, `vw_test_case_summary.sql`,
+  `install.sql`, `seed_example.sql`, `README.md`,
+  `tests/test_fct_validate_pre_post_pair_regression.sql`, `tests/test_model_benchmark.sql`,
+  `tests/harness/` (stubs + vrais fichiers `event_detection` + données synthétiques, `run.sh`).
+
+Validation : parseur PostgreSQL (`pglast`) sur tous les fichiers + exécution réelle dans
+`postgis/postgis:17-3.5` éphémère → install ×2 (idempotent), régression P1 T1–T5, tests P2 T1–T11
+(dont collision `group_pair_id` prod/test **évitée**), seed 2 PRE × 5 POST → 4 paires groupe / 6 paires
+cellule (rejets beam B, Descending, orbite 11), prod intacte : `===== ALL OK =====`.
+Reste à faire : exécution sur staging réel (dépend de P0 pour le choix des événements).
+
+Écarts / ajouts par rapport au plan :
+| Sujet | Plan | Réalisé | Raison |
+|---|---|---|---|
+| Validation `test_cases` | — | `fct_validate_test_case()` : `cell_ids` ⊂ `event_cells`, `reference_end_date ≥ start_date`, `event_id` figé si groupes attachés | Intégrité ; `event_id` changé ⇒ groupes invalides |
+| Cohérence `event_id` | — | FK composites `(test_case_id, event_id)` sur les 2 tables de paires | Garantit paire.event_id = cas.event_id |
+| Génération | reset puis génération si modifié | `fct_generate_test_pairs` **incrémental** : supprime les paires obsolètes, conserve les `pair_id` inchangés ; `fct_reset_test_case_pairs` réservé à la remise à zéro | `pair_id` stables entre runs ; orchestrateur (P6) n'appelle que `fct_generate_test_pairs` |
+| Horodatage | `now()` | `clock_timestamp()` dans `fct_touch_test_case` / `fct_generate_test_pairs` / `fct_reset_test_case_pairs` | `now()` figé par transaction ⇒ modifs + génération dans une même transaction non détectées |
+| `updated_at` de `test_cases` | sur toute mise à jour | seulement si `event_id` / `cell_ids` / `reference_end_date` changent (clause `WHEN`) ; `fct_set_updated_at()` réutilisé | Renommer / désactiver un cas ne doit pas relancer les modèles |
+| `event_end_date` | `max(post.group_date) over (...)` | `max` des groupes `post` du cas (`LATERAL`), indépendant des cellules retenues | Déterminisme même si `cell_ids` change |
+| Triggers | `create trigger` | `drop trigger if exists` + `create trigger` | `install.sql` idempotent |
+
+Limite connue (documentée dans le README) : `cell_ids` / `reference_end_date` modifiés **dans la même
+transaction** qu'une génération précédente ne sont pas détectés (`fct_set_updated_at()` utilise `now()`)
+→ rappeler `fct_generate_test_pairs`.
+
 ---
 
 ### P3 — Extraction `prediction_naming` (scanfire)
@@ -491,8 +527,8 @@ Fichiers :
 - `tests/unit/test_prediction_naming.py` (nouveau).
 
 Tâches :
-- [ ] Golden tests : sorties **identiques** à l'implémentation actuelle (dates `None`, `NaN`, `str`, `date`, `Timestamp`).
-- [ ] `add_output_names` : la prod garde `default_end_date = today` ; le benchmark passe `None` (date déjà figée par la vue).
+- [x] Golden tests : sorties **identiques** à l'implémentation actuelle (dates `None`, `NaN`, `str`, `date`, `Timestamp`).
+- [x] `add_output_names` : la prod garde `default_end_date = today` ; le benchmark passe `None` (date déjà figée par la vue).
 
 **Critère de sortie** : tests verts, `ruff check .` OK, aucun changement de nom de fichier en prod.
 
@@ -507,13 +543,13 @@ Fichiers :
 - `tests/test_change_detection_predict_output_layout.py` (nouveau)
 
 Tâches :
-- [ ] Ajouter `predict_output_layout` (`"production"` | `"benchmark"`, validé dans `__init__` → `ValueError`), `predict_run_name`, `predict_write_merged_all`.
-- [ ] Helper `_resolve_predict_base_dir()` (suffixe `/predictions` seulement en `production`).
-- [ ] Helper `_prediction_dir(base_dir, event_id, predict_date, cell_id)`.
-- [ ] `_write_single_geotiff_prediction` : recevoir `target_dir` + `merge_dir` au lieu de les calculer (les 2 appelants : `_write_prediction_batch`, `_save_assembled_predictions`).
-- [ ] `merge_predictions(..., write_merged_all: bool = True)`.
-- [ ] Manifest : `production` → inchangé ; `benchmark` → `_runs/<predict_date>/manifest.json` + `manifest_latest.json`, champ `run_name`, `output_layout`.
-- [ ] Tests (prédictions factices + `tmp_path`, sans GPU) :
+- [x] Ajouter `predict_output_layout` (`"production"` | `"benchmark"`, validé dans `__init__` → `ValueError`), `predict_run_name`, `predict_write_merged_all`.
+- [x] Helper `_resolve_predict_base_dir()` (suffixe `/predictions` seulement en `production`).
+- [x] Helper `_prediction_dir(base_dir, event_id, predict_date, cell_id)` (réalisé : `_prediction_dirs` → `(tile_dir, merge_dir)`).
+- [x] `_write_single_geotiff_prediction` : recevoir `target_dir` + `merge_dir` au lieu de les calculer (les 2 appelants : `_write_prediction_batch`, `_save_assembled_predictions`).
+- [x] `merge_predictions(..., write_merged_all: bool = True)`.
+- [x] Manifest : `production` → inchangé ; `benchmark` → `_runs/<predict_date>/manifest.json` + `manifest_latest.json`, champ `run_name`, `output_layout`.
+- [x] Tests (prédictions factices + `tmp_path`, sans GPU) :
   - `benchmark` : TIF par cellule + `_prob.tif` + TIF fusionné par paire dans `<out>/<event_id>/`, pas de `merged_all.tif`, pas de `predictions/`, pas de dossier date/cellule ;
   - `production` : arborescence identique à aujourd'hui (non-régression) ;
   - les deux chemins d'écriture (per-tile et overlap-blended).
@@ -532,11 +568,63 @@ Fichiers :
 - `scripts/validate_benchmark_configs.py` (nouveau)
 
 Tâches :
-- [ ] Dériver chaque config de `rcm_change_detection_predict.yaml` + hyperparamètres de la config d'entraînement du checkpoint.
-- [ ] `validate_benchmark_configs.py` : pour chaque modèle du registre, `train.py predict --config <cfg> --print_config` (parsing LightningCLI), existence du checkpoint, unicité/format de `name`, cohérence `in_channels == len(band_names) + 1`.
-- [ ] Optionnel : instancier le modèle + charger les poids sur CPU (`strict=True`) pour détecter les incohérences d'architecture tôt.
+- [x] Dériver chaque config de `rcm_change_detection_predict.yaml` + hyperparamètres de la config d'entraînement du checkpoint (modèle prod de référence fait ; autres modèles → après P0).
+- [x] `validate_benchmark_configs.py` : pour chaque modèle du registre, `train.py predict --config <cfg> --print_config` (parsing LightningCLI), existence du checkpoint, unicité/format de `name`, cohérence `in_channels == len(band_names) + 1`.
+- [x] Optionnel : instancier le modèle + charger les poids sur CPU (`strict=True`) pour détecter les incohérences d'architecture tôt.
 
 **Critère de sortie** : script de validation vert pour tous les modèles du registre.
+
+#### ✅ Journal de réalisation P3 + P4 + P5 (2026-10-08)
+
+**P3 (scanfire)** — `scanfire_modules/pipeline/orchestrator/prediction_naming.py` (`fmt_date`,
+`build_output_name`, `add_output_names`, `OUTPUT_NAME_FIELDS`) ; `SegmentationOrchestrator._fmt_date` /
+`build_output_name` / `_export_csv` délèguent (signatures conservées). `tests/unit/test_prediction_naming.py` :
+copie figée de l'ancienne implémentation + chaînes golden (15 types de dates × 4 champs, export CSV complet
+comparé via `assert_frame_equal`). 96 tests verts dans l'image `scanfire-scanfire_data_processing`
+(94 + 2 skips dans le venv local sans rasterio). `ruff check` OK sur les fichiers touchés.
+
+**P4 (geo-deep-learning)** — `ChangeDetectionChangeFormer` : `predict_output_layout`
+(`Literal`, + `ValueError`), `predict_run_name`, `predict_write_merged_all`, helpers
+`_resolve_predict_base_dir`, `_prediction_dirs`, `_write_manifests` ; `merge_predictions(write_merged_all=)`.
+`tests/test_change_detection_predict_output_layout.py` (21 tests) : benchmark per-tile + overlap-blended,
+2 paires sur mêmes cellules sans collision, re-run idempotent, non-régression prod (arborescence + clés
+du manifest identiques). `train.py predict --print_config` sur `rcm_change_detection_predict.yaml` inchangé
+→ `predict_output_layout: production`.
+
+**P5 (geo-deep-learning)** — `configs/benchmark/` : `models.yaml`, `cs2base_cosine_restarts_e24_predict.yaml`
+(modèle prod = référence), `_template_predict.yaml`, `README.md` ; `scripts/validate_benchmark_configs.py`
++ `tests/test_validate_benchmark_configs.py` (35 tests dont 2 lents `GDL_RUN_CLI_TESTS=1`). Validation
+bout-en-bout avec checkpoint synthétique au vrai nom : registre + statique + hparams + `--cli` +
+`--load-weights` → `OK`. Override `init_args`-seul validé par le vrai LightningCLI.
+
+Écarts / ajouts par rapport au plan :
+| Sujet | Plan | Réalisé | Raison |
+|---|---|---|---|
+| Helper dossier | `_prediction_dir` | `_prediction_dirs` → `(tile_dir, merge_dir)` | Un seul point de décision du layout pour les 2 dossiers |
+| `predict_write_merged_all` | `bool = True` | `bool \| None = None` (auto selon layout) | Benchmark sûr même sans override |
+| Manifest prod | inchangé | inchangé (`output_layout` / `run_name` ajoutés seulement si benchmark / `run_name`) | Contrat scanfire strict |
+| `predict_output_dir` absent (benchmark) | — | `<default_root_dir>/benchmark/<run_name ou modèle>` | Pas de sortie dans `predictions/` prod |
+| Registre `config` | chemin `/app/...` | chemin **relatif au registre** accepté (recommandé) | Même fichier sur poste et conteneur |
+| Config modèle | — | `csv_root_folder` / `csv_file_name` = `__set_by_benchmark_override__` | Requis par le parseur, remplacés par l'override |
+| Validateur | `in_channels == len(band_names)+1` | + comparaison des **hparams d'archi du checkpoint** vs config, `in_channels` du checkpoint, `--path-map` | La prod charge en `strict=False` : une incohérence ne donne qu'un warning |
+| `prediction_naming` (tests) | import normal | chargé par chemin | `orchestrator/__init__` importe toute la pile (rasterio, GDAL) |
+| `add_output_names` colonnes manquantes | — | `ValueError` explicite | Avant : `KeyError` dans `apply` |
+
+Constats (hors périmètre, à arbitrer) :
+1. `vw_input_files_for_change_detection` n'expose pas `event_end_date` → la prod écrit **toujours**
+   `_end_<date du jour>` (comportement conservé à l'identique). → **Arbitré (décision 7)** : benchmark
+   alimenté par `events.end_date` (renseigné sur les données de test) ; prod inchangée.
+2. Chemin per-tile (`tile_stride == tile_size`) : les tuiles d'une même cellule partagent `output_name`
+   → écrasement. Sans perte avec cellule 200 px + buffer 50 / tuile 256 (chaque tuile contient toute la
+   cellule), mais **perte de données** si une cellule dépassait la taille de tuile. Calcul redondant (×4).
+3. `load_weights_from_checkpoint(strict=False)` en prod : incohérence d'archi silencieuse (warning).
+   → **Arbitré (décision 6)** : `weights_strict` (auto `True` en benchmark, forcé dans l'override,
+   vérifié par `--cli`) ; prod inchangée. Tests : `test_weights_strict_*`,
+   `test_configure_model_forwards_strict`, `test_load_weights_strict_raises_on_mismatch` (64 tests verts).
+4. Échecs préexistants : `tests/test_utils_models.py` (4), `tests/test_notebooks_00quickstart.py`
+   (import `geo_deep_learning.tools.utils`), scanfire `test_qc_frames_archives.py` /
+   `test_segmentation_ingestion_service.py` (collecte, `vectorize_probability_zones`).
+5. `fmt_date(pd.NaT)` renvoie `"NaT"` (quirk legacy conservé par compatibilité).
 
 ---
 
@@ -545,15 +633,15 @@ Tâches :
 
 Fichiers (`scanfire_modules/pipeline/orchestrator/`) :
 - `benchmark/registry.py` — chargement / validation `models.yaml` (dataclass `BenchmarkModel`).
-- `benchmark/repository.py` — accès DB : cas actifs, `fct_reset_test_case_pairs`, paires à traiter, CRUD `test_runs`.
-- `benchmark/override.py` — génération `benchmark_override.yaml` + `config_sha256`.
+- `benchmark/repository.py` — accès DB : cas actifs, `vw_test_case_summary.needs_pair_generation` → `fct_generate_test_pairs`, paires à traiter, CRUD `test_runs`.
+- `benchmark/override.py` — génération `benchmark_override.yaml` (identique à `build_override()` du validateur, **dont `weights_strict: true`**) + `config_sha256`.
 - `entrypoints/model_benchmark_orchestrator_service_main.py` — `ModelBenchmarkOrchestrator(Processor)` + `main()`.
 - `model_benchmark_orchestrator.py` — shim (même pattern que `segmentation_orchestrator.py`).
 - `entrypoints/base.py` — ajouter `ModelBenchmarkOrchestrator` dans la docstring de hiérarchie.
 - `tests/unit/test_model_benchmark_registry.py`, `test_model_benchmark_override.py`, `test_model_benchmark_orchestrator.py`.
 
 Tâches :
-- [ ] Régénération des paires si `test_cases.updated_at > pairs_generated_at`.
+- [ ] Régénération incrémentale des paires (`fct_generate_test_pairs`) si `vw_test_case_summary.needs_pair_generation`.
 - [ ] Sélection « à traiter » par modèle (§3.7) ; filtres CLI `--model`, `--test-case`, `--force`, `--dry-run`.
 - [ ] Export CSV `<BENCHMARK_CSV_DIR>/<model_name>/vw_input_files_for_model_test.csv` via `prediction_naming.add_output_names`.
 - [ ] `subprocess.run([... "predict", "--config", cfg, "--config", ovr])` ; capture rc ; `test_runs` `running` → `succeeded`/`failed` (+ `error` = fin du stderr).
@@ -635,6 +723,8 @@ Tâches :
 | 3 | GPU | Partagé avec `event_detection_orchestrator`, aucune gestion spécifique |
 | 4 | Exécution | **Un seul passage puis arrêt** (pas de polling, `restart: "no"`) |
 | 5 | Filtres beam | **Conservés** depuis la config de chaque modèle (jamais surchargés) |
+| 6 | Chargement des poids (constat 3) | **`strict=True` en benchmark** (meilleurs poids de chaque modèle, même archi). Nouvel init arg `weights_strict: bool \| None = None` de `ChangeDetectionChangeFormer` : `None` ⇒ `True` en layout `benchmark`, `False` sinon (prod / fine-tuning inchangés) ; forcé à `true` dans l'override ; incompatible avec `load_parts` (`ValueError`). Une incohérence d'archi fait échouer le run (`test_runs.status = failed`) au lieu d'un warning |
+| 7 | `event_end_date` (constat 1) | Les événements testés ont des dates début/fin renseignées → `event_end_date` = `events.end_date` (sauf `reference_end_date` explicite). Le repli `max(post.group_date)` reste en filet de sécurité. Vue prod `vw_input_files_for_change_detection` **inchangée** (hors périmètre) |
 
 ## 12. Annexe — Inventaire (à compléter en P0)
 

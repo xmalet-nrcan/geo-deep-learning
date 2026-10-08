@@ -8,7 +8,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import kornia as krn
 import numpy as np
@@ -81,6 +81,15 @@ MASK_VALID_THRESHOLD = 0.5
 # ``_patch_degenerate_samples``) to avoid near-zero LayerNorm variance.
 MIN_VALID_RATIO_FOR_PATCH = 0.05
 
+# Predict output directory layouts (see ``predict_output_layout`` in ``__init__``).
+PREDICT_LAYOUT_PRODUCTION = "production"
+PREDICT_LAYOUT_BENCHMARK = "benchmark"
+PREDICT_OUTPUT_LAYOUTS = (PREDICT_LAYOUT_PRODUCTION, PREDICT_LAYOUT_BENCHMARK)
+
+# Benchmark layout: per-run manifests live under ``<dir>/_runs/<predict_date>/``.
+BENCHMARK_RUNS_DIRNAME = "_runs"
+BENCHMARK_LATEST_MANIFEST = "manifest_latest.json"
+
 
 class _ForwardLossOutput(NamedTuple):
     """Result of :meth:`ChangeDetectionChangeFormer._forward_and_get_loss`.
@@ -124,9 +133,13 @@ class ChangeDetectionChangeFormer(LightningModule):
             class_labels: list[str] | None = None,
             class_colors: list[str] | None = None,
             weights_from_checkpoint_path: str | None = None,
+            weights_strict: bool | None = None,
             in_channels: int | None = None,
             threshold: float = 0.5,
             predict_output_dir: str | None = None,  # For Outputs
+            predict_output_layout: Literal["production", "benchmark"] = "production",
+            predict_run_name: str | None = None,
+            predict_write_merged_all: bool | None = None,
             deep_supervision: bool = True,
             deep_supervision_weights: list[float] | None = None,
             speckle_noise_std: float = 0.15,
@@ -149,6 +162,13 @@ class ChangeDetectionChangeFormer(LightningModule):
         """Initialize the model.
 
         Args:
+            weights_strict: Load ``weights_from_checkpoint_path`` with
+                ``strict=True`` (any missing / unexpected key or shape mismatch
+                raises instead of logging a warning and leaving layers randomly
+                initialised). ``None`` (default) ⇒ ``True`` in the ``benchmark``
+                predict layout (best weights of the *same* architecture),
+                ``False`` otherwise (transfer between model variants, e.g.
+                ChangeFormerV6 → V7). Incompatible with ``load_parts``.
             in_channels: Number of data channels per image. Optional — when
                 omitted (recommended) it is inferred from the DataModule's
                 ``band_names`` (``len(band_names) + 1`` for BITMASK_CROPPED,
@@ -204,6 +224,35 @@ class ChangeDetectionChangeFormer(LightningModule):
                       encoder_weights: imagenet   # or null
                       embed_dim: 256
                       fusion: concat_diff         # concat | diff | signed_diff
+            predict_output_dir: Root directory for predict outputs. In the
+                ``production`` layout a ``predictions`` sub-folder is appended
+                when missing; in the ``benchmark`` layout it is used as-is.
+            predict_output_layout: Directory layout of predict outputs:
+
+                - ``"production"`` (default, consumed by scanfire's ingestion)::
+
+                      <dir>/predictions/<event_id>/<YYYYMMDD_HHMM>/<cell_id>/<output_name>.tif
+                      <dir>/predictions/<event_id>/<YYYYMMDD_HHMM>/<merged per pre/post pair>.tif
+                      <dir>/predictions/<event_id>/<YYYYMMDD_HHMM>/merged_all.tif
+                      <dir>/predictions/manifest.json
+
+                - ``"benchmark"`` (multi-model comparison, see
+                  ``docs/dev-plans/2026-10-08_model_benchmark_predict.md``)::
+
+                      <dir>/<event_id>/<output_name>.tif            (one per cell)
+                      <dir>/<event_id>/<output_name>_prob.tif
+                      <dir>/<event_id>/<merged per pre/post pair>.tif
+                      <dir>/_runs/<YYYYMMDD_HHMM>/manifest.json
+                      <dir>/manifest_latest.json
+
+                  ``<dir>`` is typically ``<benchmark_output_root>/<model_name>``.
+                  Re-running the same model overwrites its rasters (idempotent).
+            predict_run_name: Optional run label (e.g. benchmark model name)
+                written to the manifest as ``run_name``.
+            predict_write_merged_all: Write the global ``merged_all.tif`` per
+                event. ``None`` (default) ⇒ ``True`` in the ``production`` layout,
+                ``False`` in the ``benchmark`` layout (it mixes different
+                pre/post pairs and would be meaningless for comparison).
         """
         super().__init__()
         self.save_hyperparameters()
@@ -314,6 +363,30 @@ class ChangeDetectionChangeFormer(LightningModule):
             setattr(self, f"{split}_recall", metrics["recall"])
 
         self.predict_output_dir = predict_output_dir
+        if predict_output_layout not in PREDICT_OUTPUT_LAYOUTS:
+            msg = (
+                f"predict_output_layout must be one of {PREDICT_OUTPUT_LAYOUTS}, "
+                f"got {predict_output_layout!r}"
+            )
+            raise ValueError(msg)
+        self.predict_output_layout = predict_output_layout
+        self.predict_run_name = predict_run_name
+        self.predict_write_merged_all = (
+            (predict_output_layout == PREDICT_LAYOUT_PRODUCTION)
+            if predict_write_merged_all is None
+            else bool(predict_write_merged_all)
+        )
+        self.weights_strict = (
+            (predict_output_layout == PREDICT_LAYOUT_BENCHMARK)
+            if weights_strict is None
+            else bool(weights_strict)
+        )
+        if self.weights_strict and self.hparams.get("load_parts") is not None:
+            msg = (
+                "weights_strict=True is incompatible with load_parts "
+                "(partial loading is always non-strict)"
+            )
+            raise ValueError(msg)
 
     def _build_classification_metrics(self, num_classes: int, task_type: str) -> dict[str, Any]:
         """Instantiate IoU/F1/Precision/Recall metrics for one data split.
@@ -443,14 +516,16 @@ class ChangeDetectionChangeFormer(LightningModule):
             map_location = self.device
             load_parts = self.hparams.get("load_parts")
             logger.info(
-                "Loading weights from checkpoint: %s",
+                "Loading weights from checkpoint: %s (strict=%s)",
                 self.weights_from_checkpoint_path,
+                self.weights_strict,
             )
             load_weights_from_checkpoint(
                 self.model,
                 self.weights_from_checkpoint_path,
                 load_parts=load_parts,
                 map_location=map_location,
+                strict=self.weights_strict,
             )
 
     def _resolve_in_channels(self) -> int:
@@ -1690,6 +1765,10 @@ class ChangeDetectionChangeFormer(LightningModule):
         }
         if overlap_blended:
             manifest["overlap_blended"] = True
+        if self.predict_output_layout != PREDICT_LAYOUT_PRODUCTION:
+            manifest["output_layout"] = self.predict_output_layout
+        if self.predict_run_name:
+            manifest["run_name"] = self.predict_run_name
         return manifest
 
     @staticmethod
@@ -1699,13 +1778,78 @@ class ChangeDetectionChangeFormer(LightningModule):
             json.dump(manifest, f, indent=2, default=str)
         logger.info("Saved prediction manifest to %s", manifest_path)
 
+    def _write_manifests(self, manifest: dict[str, Any], base_dir: Path, predict_date: str) -> None:
+        """Write the run manifest according to :attr:`predict_output_layout`.
+
+        - ``production``: ``<base_dir>/manifest.json`` (unchanged, read by scanfire).
+        - ``benchmark``: ``<base_dir>/_runs/<predict_date>/manifest.json`` (history,
+          one per run) + a copy at ``<base_dir>/manifest_latest.json``.
+        """
+        if self.predict_output_layout == PREDICT_LAYOUT_PRODUCTION:
+            self._write_manifest_file(manifest, base_dir)
+            return
+
+        run_dir = base_dir / BENCHMARK_RUNS_DIRNAME / predict_date
+        run_dir.mkdir(parents=True, exist_ok=True)
+        self._write_manifest_file(manifest, run_dir)
+        latest_path = base_dir / BENCHMARK_LATEST_MANIFEST
+        with open(latest_path, "w") as f:
+            json.dump(manifest, f, indent=2, default=str)
+        logger.info("Saved latest benchmark manifest to %s", latest_path)
+
+    def _resolve_predict_base_dir(self) -> Path:
+        """Root directory of predict outputs, according to :attr:`predict_output_layout`.
+
+        - ``production``: ``predict_output_dir`` (or ``trainer.default_root_dir``)
+          with a ``predictions`` sub-folder appended when missing (historical
+          behaviour, expected by scanfire).
+        - ``benchmark``: ``predict_output_dir`` used as-is (typically
+          ``<benchmark_output_root>/<model_name>``); falls back to
+          ``<default_root_dir>/benchmark/<predict_run_name or change_detection_model>``.
+        """
+        if self.predict_output_layout == PREDICT_LAYOUT_PRODUCTION:
+            if self.predict_output_dir is not None:
+                base_dir = Path(self.predict_output_dir)
+                if base_dir.name != "predictions":
+                    base_dir = base_dir / "predictions"
+                return base_dir
+            return Path(self.trainer.default_root_dir) / "predictions"
+
+        if self.predict_output_dir is not None:
+            return Path(self.predict_output_dir)
+        run_name = self.predict_run_name or str(self.change_detection_model)
+        return Path(self.trainer.default_root_dir) / "benchmark" / run_name
+
+    def _prediction_dirs(
+            self,
+            base_dir: Path,
+            event_id: str,
+            predict_date: str,
+            cell_id: str,
+    ) -> tuple[Path, Path]:
+        """Return ``(tile_dir, merge_dir)`` for one prediction.
+
+        ``tile_dir`` receives the per-cell GeoTIFF (+ ``_prob``); ``merge_dir``
+        receives the cross-cell merges (per pre/post pair, ``merged_all.tif``).
+
+        - ``production``: ``<base>/<event_id>/<predict_date>/<cell_id>`` and
+          ``<base>/<event_id>/<predict_date>``.
+        - ``benchmark``: both ``<base>/<event_id>`` (cell-level names already
+          contain ``_cell-<id>``; merged names do not → no collision).
+        """
+        if self.predict_output_layout == PREDICT_LAYOUT_PRODUCTION:
+            merge_dir = base_dir / str(event_id) / predict_date
+            return merge_dir / str(cell_id), merge_dir
+        event_dir = base_dir / str(event_id)
+        return event_dir, event_dir
+
     @staticmethod
     def _write_single_geotiff_prediction(  # noqa: PLR0913
             *,
             pred_np: np.ndarray,
             profile: dict[str, Any],
-            base_dir: Path,
-            predict_date: str,
+            tile_dir: Path,
+            merge_dir: Path,
             cell_id: str,
             pair_id: str | None,
             event_id: str,
@@ -1739,9 +1883,11 @@ class ChangeDetectionChangeFormer(LightningModule):
         :data:`PROBABILITY_NODATA`) is written next to the class raster and
         referenced in the manifest entry as ``probability_tif_path``, for
         downstream probability-zone vectorization.
+
+        ``tile_dir`` / ``merge_dir`` come from :meth:`_prediction_dirs` (layout
+        dependent): the raster is written to ``tile_dir`` and registered for the
+        cross-cell merges written to ``merge_dir``.
         """
-        event_date_dir = base_dir / event_id / predict_date
-        tile_dir = event_date_dir / cell_id
         tile_dir.mkdir(parents=True, exist_ok=True)
 
         out_name = prediction_output_filename(output_name, pair_id=pair_id, legacy_name=legacy_name)
@@ -1760,7 +1906,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                 dst.write(prob_np[np.newaxis, :, :].astype(np.float32))
             logger.info("Saved probability raster to %s", prob_path)
 
-        event_date_key = str(event_date_dir)
+        event_date_key = str(merge_dir)
         merge_key = group_merge_key(
             event_date_key, event_id, event_start_date, event_end_date,
             group_id_pre, group_date_pre, group_id_post, group_date_post,
@@ -1809,14 +1955,17 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         for source_key, info in assembled.items():
             safe_name = Path(source_key.replace("|", "_").replace("/", "_")).stem
+            cell_id = str(info["cell_id"])
+            event_id = str(info.get("event_id", "unknown_event"))
+            tile_dir, merge_dir = self._prediction_dirs(base_dir, event_id, predict_date, cell_id)
             self._write_single_geotiff_prediction(
                 pred_np=info["predictions"],  # [H, W] uint16
                 profile=info["profile"],
-                base_dir=base_dir,
-                predict_date=predict_date,
-                cell_id=str(info["cell_id"]),
+                tile_dir=tile_dir,
+                merge_dir=merge_dir,
+                cell_id=cell_id,
                 pair_id=info.get("pair_id"),
-                event_id=str(info.get("event_id", "unknown_event")),
+                event_id=event_id,
                 event_start_date=info.get("event_start_date"),
                 event_end_date=info.get("event_end_date"),
                 beam=info.get("beam"),
@@ -1834,17 +1983,27 @@ class ChangeDetectionChangeFormer(LightningModule):
                 prob_np=info.get("probability"),
             )
 
-        self._write_manifest_file(manifest, base_dir)
+        self._write_manifests(manifest, base_dir, predict_date)
         # Merge across cells / groups (same logic as per-tile path)
-        merge_predictions(group_tile_paths, event_all_tile_paths)
+        merge_predictions(group_tile_paths, event_all_tile_paths, write_merged_all=self.predict_write_merged_all)
         logger.info("All blended predictions saved to %s", base_dir)
 
     def on_predict_end(self) -> None:
         """Appelé après que tous les predict_step soient terminés.
 
-        Structure de sortie :
+        Structure de sortie (``predict_output_layout``) :
+
+        - ``production`` (défaut, consommée par scanfire) ::
+
             output_dir / predictions / EVENT_ID / PREDICTION_DATE / cell_id / image.tif
             output_dir / predictions / EVENT_ID / PREDICTION_DATE / merged.tif
+            output_dir / predictions / manifest.json
+
+        - ``benchmark`` (comparaison multi-modèles) ::
+
+            output_dir / EVENT_ID / image.tif (+ _prob.tif, + fusion par paire pre/post)
+            output_dir / _runs / PREDICTION_DATE / manifest.json
+            output_dir / manifest_latest.json
         """
         predictions = self.trainer.predict_loop.predictions
         if not predictions:
@@ -1853,15 +2012,10 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         # --- Base output directory ---
         predict_date = datetime.now().strftime("%Y%m%d_%H%M")
-        if self.predict_output_dir is not None:
-            base_dir = Path(self.predict_output_dir)
-            if base_dir.name != "predictions":
-                base_dir = base_dir / "predictions"
-        else:
-            base_dir = Path(self.trainer.default_root_dir) / "predictions"
+        base_dir = self._resolve_predict_base_dir()
 
         base_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Saving predictions to %s", base_dir)
+        logger.info("Saving predictions to %s (layout=%s)", base_dir, self.predict_output_layout)
 
         # --- Try overlap-based tile reassembly (cosine blending) ---
         dm = getattr(self.trainer, "datamodule", None)
@@ -1888,8 +2042,8 @@ class ChangeDetectionChangeFormer(LightningModule):
                 batch_result, base_dir, predict_date, manifest, group_tile_paths, event_all_tile_paths,
             )
 
-        self._write_manifest_file(manifest, base_dir)
-        merge_predictions(group_tile_paths, event_all_tile_paths)
+        self._write_manifests(manifest, base_dir, predict_date)
+        merge_predictions(group_tile_paths, event_all_tile_paths, write_merged_all=self.predict_write_merged_all)
         logger.info("All predictions saved to %s", base_dir)
 
     def _crop_prediction_to_cell(
@@ -2017,14 +2171,16 @@ class ChangeDetectionChangeFormer(LightningModule):
                 "transform": transform,
             }
 
+            event_id = extract_scalar(batch_event_ids, i, default="unknown_event")
+            tile_dir, merge_dir = self._prediction_dirs(base_dir, event_id, predict_date, cell_id)
             self._write_single_geotiff_prediction(
                 pred_np=pred_np,
                 profile=profile_i,
-                base_dir=base_dir,
-                predict_date=predict_date,
+                tile_dir=tile_dir,
+                merge_dir=merge_dir,
                 cell_id=cell_id,
                 pair_id=extract_scalar(batch_pair_ids, i, default=None),
-                event_id=extract_scalar(batch_event_ids, i, default="unknown_event"),
+                event_id=event_id,
                 event_start_date=extract_scalar(batch_event_start_dates, i, default=None),
                 event_end_date=extract_scalar(batch_event_end_dates, i, default=None),
                 beam=extract_scalar(batch_beams, i, default=None),

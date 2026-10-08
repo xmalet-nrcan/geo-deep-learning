@@ -379,11 +379,15 @@ def chunked_merge(
 def merge_predictions(
     group_tile_paths: dict[tuple[str, ...], list[Path]],
     event_all_tile_paths: dict[str, list[Path]],
+    *,
+    write_merged_all: bool = True,
 ) -> None:
     """Merge tiles in two passes.
 
     1. Per event/pre-post pair/beam/pass → one self-describing GeoTIFF
-    2. All tiles in the event/date dir    → merged_all.tif
+    2. All tiles in the event/date dir    → merged_all.tif (skipped when
+       ``write_merged_all`` is False, e.g. benchmark layout where it would mix
+       unrelated pre/post pairs)
 
     Uses :func:`chunked_merge` to handle large tile counts without
     exceeding the OS open-file descriptor limit.
@@ -427,6 +431,10 @@ def merge_predictions(
 
     # Force GC between passes to release all FDs from Pass 1
     gc.collect()
+
+    if not write_merged_all:
+        logger.info("Global merge (merged_all.tif) disabled — skipping pass 2.")
+        return
 
     # --- Pass 2 : merge global par EVENT_ID / PREDICTION_DATE ---
     for event_date_dir_str, tile_paths in event_all_tile_paths.items():
