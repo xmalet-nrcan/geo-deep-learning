@@ -16,6 +16,16 @@ COMPOSE := docker compose -f $(COMPOSE_FILE)
 # ---- Service names ----
 SERVICE_DEFAULT ?= geo-deep-learning
 SERVICE_ORCH ?= event_detection_orchestrator
+SERVICE_BENCH ?= model_benchmark_orchestrator
+
+# ---- Model benchmark (profile "benchmark", single pass) ----
+COMPOSE_BENCH := $(COMPOSE) --profile benchmark
+# Extra orchestrator args, e.g. BENCHMARK_ARGS="--model cs2base_cosine_restarts_e24 --test-case 3 --force"
+BENCHMARK_ARGS ?=
+# Extra validator args, e.g. VALIDATE_ARGS="--model cs2base_cosine_restarts_e24"
+VALIDATE_ARGS ?= --cli --load-weights
+# Extra output-checker args, e.g. CHECK_ARGS="--event 42 --quiet"
+CHECK_ARGS ?=
 
 # Generic service selector for per-service targets
 SERVICE ?= $(SERVICE_DEFAULT)
@@ -24,7 +34,8 @@ SERVICE ?= $(SERVICE_DEFAULT)
 TRAIN_CMD ?= fit
 
 .PHONY: help build up stop restart ps status logs logs-follow logs-service logs-follow-service \
-        train train-cs2 orchestrator-start down cleanup extract-metrics sweep-bands
+        train train-cs2 orchestrator-start down cleanup extract-metrics sweep-bands \
+        benchmark-start benchmark-dry-run benchmark-validate benchmark-check logs-benchmark benchmark-status benchmark-stop
 
 # Output CSV for extract-metrics (one row appended per training run)
 METRICS_CSV ?= results/test_metrics.csv
@@ -44,6 +55,13 @@ help:
 	@echo "  extract-metrics     Parse SERVICE logs (test metrics + best ckpt) into METRICS_CSV"
 	@echo "  sweep-bands         Train sequentially on all 5 band-combo configs, log results to CSV"
 	@echo "  orchestrator-start  Start orchestrator service in detached mode"
+	@echo "  benchmark-start     Model benchmark: single pass in background (BENCHMARK_ARGS=...)"
+	@echo "  benchmark-dry-run   Model benchmark: export CSV + override only (foreground, no DB write)"
+	@echo "  benchmark-validate  Validate configs/benchmark (VALIDATE_ARGS=$(VALIDATE_ARGS))"
+	@echo "  benchmark-check     Check benchmark outputs: layout, rasters, cross-model (CHECK_ARGS=...)"
+	@echo "  logs-benchmark      Follow the model benchmark logs"
+	@echo "  benchmark-status    Show the model benchmark container state / exit code"
+	@echo "  benchmark-stop      Stop + remove the model benchmark container"
 	@echo "  down                Stop and remove containers/networks"
 	@echo "  cleanup             down + remove orphan containers and volumes"
 	@echo ""
@@ -51,6 +69,8 @@ help:
 	@echo "  COMPOSE_FILE=$(COMPOSE_FILE)"
 	@echo "  SERVICE_DEFAULT=$(SERVICE_DEFAULT)"
 	@echo "  SERVICE_ORCH=$(SERVICE_ORCH)"
+	@echo "  SERVICE_BENCH=$(SERVICE_BENCH)"
+	@echo "  BENCHMARK_ARGS=$(BENCHMARK_ARGS)"
 	@echo "  SERVICE=$(SERVICE)"
 	@echo "  TRAIN_CMD=$(TRAIN_CMD)"
 	@echo "  METRICS_CSV=$(METRICS_CSV)"
@@ -114,6 +134,38 @@ kill-sweep-bands:
 
 logs-orchestrator:
 	$(COMPOSE) logs -f --tail=200 $(SERVICE_ORCH)
+
+# ---- Model benchmark (docs/dev-plans/2026-10-08_model_benchmark_predict.md) ----
+# Single pass then the container exits (restart: "no"); runs in background so a
+# long benchmark survives the SSH session. Exit code: make benchmark-status.
+benchmark-start:
+	BENCHMARK_ARGS="$(BENCHMARK_ARGS)" $(COMPOSE_BENCH) up -d --build --force-recreate $(SERVICE_BENCH)
+	@echo "Benchmark started - follow with: make logs-benchmark ; exit code: make benchmark-status"
+
+# Foreground, removed afterwards: CSV + override + snapshot, no DB write, no predict.
+benchmark-dry-run:
+	$(COMPOSE_BENCH) run --rm --build $(SERVICE_BENCH) --dry-run $(BENCHMARK_ARGS)
+
+# Registry + configs + checkpoints (+ LightningCLI parsing + strict weight loading on CPU).
+benchmark-validate:
+	$(COMPOSE_BENCH) run --rm --build --entrypoint python $(SERVICE_BENCH) \
+		/app/scripts/validate_benchmark_configs.py $(VALIDATE_ARGS)
+
+# Read-only check of the outputs (P8 recette): layout, _prob / per-pair merges, filters,
+# exported pairs produced, raster dtype/nodata/values, same names + grid across models.
+benchmark-check:
+	$(COMPOSE_BENCH) run --rm --build --entrypoint python $(SERVICE_BENCH) \
+		/app/scripts/check_benchmark_outputs.py $(CHECK_ARGS)
+
+logs-benchmark:
+	$(COMPOSE_BENCH) logs -f --tail=200 $(SERVICE_BENCH)
+
+benchmark-status:
+	@docker inspect --format '{{.Name}}: {{.State.Status}} (exit code {{.State.ExitCode}}, finished {{.State.FinishedAt}})' \
+		$(SERVICE_BENCH) 2>/dev/null || echo "$(SERVICE_BENCH): no container"
+
+benchmark-stop:
+	$(COMPOSE_BENCH) rm --stop --force $(SERVICE_BENCH)
 
 down:
 	$(COMPOSE) down

@@ -25,6 +25,7 @@ noms **identiques entre modèles** pour un même cas de test. Pas de `merged_all
 | `<name>_predict.yaml` | Config predict d'un modèle (une par entrée du registre) |
 | `_template_predict.yaml` | Modèle de départ (non référencé) |
 | `../../scripts/validate_benchmark_configs.py` | Validation registre + configs + checkpoints |
+| `../../scripts/check_benchmark_outputs.py` | Contrôle des sorties après un run (recette P8) |
 
 Règles du registre : `name` ∈ `^[A-Za-z0-9_.-]+$`, unique (= dossier de sortie et
 `model_benchmark.test_runs.model_name`) ; `config` relatif = relatif à `models.yaml`.
@@ -91,6 +92,12 @@ Référence : `build_override()` dans `scripts/validate_benchmark_configs.py`
 ## Validation
 
 ```bash
+# Dans le conteneur orchestrateur (registre + configs + checkpoints + LightningCLI + poids stricts)
+make benchmark-validate                                   # VALIDATE_ARGS="--cli --load-weights" par défaut
+make benchmark-validate VALIDATE_ARGS="--model <name> --cli"
+```
+Équivalent hors Docker :
+```bash
 # Registre + configs + hparams des checkpoints (dans le conteneur orchestrateur)
 python scripts/validate_benchmark_configs.py
 # + parsing LightningCLI avec l'override + chargement strict des poids sur CPU
@@ -115,5 +122,53 @@ Code retour `1` si au moins une erreur. `--path-map SRC=DST` : découpage sur le
 
 1. Copier `_template_predict.yaml` → `<name>_predict.yaml`, compléter les `TODO`.
 2. Ajouter l'entrée dans `models.yaml` (`enabled: true`).
-3. `python scripts/validate_benchmark_configs.py --model <name> --cli --load-weights` → `OK`.
-4. Lancer le benchmark (P7 : `make benchmark-dry-run` puis `make benchmark-start`).
+3. `make benchmark-validate VALIDATE_ARGS="--model <name> --cli --load-weights"` → `OK`.
+4. `make benchmark-dry-run` puis `make benchmark-start`.
+
+## Lancer le benchmark (service `model_benchmark_orchestrator`, profil `benchmark`)
+
+Pré-requis : `.env` avec `DATABASE_URL` (modèle : `.env.example`), schéma `model_benchmark`
+installé (`scanfire/database_schemas/model_benchmark/install.sql`), cas de test actifs.
+
+```bash
+make benchmark-dry-run                       # premier plan : CSV + override + snapshot, aucune écriture DB, aucun predict
+make benchmark-start                         # arrière-plan : passage unique puis arrêt du conteneur
+make benchmark-start BENCHMARK_ARGS="--model cs2base_cosine_restarts_e24 --test-case 3 --force"
+make logs-benchmark                          # suivre
+make benchmark-status                        # état + code retour (0 OK, 1 ≥ 1 modèle en échec, 2 registre invalide)
+make benchmark-check                         # contrôle des sorties (lecture seule), voir ci-dessous
+make benchmark-stop                          # arrêter / supprimer le conteneur
+```
+
+| `BENCHMARK_ARGS` | Effet |
+|---|---|
+| `--model NAME` (répétable) | Seulement ces modèles (même `enabled: false`) |
+| `--test-case ID` (répétable) | Seulement ces cas actifs |
+| `--force` | Ignore `test_runs` : relance les cas déjà à jour |
+| `--dry-run` | Export seulement (= `make benchmark-dry-run`) |
+
+Variables (`.env` ou shell de l'hôte) : `BENCHMARK_OUTPUT_DIR` (vide ⇒ `output_root` de
+`models.yaml`), `BENCHMARK_CSV_DIR` (défaut `/mnt/geospatial/projet_RCM_scanfire/benchmark_outputs/_csv`),
+`LOGGER_LEVEL`.
+
+- Ni `make up` ni `make orchestrator-start` ne démarrent le benchmark (profil `benchmark`).
+- GPU partagé avec `event_detection_orchestrator`, modèles exécutés **séquentiellement**.
+- Suivi en base : `SELECT * FROM model_benchmark.test_runs ORDER BY run_id DESC;` ;
+  log complet de chaque predict : `<output_root>/<name>/_runs/<YYYYMMDD_HHMMSS>/predict.log` (heure UTC du conteneur).
+- Le service monte `../scanfire/scanfire_modules` : le dépôt scanfire doit être à jour (branche benchmark).
+
+## Contrôler les sorties
+
+`scripts/check_benchmark_outputs.py` — `make benchmark-check [CHECK_ARGS="--model X --event 42 --quiet"]`.
+Par modèle : arborescence (pas de `predictions/` ni `merged_all.tif`), `_prob.tif` + TIF fusionné de la
+paire pour chaque TIF par cellule, filtres beam / sat_pass respectés, toutes les paires exportées produites,
+rasters (`uint16`/`32767`, `float32`/`-1.0`, valeurs, grilles), puis entre modèles : mêmes noms (écarts dus aux
+filtres signalés en INFO) et même grille pour un même nom. Code retour `1` si au moins une erreur.
+
+| Option | Effet |
+|---|---|
+| `--model NAME` / `--event ID` (répétables) | Restreindre |
+| `--no-rasters` | Sans lecture des rasters (rapide) |
+| `--csv-dir DIR` | Export de l'orchestrateur (défaut `BENCHMARK_CSV_DIR`) ; `--csv-dir=` pour ignorer |
+| `--output-root DIR`, `--path-map SRC=DST` | Hors conteneur (chemins locaux) |
+| `--quiet` | Masque les INFO |

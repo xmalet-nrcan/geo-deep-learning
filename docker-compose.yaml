@@ -80,3 +80,46 @@ services:
     entrypoint: [ "python", "/app/scanfire_modules/pipeline/orchestrator/segmentation_orchestrator.py" ]
     deploy:
       <<: *gpu-deploy
+
+  # === Model Benchmark Orchestrator (dev plan docs/dev-plans/2026-10-08_model_benchmark_predict.md) ===
+  # Profile "benchmark": NEVER started by `make up` / `orchestrator-start`.
+  # Single pass then exit (restart: "no"): every model of configs/benchmark/models.yaml
+  # on the active model_benchmark test cases → <output_root>/<model>/<event_id>/*.tif.
+  # GPU shared with event_detection_orchestrator (no special handling).
+  # Launch: make benchmark-start [BENCHMARK_ARGS="--model X --test-case 3 --force"]
+  model_benchmark_orchestrator:
+    build:
+      context: .
+      dockerfile: orchestrator.Dockerfile
+    runtime: nvidia
+    shm_size: '32gb'
+    container_name: model_benchmark_orchestrator
+    profiles: [ "benchmark" ]
+    restart: "no"
+    user: '9005'
+    env_file:
+      - .env
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTORCH_ALLOC_CONF=expandable_segments:True
+      - LOGGER_LEVEL=${LOGGER_LEVEL:-INFO}
+      - BENCHMARK_MODELS_FILE=/app/configs/benchmark/models.yaml
+      - BENCHMARK_CSV_DIR=${BENCHMARK_CSV_DIR:-/mnt/geospatial/projet_RCM_scanfire/benchmark_outputs/_csv}
+      # empty ⇒ output_root of models.yaml
+      - BENCHMARK_OUTPUT_DIR=${BENCHMARK_OUTPUT_DIR:-}
+      # extra CLI args, interpolated from the host at `up` time (see Makefile)
+      - BENCHMARK_ARGS=${BENCHMARK_ARGS:-}
+    volumes:
+      - "./configs:/app/configs:ro"
+      - "./scripts:/app/scripts:ro"
+      - "./models_checkpoints:/app/models_checkpoints:ro"
+      - "../scanfire/scanfire_modules:/app/scanfire_modules:ro"
+      - "/mnt/geospatial/projet_RCM_scanfire:/mnt/geospatial/projet_RCM_scanfire:rw"
+    # BENCHMARK_ARGS (env, `up`) + "$@" (args of `docker compose run … <args>`)
+    entrypoint:
+      - sh
+      - -c
+      - exec python /app/scanfire_modules/pipeline/orchestrator/model_benchmark_orchestrator.py $${BENCHMARK_ARGS:-} "$$@"
+      - model_benchmark_orchestrator
+    deploy:
+      <<: *gpu-deploy

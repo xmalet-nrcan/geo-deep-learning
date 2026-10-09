@@ -404,6 +404,53 @@ def test_build_override() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sync with the scanfire orchestrator (sibling repository, skipped if absent)
+# ---------------------------------------------------------------------------
+
+SCANFIRE_BENCHMARK_DIR = (
+    REPO_ROOT.parent / "scanfire" / "scanfire_modules" / "pipeline" / "orchestrator" / "benchmark"
+)
+
+
+def _load_scanfire(name: str):
+    path = SCANFIRE_BENCHMARK_DIR / f"{name}.py"
+    if not path.is_file():
+        pytest.skip(f"scanfire repository not available ({path})")
+    spec = importlib.util.spec_from_file_location(f"scanfire_benchmark_{name}", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    ("name", "root", "csv_dir"),
+    [("m1", "/out", "/csv"), ("cs2.base-x_1", "/mnt/a/b/", "/mnt/c/")],
+)
+def test_override_in_sync_with_scanfire(name: str, root: str, csv_dir: str) -> None:
+    """The override validated here is exactly the one the orchestrator writes."""
+    scanfire_override = _load_scanfire("override")
+    assert scanfire_override.build_override(name, root, csv_dir) == vbc.build_override(
+        name, root, csv_dir,
+    )
+    assert scanfire_override.PREDICT_DATASET_CLASS == vbc.PREDICT_DATASET_CLASS
+    assert scanfire_override.BENCHMARK_CSV_FILE_NAME == vbc.BENCHMARK_CSV_FILE_NAME
+
+
+def test_registry_in_sync_with_scanfire() -> None:
+    """Both registry loaders read the real models.yaml identically."""
+    scanfire_registry = _load_scanfire("registry")
+    ours, issues = vbc.load_registry(vbc.DEFAULT_MODELS_FILE)
+    assert not [i for i in issues if i.level == vbc.ERROR]
+    theirs = scanfire_registry.load_registry(vbc.DEFAULT_MODELS_FILE)
+    assert theirs.output_root == ours.output_root
+    assert [(m.name, m.config, m.enabled) for m in theirs.models] == [
+        (m.name, m.config, m.enabled) for m in ours.models
+    ]
+    assert scanfire_registry.NAME_PATTERN.pattern == vbc.NAME_PATTERN.pattern
+
+
+# ---------------------------------------------------------------------------
 # Repository registry (guards future edits of configs/benchmark/)
 # ---------------------------------------------------------------------------
 

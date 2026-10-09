@@ -1,7 +1,7 @@
 # Plan de développement — Benchmark multi-modèles en production (predict)
 
 - **Date** : 2026-10-08 (rév. 4 — P1 → P5 réalisés)
-- **Statut** : 🚧 En cours — P1 ✅, P2 ✅ (testés sur PostGIS 17), P3 ✅, P4 ✅, P5 ✅ (structure + modèle de référence ; autres modèles après P0) ; P0 reporté ; P6→P9 à faire
+- **Statut** : 🚧 En cours — P1 ✅, P2 ✅ (testés sur PostGIS 17), P3 ✅, P4 ✅, P5 ✅ (structure + modèle de référence ; autres modèles après P0), P6 ✅ (testé sur PostGIS 17), P7 ✅ (câblage compose testé, GPU en P8), P8 🧰 outillé (`make benchmark-check`, recette à exécuter sur le serveur GPU) ; P0 reporté ; P9 à faire
 - **Dépôts impactés** : `geo-deep-learning` (task + docker-compose + configs), `scanfire` (SQL + orchestrateur)
 - **Tâche Lightning** : `geo_deep_learning/tasks_with_models/change_detection_changeformer.py` → `ChangeDetectionChangeFormer`
 
@@ -172,7 +172,7 @@ Colonnes identiques à `event_detection.event_pre_post_pairs` (`pair_id` identit
 | `started_at`, `finished_at` | `timestamptz` |
 | `error` | `text` |
 
-Cas « à traiter » pour un modèle = actif **et** (aucun run `succeeded` pour `(test_case_id, model_name, config_sha256)` **ou** `test_cases.updated_at > finished_at`).
+Cas « à traiter » pour un modèle = actif **et** aucun run `succeeded` pour `(test_case_id, model_name, config_sha256)` **démarré** après `test_cases.updated_at` (`started_at >= updated_at` — réalisé P6 : `started_at` plutôt que `finished_at`, une modif pendant un predict long relance le cas).
 
 Fichiers SQL à créer (convention `scanfire/database_schemas/<schema>/`) :
 - `model_benchmark/schema.sql`
@@ -357,6 +357,10 @@ même `deploy` GPU que la prod. `restart: "no"` → le conteneur s'arrête aprè
 
 Makefile : `benchmark-start` (`$(COMPOSE) --profile benchmark run --rm model_benchmark_orchestrator`),
 `benchmark-dry-run` (idem + `--dry-run`), `logs-benchmark`.
+
+> **Réalisé (P7)** : la version finale diffère (entrypoint `sh -c` acceptant `BENCHMARK_ARGS` + arguments de `run`,
+> montage `./scripts`, `benchmark-start` en `up -d`, cibles `benchmark-validate` / `benchmark-status` /
+> `benchmark-stop`) — référence : `docker-compose.yaml`, `Makefile`, journal P7 (§9).
 
 ---
 
@@ -641,15 +645,57 @@ Fichiers (`scanfire_modules/pipeline/orchestrator/`) :
 - `tests/unit/test_model_benchmark_registry.py`, `test_model_benchmark_override.py`, `test_model_benchmark_orchestrator.py`.
 
 Tâches :
-- [ ] Régénération incrémentale des paires (`fct_generate_test_pairs`) si `vw_test_case_summary.needs_pair_generation`.
-- [ ] Sélection « à traiter » par modèle (§3.7) ; filtres CLI `--model`, `--test-case`, `--force`, `--dry-run`.
-- [ ] Export CSV `<BENCHMARK_CSV_DIR>/<model_name>/vw_input_files_for_model_test.csv` via `prediction_naming.add_output_names`.
-- [ ] `subprocess.run([... "predict", "--config", cfg, "--config", ovr])` ; capture rc ; `test_runs` `running` → `succeeded`/`failed` (+ `error` = fin du stderr).
-- [ ] Snapshot `<output_root>/<model_name>/_runs/<ts>/` (config, override, CSV).
-- [ ] Échec d'un modèle → on continue ; `main()` retourne `1` si au moins un échec.
-- [ ] Tests : engine + `subprocess.run` mockés ; échec modèle 1 / succès modèle 2 ; `--dry-run` sans subprocess ; aucun appel SQL vers `event_detection` en écriture.
+- [x] Régénération incrémentale des paires (`fct_generate_test_pairs`) si `vw_test_case_summary.needs_pair_generation`.
+- [x] Sélection « à traiter » par modèle (§3.7) ; filtres CLI `--model`, `--test-case`, `--force`, `--dry-run`.
+- [x] Export CSV `<BENCHMARK_CSV_DIR>/<model_name>/vw_input_files_for_model_test.csv` via `prediction_naming.add_output_names`.
+- [x] `subprocess` `[... "predict", "--config", cfg, "--config", ovr]` ; capture rc ; `test_runs` `running` → `succeeded`/`failed` (+ `error` = fin du log).
+- [x] Snapshot `<output_root>/<model_name>/_runs/<ts>/` (config, override, CSV, `predict.log`).
+- [x] Échec d'un modèle → on continue ; `main()` retourne `1` si au moins un échec.
+- [x] Tests : DB + subprocess simulés ; échec modèle 1 / succès modèle 2 ; `--dry-run` sans subprocess ; aucun appel SQL vers `event_detection` en écriture.
 
 **Critère de sortie** : tests verts, `ruff check .` OK, `--dry-run` sur staging produit CSV + override corrects.
+
+#### ✅ Journal de réalisation P6 (2026-10-08)
+
+Fichiers (scanfire) : `orchestrator/benchmark/{__init__,registry,override,repository}.py`,
+`entrypoints/model_benchmark_orchestrator_service_main.py`, shim `orchestrator/model_benchmark_orchestrator.py`,
+docstring `entrypoints/base.py` ; tests `tests/unit/test_model_benchmark_{registry,override,orchestrator,repository_integration}.py`.
+Côté geo-deep-learning : tests de synchro `test_override_in_sync_with_scanfire` / `test_registry_in_sync_with_scanfire`
+(chargent les modules scanfire par chemin, skip si le dépôt voisin est absent).
+
+Validation :
+- Image `scanfire-scanfire_data_processing` : **140 tests verts** (registry 18, override 6, orchestrateur 20,
+  intégration 5, `prediction_naming` inchangé), `ruff check` OK.
+- **Intégration sur PostGIS 17 réel** (base du harnais SQL : `install.sql` + `seed_case`) : cycle de vie
+  pending → running → succeeded → à jour → `--force` / autre modèle / autre hash / édition du cas ⇒ de nouveau
+  pending ; orphelins ; troncature `error` (4000) ; régénération stable des `pair_id` ; bout-en-bout 2 modèles
+  (1 succès, 1 échec, 2e passage : succès sauté, échec relancé) ; tables `event_detection` inchangées.
+- **Shim réel en `--dry-run`** (registre réel `configs/benchmark/models.yaml`) : CSV 6 paires + `output_name`,
+  override avec `weights_strict: true`, snapshot, commande affichée, RC=0, aucune écriture DB.
+
+Lancement (dans le conteneur orchestrateur, P7) :
+```bash
+python /app/scanfire_modules/pipeline/orchestrator/model_benchmark_orchestrator.py [--dry-run] \
+    [--model NAME]... [--test-case ID]... [--force] [--output-root DIR] [--csv-dir DIR] [--models-file FILE]
+```
+Codes retour : `0` OK, `1` ≥ 1 modèle en échec, `2` registre invalide / `--model` inconnu.
+
+Écarts / ajouts par rapport au plan :
+| Sujet | Plan | Réalisé | Raison |
+|---|---|---|---|
+| Règle « à traiter » | `updated_at > finished_at` | `started_at >= updated_at` (commentaires SQL `test_runs` / `fct_touch_test_case` alignés) | Une édition du cas pendant un predict long doit relancer |
+| `config_sha256` | config + override | + empreinte checkpoint (chemin, taille, `mtime_ns` ; version de hash) | Checkpoint remplacé sur place ⇒ relance ; pas de hash de fichiers de plusieurs Go |
+| Subprocess | `subprocess.run` + stderr | `Popen` stdout+stderr fusionnés, recopiés en direct (logs Docker) + `predict.log` du snapshot ; 40 dernières lignes → `test_runs.error` ; `PYTHONUNBUFFERED=1` | Logs live + trace persistante |
+| Runs orphelins | — | `running` résiduels → `failed` au démarrage (hors `--dry-run`) | Crash / kill du conteneur |
+| `--dry-run` | export + override | + snapshot ; **aucune écriture DB** (ni orphelins, ni génération de paires : warning si `needs_pair_generation`) | Sûr sur staging / prod |
+| Cas sans ligne prête | — | warning, **pas** de `test_runs` (reste pending) | Fichiers fusionnés pas encore produits |
+| Paire commune à 2 cas | — | prédite une fois (dédoublonnage `output_name`), `n_pairs` compté par cas | Même fichier de sortie |
+| Checkpoint absent | — | runs créés puis `failed` (« checkpoint not found »), pas de predict | Traçabilité dans `test_runs` |
+| `--model` | filtre | sélectionne aussi un modèle `enabled: false` ; nom inconnu ⇒ RC 2 | Exécution manuelle ciblée |
+| Échec génération de paires | — | cas exclu du passage, les autres continuent | Isolation |
+| `pyyaml` | — | non ajouté à `pyproject.toml` de scanfire (déjà présent transitivement et dans `requirements.txt` de geo-deep-learning) | Évite de désynchroniser `poetry.lock` |
+
+Constat : `fct_generate_test_pairs` renvoie le nombre de **nouvelles** paires (0 si inchangé), pas le total.
 
 ---
 
@@ -659,11 +705,45 @@ Tâches :
 Fichiers : `docker-compose.yaml`, `Makefile`, `.env` (doc des variables, pas de secrets commités).
 
 Tâches :
-- [ ] Service `model_benchmark_orchestrator` (profil `benchmark`, `restart: "no"`, image `orchestrator.Dockerfile`, mounts `configs`, `models_checkpoints`, `../scanfire/scanfire_modules`, `/mnt/geospatial/…`).
-- [ ] Cibles `benchmark-start`, `benchmark-dry-run`, `logs-benchmark` + entrées dans `help`.
-- [ ] Vérifier que `make up` / `orchestrator-start` ne démarrent **pas** le benchmark.
+- [x] Service `model_benchmark_orchestrator` (profil `benchmark`, `restart: "no"`, image `orchestrator.Dockerfile`, mounts `configs`, `models_checkpoints`, `../scanfire/scanfire_modules`, `/mnt/geospatial/…`).
+- [x] Cibles `benchmark-start`, `benchmark-dry-run`, `logs-benchmark` + entrées dans `help`.
+- [x] Vérifier que `make up` / `orchestrator-start` ne démarrent **pas** le benchmark.
 
 **Critère de sortie** : `docker compose --profile benchmark config` valide ; `make benchmark-dry-run` OK.
+
+#### ✅ Journal de réalisation P7 (2026-10-08)
+
+Fichiers : `docker-compose.yaml` (service `model_benchmark_orchestrator`), `Makefile`, `.env.example` (nouveau),
+`.gitignore` (`.env`), `configs/benchmark/README.md` (§ Lancer), `scanfire/database_schemas/model_benchmark/README.md`.
+
+Cibles Makefile :
+| Cible | Commande |
+|---|---|
+| `benchmark-start` | `BENCHMARK_ARGS=… docker compose --profile benchmark up -d --build --force-recreate model_benchmark_orchestrator` (arrière-plan, survit à la session SSH) |
+| `benchmark-dry-run` | `… run --rm --build model_benchmark_orchestrator --dry-run $(BENCHMARK_ARGS)` (premier plan) |
+| `benchmark-validate` | `… run --rm --build --entrypoint python … /app/scripts/validate_benchmark_configs.py $(VALIDATE_ARGS)` (défaut `--cli --load-weights`) |
+| `logs-benchmark` / `benchmark-status` / `benchmark-stop` | logs `-f` / `docker inspect` (état + code retour) / `rm --stop --force` |
+
+Validation (poste Windows, sans GPU ni `make`) :
+- `docker compose config --services` : sans profil → 3 services (benchmark absent) ; `--profile benchmark` → 4.
+- `make -n` (Alpine) : commandes générées conformes pour les 6 cibles + `help`.
+- Câblage réel du service (compose réel + override de test : image `scanfire-scanfire_data_processing` à la place de
+  l'image GPU, base PostGIS du harnais SQL, `/mnt/geospatial/…` → dossier temporaire) :
+  - `run --rm --build … --dry-run --test-case 2` → arguments transmis, 6 paires exportées, snapshot, RC 0 ;
+  - `BENCHMARK_ARGS="--test-case 2" up -d --build --force-recreate` → arguments transmis par variable, run tracé
+    `failed` (« checkpoint not found », attendu hors serveur), conteneur `exited (exit code 1)` ;
+  - `rm --stop --force` → conteneur supprimé.
+- Non testé ici : image `orchestrator.Dockerfile` (GPU) et predict réel → P8 sur le serveur.
+
+Écarts / ajouts par rapport au plan :
+| Sujet | Plan | Réalisé | Raison |
+|---|---|---|---|
+| Entrypoint | `["python", …/model_benchmark_orchestrator.py]` | `sh -c 'exec python … $${BENCHMARK_ARGS:-} "$$@"'` | Arguments via `BENCHMARK_ARGS` (avec `up -d`) **et** via `run … <args>` |
+| `benchmark-start` | `run --rm` | `up -d --build --force-recreate` | Premier plan inadapté à un benchmark de plusieurs heures ; logs / code retour consultables après coup |
+| Cibles en plus | — | `benchmark-validate`, `benchmark-status`, `benchmark-stop` | Validation P5 dans le conteneur ; code retour ; `make down` sans profil ne gère pas ce service |
+| Montages | — | + `./scripts:/app/scripts:ro` | Validateur absent de l'image |
+| Variables | `.env` | + `.env.example` (sans secret), `.env` ajouté au `.gitignore` ; `BENCHMARK_OUTPUT_DIR` / `BENCHMARK_CSV_DIR` / `LOGGER_LEVEL` surchargeables depuis le shell | Pas de secret commité |
+| `models_checkpoints` | `:ro` | `:ro` | Predict en lecture seule (la prod monte en `rw`) |
 
 ---
 
@@ -682,6 +762,45 @@ Scénarios :
 9. [ ] Contrôle visuel QGIS : alignement géographique, nodata `32767` / `-1.0`, buffer rogné.
 
 **Critère de sortie** : critères §10 tous cochés.
+
+#### Outillage P8 (préparé le 2026-10-08)
+
+`scripts/check_benchmark_outputs.py` (+ `make benchmark-check [CHECK_ARGS=…]`, lecture seule) — par modèle
+du registre, dans `<output_root>/<model>/` :
+
+| Contrôle | ERROR si |
+|---|---|
+| Arborescence | dossier modèle absent, `predictions/` (layout prod), `merged_all.tif`, sous-dossier dans `<event_id>/` |
+| Fichiers | TIF par cellule sans `_prob.tif` (ou l'inverse), sans TIF fusionné de sa paire ; `event-<id>` ≠ dossier |
+| Filtres (décision 5) | sortie d'un beam / sat_pass exclu par la config du modèle |
+| Attendus | `output_name` exporté par l'orchestrateur (`<csv_dir>/<model>/vw_input_files_for_model_test.csv`, filtres appliqués) non produit |
+| Rasters | classes ≠ `uint16`/`32767` ou valeurs hors {0..n-1, 32767} ; proba ≠ `float32`/`-1.0` ou hors [0, 1] ; classe/proba sur grilles différentes ; pas de CRS ; illisible |
+| Inter-modèles | même nom de fichier sur une grille différente (alignement) |
+
+WARNING : fichier présent chez un autre modèle seulement (différence **non** expliquée par les filtres — celles
+expliquées sont en INFO), fusion sans cellule, manifest absent. INFO : formes des rasters par cellule
+(contrôle « buffer rogné » : 200×200 attendu), paires vérifiées / exclues. Code retour 1 si ≥ 1 ERROR.
+Tests : `tests/test_check_benchmark_outputs.py` (16, sorties produites par le **vrai** `on_predict_end`).
+
+Constat (prod, hors périmètre) : le TIF par cellule porte le `sat_pass` de la base (`_pass-Ascending`) alors
+que le TIF fusionné porte celui du dataset (`_pass-ASC`) — le contrôleur normalise (`ASC` / `DES`) pour apparier.
+
+Déroulé de recette (serveur GPU) :
+```bash
+# 0. pré-requis : install.sql (scanfire), .env (DATABASE_URL), cas de test + vw_test_case_summary OK
+make benchmark-validate                                   # registre, configs, checkpoints, CLI, poids stricts
+make benchmark-dry-run                                    # S1 : CSV + override, aucun test_runs
+make benchmark-start BENCHMARK_ARGS="--model <m1> --test-case <id>" && make logs-benchmark   # S2
+make benchmark-status && make benchmark-check CHECK_ARGS="--model <m1>"
+make benchmark-start && make benchmark-check              # S3 (N modèles, cross-model) + S7 (filtres)
+make benchmark-start && make benchmark-status             # S4 : tous « up to date — skipped », code 0
+# S5 : INSERT d'un groupe post dans test_case_groups → make benchmark-start → régénération + relance de tous
+# S6 : modèle au checkpoint invalide dans models.yaml → code 1, test_runs failed pour lui seul
+```
+```sql
+SELECT model_name, test_case_id, status, n_pairs, started_at, finished_at, left(error, 200)
+FROM model_benchmark.test_runs ORDER BY run_id DESC;
+```
 
 ---
 
