@@ -124,20 +124,21 @@ model:
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
-        lr: 3e-4              # base lr (OneCycleLR uses this as initial, ramps to max_lr)
+        lr: 3e-4              # LR max de chaque cycle (CosineAnnealingWarmRestarts part du lr de l'optimiseur)
         weight_decay: 0.05
         betas:
         - 0.9
         - 0.999
+    # Échauffement linéaire construit dans le code (configure_optimizers) :
+    # un SequentialLR en YAML ne peut pas être instancié par jsonargparse.
+    lr_warmup_iters: 5          # 5 époques (interval: epoch) : 3e-5 → 3e-4
+    lr_warmup_start_factor: 0.1
     scheduler:
-      class_path: torch.optim.lr_scheduler.SequentialLR
+      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
       init_args:
-        schedulers:
-          - class_path: torch.optim.lr_scheduler.LinearLR
-            init_args: { start_factor: 0.1, total_iters: 5 }       # 5 époques : 3e-5 → 3e-4
-          - class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
-            init_args: { T_0: 20, T_mult: 1, eta_min: 1e-6 }
-        milestones: [ 5 ]
+        T_0: 20               # cycles de 20 époques (après l'échauffement)
+        T_mult: 1             # longueur constante (2 = 20 → 40 → 80)
+        eta_min: 1e-6         # LR plancher
     scheduler_config:
       interval: "epoch"
       frequency: 1

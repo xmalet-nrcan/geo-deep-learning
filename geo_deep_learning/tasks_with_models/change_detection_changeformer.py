@@ -159,6 +159,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             backbone_kwargs: dict[str, Any] | None = None,
             boundary_loss_weight: float = 0.0,
             boundary_width: int = 2,
+            lr_warmup_iters: int = 0,
+            lr_warmup_start_factor: float = 0.1,
             **kwargs: object,  # noqa: ARG002
     ) -> None:
         """Initialize the model.
@@ -234,6 +236,17 @@ class ChangeDetectionChangeFormer(LightningModule):
                 comparable to the training objective).
             boundary_width: Half-width, in pixels, of that boundary band
                 (``2`` -> a 5-pixel-wide band, i.e. ±200 m at 100 m/pixel).
+            lr_warmup_iters: Linear learning-rate warm-up length, in scheduler
+                steps (i.e. epochs when ``scheduler_config.interval`` is
+                ``"epoch"``, batches when it is ``"step"``). When > 0, the
+                configured ``scheduler`` is wrapped in
+                ``SequentialLR([LinearLR, scheduler])`` and only starts after
+                the warm-up. Built in code because jsonargparse cannot
+                instantiate the nested schedulers of a ``SequentialLR`` given
+                in YAML (they need the optimizer). Ignored for ``OneCycleLR``
+                (it has its own warm-up, ``pct_start``). ``0`` = disabled.
+            lr_warmup_start_factor: LR multiplier at the first warm-up step
+                (``0.1`` -> starts at 10 % of the optimizer ``lr``).
             predict_output_dir: Root directory for predict outputs. In the
                 ``production`` layout a ``predictions`` sub-folder is appended
                 when missing; in the ``benchmark`` layout it is used as-is.
@@ -322,6 +335,14 @@ class ChangeDetectionChangeFormer(LightningModule):
             raise ValueError(msg)
         self.boundary_loss_weight = float(boundary_loss_weight)
         self.boundary_width = int(boundary_width)
+        if lr_warmup_iters < 0:
+            msg = "lr_warmup_iters must be >= 0"
+            raise ValueError(msg)
+        if not 0.0 < lr_warmup_start_factor <= 1.0:
+            msg = "lr_warmup_start_factor must be in (0, 1]"
+            raise ValueError(msg)
+        self.lr_warmup_iters = int(lr_warmup_iters)
+        self.lr_warmup_start_factor = float(lr_warmup_start_factor)
 
         self.changed_num_classes = num_classes + 1 if num_classes == 1 else num_classes
         self.labels = (
@@ -589,15 +610,55 @@ class ChangeDetectionChangeFormer(LightningModule):
     def configure_optimizers(self) -> list[list[dict[str, Any]]]:
         """Configure optimizers."""
         optimizer = self.optimizer(self.parameters())
-        if (
-                self.hparams["scheduler"]["class_path"]
-                == "torch.optim.lr_scheduler.OneCycleLR"
-        ):
+        if self._scheduler_class_path() == "torch.optim.lr_scheduler.OneCycleLR":
+            if self.lr_warmup_iters > 0:
+                logger.warning(
+                    "lr_warmup_iters=%d ignored: OneCycleLR already warms up (pct_start).",
+                    self.lr_warmup_iters,
+                )
             scheduler = self._build_onecycle_scheduler(optimizer)
         else:
-            scheduler = self.scheduler(optimizer)
+            scheduler = self._with_warmup(optimizer, self.scheduler(optimizer))
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
+
+    def _scheduler_class_path(self) -> str | None:
+        """Dotted class path of the configured scheduler.
+
+        ``hparams["scheduler"]`` is a ``{"class_path": ...}`` dict when built by
+        LightningCLI, but the raw callable when the task is instantiated in code
+        (tests, notebooks) — handle both instead of assuming the dict.
+        """
+        spec = self.hparams.get("scheduler")
+        if isinstance(spec, dict):
+            return spec.get("class_path")
+        func = getattr(spec, "func", spec)  # functools.partial
+        if isinstance(func, type):
+            return f"{func.__module__}.{func.__qualname__}"
+        return None
+
+    def _with_warmup(
+            self,
+            optimizer: torch.optim.Optimizer,
+            scheduler: Any,
+    ) -> Any:
+        """Prepend a linear LR warm-up to ``scheduler`` (no-op when disabled)."""
+        if self.lr_warmup_iters <= 0:
+            return scheduler
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            msg = "lr_warmup_iters is not supported with ReduceLROnPlateau (not chainable)"
+            raise ValueError(msg)
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=self.lr_warmup_start_factor,
+            end_factor=1.0,
+            total_iters=self.lr_warmup_iters,
+        )
+        return torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup, scheduler],
+            milestones=[self.lr_warmup_iters],
+        )
 
     def _build_onecycle_scheduler(
             self, optimizer: torch.optim.Optimizer,
