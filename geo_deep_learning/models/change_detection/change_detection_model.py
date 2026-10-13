@@ -18,6 +18,7 @@ from geo_deep_learning.models.change_detection.sub_models.changemask import Chan
 from geo_deep_learning.models.change_detection.sub_models.changestar2 import (
     ChangeStar2Base, ChangeStar2Large, ChangeStar2Small,
 )
+from geo_deep_learning.models.change_detection.sub_models.changestar_torchgeo import ChangeStarTorchGeo
 from geo_deep_learning.models.change_detection.sub_models.segformer_cd import (
     SegFormerChangeDetection,
     SegFormerChangeDetectionB0,
@@ -55,6 +56,9 @@ _MODEL_REGISTRY: dict[str, Callable[..., torch.nn.Module]] = {
     "changestar2_small": ChangeStar2Small,
     "changestar2_base": ChangeStar2Base,
     "changestar2_large": ChangeStar2Large,
+    # ChangeStar(FarSeg) from torchgeo (ICCV 2021). Single output head:
+    # use deep_supervision: false and use_dfa: false (see sub_models/changestar_torchgeo.py).
+    "changestar_farseg": ChangeStarTorchGeo,
     # SegFormer (siamese MiT encoder + MLP decoder). "segformer" uses the
     # ``encoder`` kwarg (default mit_b2); the suffixed keys pin the encoder.
     "segformer": SegFormerChangeDetection,
