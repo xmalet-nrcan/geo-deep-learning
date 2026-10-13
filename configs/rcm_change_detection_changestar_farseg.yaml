@@ -69,6 +69,12 @@ model:
       bidirectional_training: false
       changemixin_inner_channels: 16
       changemixin_num_convs: 4
+      # Tête de raffinement pleine résolution : ChangeMixin travaille à H/4
+      # (blocs de 400 m à 100 m/pixel) ; la tête fusionne ce contexte avec une
+      # branche légère sur les images pleine résolution et prédit un résidu.
+      # Initialisée à zéro : démarre comme ChangeStar seul.
+      full_res_refine: true
+      refine_channels: 16
     image_size: [256,256]
     # set to the number of band_names in the datamodule + 1 for BITMASK_CROPPED (always loaded)
     # With separate_metadata=true, COMMON_MASK / SAT_PASS / BEAM are NOT
@@ -94,6 +100,11 @@ model:
     use_signed_difference: true       # ajoute (x1 - x2) signé en canaux d'entrée (direction du changement)
     signed_difference_channels: null  # null = ajoute toutes les bandes ; ex. 3 = projection 1x1 apprise
     signed_difference_normalize: true # borne les canaux signés à [-1, 1] via tanh
+
+    # BCE sur une bande autour des contours de brûlis de la vérité terrain.
+    # boundary_width: 2 -> bande de 5 px (±200 m à 100 m/pixel). 0 = désactivé.
+    boundary_loss_weight: 0.5
+    boundary_width: 2
 
     burned_class_weight: 3.0  # >1 penalizes false negatives on class burn (to test : bcw ->[2,5])
     main_loss:

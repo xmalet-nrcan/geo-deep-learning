@@ -127,3 +127,58 @@ def test_change_detection_model_with_extras() -> None:
     )
     assert len(outputs) == 1
     assert outputs[-1].shape == (2, 2, 64, 64)
+
+
+# ---------------------------------------------------------------------------
+# Full-resolution refinement head
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("training", [True, False])
+def test_refine_output_contract(training: bool) -> None:
+    model = ChangeStarTorchGeo(input_nc=10, backbone=BACKBONE, full_res_refine=True)
+    model.train(training)
+    outputs = model(*_pair(h=70, w=45))
+    assert len(outputs) == 1
+    assert outputs[-1].shape == (2, 2, 70, 45)
+
+
+def test_refine_starts_as_plain_changestar() -> None:
+    """Zero-initialised residual: identical predictions with/without the head at init."""
+    plain = ChangeStarTorchGeo(input_nc=10, backbone=BACKBONE).eval()
+    refined = ChangeStarTorchGeo(input_nc=10, backbone=BACKBONE, full_res_refine=True).eval()
+    missing, unexpected = refined.load_state_dict(plain.state_dict(), strict=False)
+    assert not unexpected
+    assert all(k.startswith("refine_head.") for k in missing)
+    x1, x2 = _pair()
+    with torch.no_grad():
+        torch.testing.assert_close(refined(x1, x2)[-1], plain(x1, x2)[-1])
+
+
+def test_refine_head_adds_full_resolution_detail() -> None:
+    """Once trained (non-zero residual), the head changes the output at the pixel level."""
+    model = ChangeStarTorchGeo(input_nc=4, backbone=BACKBONE, full_res_refine=True).eval()
+    torch.nn.init.normal_(model.refine_head.residual.weight)
+    x1, x2 = _pair(c=4)
+    with torch.no_grad():
+        logits = model(x1, x2)[-1][:, 1]
+    # Bilinear x4 upsampling alone is smooth; the refined map has pixel-scale variation.
+    pixel_jumps = (logits[..., 1:] - logits[..., :-1]).abs().mean()
+    assert pixel_jumps > 1e-3
+
+
+def test_refine_all_params_get_grad() -> None:
+    model = ChangeStarTorchGeo(input_nc=10, backbone=BACKBONE, full_res_refine=True).train()
+    sum(o.sum() for o in model(*_pair())).backward()
+    missing = [n for n, p in model.named_parameters() if p.requires_grad and p.grad is None]
+    assert not missing
+
+
+def test_refine_mean_mode_is_order_invariant() -> None:
+    model = ChangeStarTorchGeo(
+        input_nc=10, backbone=BACKBONE, inference_mode="mean",
+        bidirectional_training=True, full_res_refine=True,
+    ).eval()
+    torch.nn.init.normal_(model.refine_head.residual.weight)
+    x1, x2 = _pair()
+    with torch.no_grad():
+        torch.testing.assert_close(model(x1, x2)[-1], model(x2, x1)[-1], atol=1e-5, rtol=1e-4)

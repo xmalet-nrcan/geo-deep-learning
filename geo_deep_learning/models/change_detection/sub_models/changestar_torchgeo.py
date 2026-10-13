@@ -37,6 +37,17 @@ Differences with calling ``torchgeo.models.ChangeStarFarSeg`` directly:
    and outputs cropped back, so ``ChangeMixin``'s fixed x4 upsampling always
    lands exactly on ``H x W``.
 
+Full-resolution refinement (optional, ``full_res_refine=True``):
+    FarSeg and ``ChangeMixin`` work at H/4 (400 m blocks at 100 m/pixel) and
+    the prediction is bilinearly upsampled x4, so no detail finer than 4
+    pixels can reach the output. :class:`FullResRefineHead` adds a U-Net-like
+    skip: ``ChangeMixin``'s inner features (context) are upsampled to H x W
+    and fused with a shallow branch computed on the full-resolution images
+    ``(x_a, x_b, x_a - x_b)`` (precise edges). It predicts a *residual* added
+    to the upsampled coarse logit; its last conv is zero-initialised, so the
+    model starts exactly as plain ChangeStar and checkpoints without the head
+    still load (``weights_strict: false``).
+
 Temporal direction:
     ``ChangeMixin`` predicts ``c12`` from ``cat(t1, t2)`` and ``c21`` from
     ``cat(t2, t1)`` with shared weights. Training both against the same label
@@ -128,6 +139,44 @@ def _adapt_first_conv(conv: nn.Conv2d, in_channels: int, *, pretrained: bool) ->
     return new_conv
 
 
+class FullResRefineHead(nn.Module):
+    """Residual full-resolution refinement of ChangeStar's coarse change logit.
+
+    Args:
+        image_channels: Channels of each input image.
+        context_channels: Channels of the low-resolution ``ChangeMixin`` features.
+        channels: Hidden width of the head.
+    """
+
+    def __init__(self, image_channels: int, context_channels: int, channels: int = 16) -> None:
+        super().__init__()
+        self.high_res = nn.Sequential(
+            nn.Conv2d(3 * image_channels, channels, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+        )
+        self.fuse = nn.Sequential(
+            nn.Conv2d(channels + context_channels, channels, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+        )
+        self.residual = nn.Conv2d(channels, 1, 1)
+        # Zero init: the head starts as an identity on the coarse prediction.
+        nn.init.zeros_(self.residual.weight)
+        nn.init.zeros_(self.residual.bias)
+
+    def forward(self, x_a: Tensor, x_b: Tensor, context: Tensor, coarse_logit: Tensor) -> Tensor:
+        """Return the refined ``[B, 1, H, W]`` logit for the direction ``a -> b``."""
+        size = x_a.shape[-2:]
+        high_res = self.high_res(torch.cat([x_a, x_b, x_a - x_b], dim=1))
+        context = F.interpolate(context, size=size, mode="bilinear", align_corners=False)
+        delta = self.residual(self.fuse(torch.cat([high_res, context], dim=1)))
+        return coarse_logit + delta
+
+
 class ChangeStarTorchGeo(nn.Module):
     """``torchgeo.models.ChangeStarFarSeg`` with the pipeline's I/O contract.
 
@@ -153,6 +202,9 @@ class ChangeStarTorchGeo(nn.Module):
             [1.0, 1.0]``.
         changemixin_inner_channels: ``ChangeMixin`` hidden width (torchgeo: 16).
         changemixin_num_convs: ``ChangeMixin`` conv blocks (torchgeo: 4).
+        full_res_refine: Add :class:`FullResRefineHead` (full-resolution
+            residual refinement of the change logit).
+        refine_channels: Hidden width of the refinement head.
         decoder_softmax: Apply softmax to the outputs (keep ``False``: the
             task's losses expect logits).
         **kwargs: Ignored (e.g. the registry default ``embed_dim``).
@@ -168,6 +220,8 @@ class ChangeStarTorchGeo(nn.Module):
         bidirectional_training: bool = False,
         changemixin_inner_channels: int = 16,
         changemixin_num_convs: int = 4,
+        full_res_refine: bool = False,
+        refine_channels: int = 16,
         decoder_softmax: bool = False,
         **kwargs: Any,  # noqa: ARG002
     ) -> None:
@@ -221,10 +275,16 @@ class ChangeStarTorchGeo(nn.Module):
         )
         # reference.seg_classifier is intentionally dropped (see module docstring).
 
+        self.refine_head: FullResRefineHead | None = (
+            FullResRefineHead(input_nc, changemixin_inner_channels, refine_channels)
+            if full_res_refine else None
+        )
+
         logger.info(
             "ChangeStarFarSeg(torchgeo): backbone=%s, weights=%s, input_nc=%d, output_nc=%d, "
-            "inference_mode=%s, bidirectional_training=%s",
+            "inference_mode=%s, bidirectional_training=%s, full_res_refine=%s",
             backbone, weights, input_nc, output_nc, inference_mode, bidirectional_training,
+            full_res_refine,
         )
 
     def _to_output(self, change_logit: Tensor) -> Tensor:
@@ -233,6 +293,32 @@ class ChangeStarTorchGeo(nn.Module):
             return change_logit
         half = change_logit / 2
         return torch.cat([-half, half], dim=1)
+
+    def _mixin_with_refinement(self, bi_feature: Tensor, x1: Tensor, x2: Tensor) -> tuple[Tensor, Tensor]:
+        """Run ``ChangeMixin`` exposing its inner features, then refine both directions.
+
+        Same computation as ``torchgeo.models.ChangeMixin.forward`` (and same
+        weights layout), split before the classification conv to reuse the
+        inner features as context for the refinement head.
+        """
+        batch_size = bi_feature.size(0)
+        t1t2 = torch.cat([bi_feature[:, 0], bi_feature[:, 1]], dim=1)
+        t2t1 = torch.cat([bi_feature[:, 1], bi_feature[:, 0]], dim=1)
+        convs = self.changemixin.convs  # [conv blocks..., cls conv, upsample]
+        inner = convs[:-2](torch.cat([t1t2, t2t1], dim=0))
+        coarse = convs[-1](convs[-2](inner))
+        inner12, inner21 = torch.split(inner, batch_size, dim=0)
+        coarse12, coarse21 = torch.split(coarse, batch_size, dim=0)
+        # Only refine the direction(s) actually returned by ``forward``
+        # (the full-resolution branch is the costly part of the head).
+        both = (self.training and self.bidirectional_training) or (
+            self.inference_mode == "mean" and not self.training
+        )
+        need12 = both or self.inference_mode != "t2t1"
+        need21 = both or self.inference_mode == "t2t1"
+        c12 = self.refine_head(x1, x2, inner12, coarse12) if need12 else coarse12
+        c21 = self.refine_head(x2, x1, inner21, coarse21) if need21 else coarse21
+        return c12, c21
 
     def forward(self, x1: Tensor, x2: Tensor) -> list[Tensor]:
         """Forward pass.
@@ -257,7 +343,10 @@ class ChangeStarTorchGeo(nn.Module):
         # Siamese feature extraction, both dates in one pass (shared weights).
         features = self.dense_feature_extractor(torch.cat([x1, x2], dim=0))
         bi_feature = torch.stack([features[:batch_size], features[batch_size:]], dim=1)
-        c12, c21 = self.changemixin(bi_feature)  # [B, 1, H', W'] each
+        if self.refine_head is None:
+            c12, c21 = self.changemixin(bi_feature)  # [B, 1, H', W'] each
+        else:
+            c12, c21 = self._mixin_with_refinement(bi_feature, x1, x2)
         c12 = c12[..., :height, :width]
         c21 = c21[..., :height, :width]
 
