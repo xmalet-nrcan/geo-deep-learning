@@ -146,13 +146,12 @@ model:
 
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
-    # Reprise des poids du run v1 (même architecture). Ce n'est pas une reprise
-    # d'entraînement : l'optimiseur et le scheduler repartent de zéro
-    # (échauffement 5 époques puis cycles de 20).
-    weights_from_checkpoint_path: /app/models_checkpoints/2026/changestar_farseg/tiled/csfarseg_r50_A_y23-25_8film-cbam_tiled-epoch=18-val_loss=0.483.ckpt
-    # true : toute clé manquante ou forme incompatible lève une erreur au lieu de
-    # laisser silencieusement des couches à l'initialisation aléatoire.
-    weights_strict: true
+    # PAS de reprise des poids v1 : v1 a été entraîné avec split_ratios
+    # [0.8, 0.1, 0.1] et tile_stride 192. Le découpage par feu change avec ces
+    # paramètres, donc des feux de val/test de la v2 étaient dans le train de la
+    # v1 -> fuite de données, val_iou/test_iou surestimés.
+    # weights_from_checkpoint_path: /app/models_checkpoints/2026/changestar_farseg/tiled/csfarseg_r50_A_y23-25_8film-cbam_tiled-epoch=18-val_loss=0.483.ckpt
+    # weights_strict: true    # à remettre si on reprend des poids de même architecture ET même découpage
 
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
@@ -164,13 +163,17 @@ data:
     - 256
     - 256
     train_overlap_buffer: 50
+    # ── Découpage train/val/test identique à changestar2_cosine_restarts(_v2) ──
+    # _split_by_column répartit les feux (graine 42) selon le NOMBRE DE TUILES
+    # par feu : split_ratios ET tile_size/tile_stride (ainsi que csv, beams,
+    # dataset_years) doivent être identiques pour obtenir les mêmes feux en val/test.
     tile_size: [ 256, 256 ]
-    tile_stride: [ 192, 192 ]
+    tile_stride: [ 256, 256 ]   # était 192 : aligné pour obtenir le même découpage
     split_on_columns: db_nbac_fire_id
     csv_root_folder: /mnt/geospatial/projet_RCM_scanfire/
     patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
     csv_file_name: tbl_input_pre_post_data.csv
-    split_ratios: [0.8 ,0.1, 0.1]
+    split_ratios: [0.7, 0.15, 0.15]
 
     band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'NDSV','RFDI', 'RR','RL']
 
