@@ -19,18 +19,18 @@ trainer:
   callbacks:
     - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
-        monitor: "val_loss"
-        mode: "min"
+        monitor: "val_iou"
+        mode: "max"
         verbose: True
         patience: 30
         min_delta: 1e-3
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         dirpath: ./models_checkpoints/2026/changestar_farseg/tiled/
-        monitor: "val_loss"
-        mode: "min"
+        monitor: "val_iou"
+        mode: "max"
         save_top_k: 5
-        filename: "csfarseg_r50_A_y23-25_8film-cbam_tiled-{epoch:02d}-{val_loss:.3f}"
+        filename: "csfarseg_r50_A_y23-25_8film-cbam_tiled-{epoch:02d}-{val_iou:.3f}"
     - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
       init_args:
         max_samples: 50
@@ -92,7 +92,7 @@ model:
     cbam_reduction: 4
 
     use_channel_dropout: true     # Drop aléatoire de bandes SAR (train only) — always useful
-    channel_dropout_prob: 0.3     # prob de drop par canal (0.1 = conservateur)
+    channel_dropout_prob: 0.15     # prob de drop par canal (0.1 = conservateur)
 
     use_dfa: false                # Obligatoire : pas de têtes intermédiaires à pondérer
     dfa_gate_hidden: 16
@@ -106,7 +106,7 @@ model:
     boundary_loss_weight: 0.5
     boundary_width: 2
 
-    burned_class_weight: 3.0  # >1 penalizes false negatives on class burn (to test : bcw ->[2,5])
+    burned_class_weight: 2.0  # >1 penalizes false negatives on class burn (to test : bcw ->[2,5])
     main_loss:
       class_path: segmentation_models_pytorch.losses.FocalLoss
       init_args:
@@ -145,7 +145,7 @@ model:
 
     class_labels: [ "unburn", "burn" ]
     class_colors: [ "#000000", "#FF0000" ]
-    #weights_from_checkpoint_path: /app/model_checkpoints/2026_8_A_2023_2025_mask_water_rel_orbs_changeformer7_focal-lovasz_fire_id_cosw_all_attention-epoch=49-val_loss=0.248.ckpt
+    weights_from_checkpoint_path: /app/models_checkpoints/2026/changestar_farseg/tiled/csfarseg_r50_A_y23-25_8film-cbam_tiled-epoch=18-val_loss=0.483.ckpt
 
 data:
   class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
