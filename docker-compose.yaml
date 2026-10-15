@@ -56,7 +56,7 @@ services:
   event_detection_orchestrator:
     build:
       context: .
-      dockerfile: orchestrator.Dockerfile
+      dockerfile: Dockerfile
     runtime: nvidia
     shm_size: '32gb'
     container_name: event_detection_orchestrator
@@ -90,7 +90,7 @@ services:
   model_benchmark_orchestrator:
     build:
       context: .
-      dockerfile: orchestrator.Dockerfile
+      dockerfile: Dockerfile
     runtime: nvidia
     shm_size: '32gb'
     container_name: model_benchmark_orchestrator

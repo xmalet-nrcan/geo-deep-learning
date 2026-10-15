@@ -1,5 +1,6 @@
 # Dockerfile
-FROM pytorch/pytorch:2.14.1-cuda12.6-cudnn9-runtime as builder
+# Image unique : entraînement (geo-deep-learning) + orchestrateurs (event detection, model benchmark)
+FROM pytorch/pytorch:2.14.1-cuda12.6-cudnn9-runtime
 
 WORKDIR /app
 
@@ -15,10 +16,15 @@ RUN apt-get update \
 RUN python -m venv --system-site-packages /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
+# Dépendances geo-deep-learning (Phase 1)
 COPY requirements.txt .
 RUN python -m pip install --upgrade pip \
     && python -m pip install --no-cache-dir -r requirements.txt \
     && python -m pip check
+
+# Dépendances orchestrateurs / scanfire_modules (Phase 2)
+COPY requirements-orchestrator.txt .
+RUN python -m pip install --no-cache-dir -r requirements-orchestrator.txt
 
 ENV UID=9005 \
     USERNAME=geo_deep_learning \
