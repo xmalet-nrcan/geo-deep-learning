@@ -21,4 +21,5 @@ hydra-colorlog
 tensorboard
 tensorboardX
 rich
+click==8.2.1
 #ever-beta
