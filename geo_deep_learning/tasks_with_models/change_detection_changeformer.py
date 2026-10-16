@@ -31,6 +31,8 @@ from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA
 from geo_deep_learning.models.change_detection.change_detection_model import ChangeDetectionModel
 from geo_deep_learning.tools.visualization import visualize_prediction
 from geo_deep_learning.utils.geotiff_merge import (
+    DEFAULT_MERGED_ALL_MIN_PAIRS,
+    DEFAULT_MERGED_ALL_PROB_THRESHOLD,
     extract_scalar,
     group_merge_key,
     merge_predictions,
@@ -56,7 +58,7 @@ DEEP_SUPERVISION_WEIGHTS = [0.1, 0.1, 0.15, 0.2, 1.0]
 # Default ascending probability thresholds defining exclusive confidence bands
 # for probability-zone vectorization (see ``predict_step``/``_new_manifest``).
 # Pixels below the first threshold (0.3) are left unclassified/unzoned.
-DEFAULT_PROBABILITY_ZONE_THRESHOLDS = (0.3, 0.5, 0.7, 0.8, 0.9, 1.0)
+DEFAULT_PROBABILITY_ZONE_THRESHOLDS = (0.3, 0.5,0.6, 0.7, 0.8, 0.9, 1.0)
 
 # Sentinel written to probability GeoTIFFs for invalid/masked pixels.
 # Probabilities live in [0, 1], so a negative value is an unambiguous nodata.
@@ -140,6 +142,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             predict_output_layout: Literal["production", "benchmark"] = "production",
             predict_run_name: str | None = None,
             predict_write_merged_all: bool | None = None,
+            merged_all_min_pairs: int = DEFAULT_MERGED_ALL_MIN_PAIRS,
+            merged_all_prob_threshold: float = DEFAULT_MERGED_ALL_PROB_THRESHOLD,
             deep_supervision: bool = True,
             deep_supervision_weights: list[float] | None = None,
             speckle_noise_std: float = 0.15,
@@ -272,10 +276,19 @@ class ChangeDetectionChangeFormer(LightningModule):
                   Re-running the same model overwrites its rasters (idempotent).
             predict_run_name: Optional run label (e.g. benchmark model name)
                 written to the manifest as ``run_name``.
-            predict_write_merged_all: Write the global ``merged_all.tif`` per
-                event. ``None`` (default) ⇒ ``True`` in the ``production`` layout,
-                ``False`` in the ``benchmark`` layout (it mixes different
-                pre/post pairs and would be meaningless for comparison).
+            predict_write_merged_all: Write the global
+                ``merged_all_beam-<beam>_pass-<pass>.tif`` (+ ``*_prob.tif``) per
+                event and beam/satellite pass. ``None`` (default) ⇒ ``True`` in
+                the ``production`` layout, ``False`` in the ``benchmark`` layout
+                (it mixes different pre/post pairs and would be meaningless for
+                comparison).
+            merged_all_min_pairs: Temporal confirmation for ``merged_all``: a
+                pixel is burned only if at least this many pre/post pairs detect
+                it (capped at the number of pairs with valid data there). See
+                :func:`~geo_deep_learning.utils.geotiff_merge.temporal_confirmation_merge`.
+            merged_all_prob_threshold: Probability above which a pair counts as
+                a detection, also applied to the persistence probability
+                (mean probability from the first detection onward).
         """
         super().__init__()
         self.save_hyperparameters()
@@ -415,6 +428,11 @@ class ChangeDetectionChangeFormer(LightningModule):
             if predict_write_merged_all is None
             else bool(predict_write_merged_all)
         )
+        if merged_all_min_pairs < 1:
+            msg = f"merged_all_min_pairs must be >= 1, got {merged_all_min_pairs}"
+            raise ValueError(msg)
+        self.merged_all_min_pairs = int(merged_all_min_pairs)
+        self.merged_all_prob_threshold = float(merged_all_prob_threshold)
         self.weights_strict = (
             (predict_output_layout == PREDICT_LAYOUT_BENCHMARK)
             if weights_strict is None
@@ -2080,6 +2098,19 @@ class ChangeDetectionChangeFormer(LightningModule):
         manifest["predictions"].append(entry)
         return out_path
 
+    def _merge_predictions(
+            self,
+            group_tile_paths: dict[tuple[str, ...], list[Path]],
+            event_all_tile_paths: dict[str, list[Path]],
+    ) -> None:
+        """Run the cross-cell merges with this module's ``merged_all`` settings."""
+        merge_predictions(
+            group_tile_paths, event_all_tile_paths,
+            write_merged_all=self.predict_write_merged_all,
+            merged_all_min_pairs=self.merged_all_min_pairs,
+            merged_all_prob_threshold=self.merged_all_prob_threshold,
+        )
+
     def _save_assembled_predictions(
             self,
             assembled: dict[str, dict[str, Any]],
@@ -2128,7 +2159,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         self._write_manifests(manifest, base_dir, predict_date)
         # Merge across cells / groups (same logic as per-tile path)
-        merge_predictions(group_tile_paths, event_all_tile_paths, write_merged_all=self.predict_write_merged_all)
+        self._merge_predictions(group_tile_paths, event_all_tile_paths)
         logger.info("All blended predictions saved to %s", base_dir)
 
     def on_predict_end(self) -> None:
@@ -2168,6 +2199,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             getattr(dm, "tile_stride", None),
             no_data_value=NO_DATA,
             positive_class_index=self.probability_zone_class_index,
+            probability_nodata=PROBABILITY_NODATA,
         )
         if used_blending and assembled:
             logger.info("Using overlap blending for %d source images.", len(assembled))
@@ -2186,7 +2218,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             )
 
         self._write_manifests(manifest, base_dir, predict_date)
-        merge_predictions(group_tile_paths, event_all_tile_paths, write_merged_all=self.predict_write_merged_all)
+        self._merge_predictions(group_tile_paths, event_all_tile_paths)
         logger.info("All predictions saved to %s", base_dir)
 
     def _crop_prediction_to_cell(

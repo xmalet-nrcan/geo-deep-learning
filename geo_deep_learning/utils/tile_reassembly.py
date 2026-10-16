@@ -153,6 +153,7 @@ def _blend_tile_group(
     *,
     no_data_value: int,
     positive_class_index: int = -1,
+    probability_nodata: float = -1.0,
 ) -> dict[str, Any]:
     """Blend one group of overlapping tiles into a single source-level prediction."""
     source_h = tiles[0].get("source_height", tiles[0]["original_height"])
@@ -217,6 +218,14 @@ def _blend_tile_group(
         profile["height"] = cell_h
         profile["width"] = cell_w
         out_h, out_w = cell_h, cell_w
+        invalid = invalid[buf:buf + cell_h, buf:buf + cell_w]
+
+    # ``blended_probs`` comes from the raw softmax, which predict_step does
+    # NOT mask (only ``probability`` is). Re-apply the validity/water mask so
+    # nodata areas don't leak smooth garbage probabilities (seen as bow-tie
+    # artefacts from the blend window over constant no-data inputs).
+    probability = blended_probs[positive_class_index].copy()
+    probability[invalid] = probability_nodata
 
     return {
         "predictions": pred,
@@ -224,7 +233,7 @@ def _blend_tile_group(
         # Positive/burn-class probability surface (already buffer-cropped
         # above alongside ``blended_probs``), used downstream for
         # probability-zone vectorization — see ``probability_zone_thresholds``.
-        "probability": blended_probs[positive_class_index],
+        "probability": probability,
         "source_height": out_h,
         "source_width": out_w,
         "profile": profile,
@@ -250,6 +259,7 @@ def reassemble_overlapping_tiles(
     *,
     no_data_value: int,
     positive_class_index: int = -1,
+    probability_nodata: float = -1.0,
 ) -> tuple[dict[str, dict[str, Any]], bool]:
     """Reassemble overlapping tiles into source-level predictions with cosine blending.
 
@@ -267,6 +277,8 @@ def reassemble_overlapping_tiles(
             class within the blended per-class probabilities, exposed on each
             assembled result as ``"probability"`` for probability-zone
             vectorization downstream.
+        probability_nodata: Value written to the ``"probability"`` surface
+            wherever ``predictions`` is ``no_data_value``.
 
     Returns:
         Tuple of:
@@ -312,6 +324,7 @@ def reassemble_overlapping_tiles(
         assembled_source = _blend_tile_group(
             tiles, overlap_h, overlap_w, blend_window_cache,
             no_data_value=no_data_value, positive_class_index=positive_class_index,
+            probability_nodata=probability_nodata,
         )
         assembled_source["pre_post_name"] = source_key
         assembled[source_key] = assembled_source
