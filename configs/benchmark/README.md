@@ -30,6 +30,31 @@ noms **identiques entre modèles** pour un même cas de test. Pas de `merged_all
 Règles du registre : `name` ∈ `^[A-Za-z0-9_.-]+$`, unique (= dossier de sortie et
 `model_benchmark.test_runs.model_name`) ; `config` relatif = relatif à `models.yaml`.
 
+## Modèles du registre
+
+Checkpoints sous `/app/models_checkpoints/2026/` ; tous beam A, années 2023 + 2025, 9 bandes,
+FiLM 8, CBAM, signed-diff normalisé, sans DFA.
+
+| `name` | Config d'entraînement (`configs/`) | Checkpoint | Modèle | Inférence (buffer / tuile / pas) |
+|---|---|---|---|---|
+| `csfarseg_r50_v2_e76` — **prod, référence** | `rcm_change_detection_changestar_farseg_v2.yaml` | `changestar_farseg/tiled/v2/…-v2-epoch=76-val_iou=0.727.ckpt` | `changestar_farseg` (ResNet-50, `full_res_refine`) | 100 / 256 / 128 |
+| `cs2base_cosine_restarts_e24` — ancienne prod | `rcm_change_detection_changestar2_cosine_restarts.yaml` | `changestar2/tiled/new/…-all-cosine-restarts-tiled-epoch=24-val_loss=0.484.ckpt` | `changestar2` | 50 / 256 / 256 |
+| `cs2base_cosine_restarts_v2` | `rcm_change_detection_changestar2_cosine_restarts_v2.yaml` | `changestar2/tiled/new/…-mchi_rrrl-cosine-restarts-tiled-v2-epoch=29-val_iou=0.703.ckpt` | `changestar2` | 100 / 256 / 128 |
+| `changeformer_v7_all9bands` | `rcm_change_detection_changeformer_all9bands.yaml` | `changeformer7/tiled/bands_all9/…-bands-all9-epoch=49-val_loss=0.481.ckpt` | `changeformer_7` | 100 / 256 / 128 |
+
+- **Ordre des bandes** : `LOCALINCANGLE, PDN, PSN, PVN, S0, NDSV, RFDI, RR, RL`, sauf
+  `changeformer_v7_all9bands` (`…, S0, RR, RL, NDSV, RFDI`, comme à son entraînement), à ne pas réordonner.
+- **Inférence commune** : les nouveaux modèles reprennent la stratégie de la prod
+  (`predict_overlap_buffer: 100`, `tile_stride: [128, 128]`, fusion des chevauchements) pour être
+  comparés à inférence égale. C'est une exception assumée à la règle
+  `predict_overlap_buffer = train_overlap_buffer` (50 à l'entraînement). `cs2base_cosine_restarts_e24`
+  garde son réglage historique (50 / pas 256).
+- `csfarseg_r50_v2_e76` : `backbone_kwargs.backbone_weights: null` comme en prod, bien que le
+  checkpoint ait été entraîné avec `ResNet50_Weights.SENTINEL1_ALL_MOCO`. Ces poids ne servent qu'à
+  l'initialisation (écrasée par le checkpoint) et `null` évite leur téléchargement dans le conteneur.
+  Le validateur ignore `backbone_weights` dans la comparaison de `backbone_kwargs`.
+  Les clés `merged_all_*` de la config de prod ne sont pas reprises (pas de `merged_all.tif` en benchmark).
+
 ## Dériver une config predict depuis une config d'entraînement
 
 Les configs `fit` ne sont **pas** utilisables telles quelles (dataset train, callbacks,
@@ -120,8 +145,11 @@ Code retour `1` si au moins une erreur. `--path-map SRC=DST` : découpage sur le
 
 ## Ajouter un modèle
 
-1. Copier `_template_predict.yaml` → `<name>_predict.yaml`, compléter les `TODO`.
-2. Ajouter l'entrée dans `models.yaml` (`enabled: true`).
+1. Copier `_template_predict.yaml` (ou la config d'un modèle proche) → `<name>_predict.yaml`,
+   compléter les `TODO`. Pour comparer à inférence égale, reprendre `predict_overlap_buffer` /
+   `tile_size` / `tile_stride` de la référence (`csfarseg_r50_v2_e76_predict.yaml`).
+2. Ajouter l'entrée dans `models.yaml` (`enabled: true`) et une ligne au tableau
+   [Modèles du registre](#modèles-du-registre).
 3. `make benchmark-validate VALIDATE_ARGS="--model <name> --cli --load-weights"` → `OK`.
 4. `make benchmark-dry-run` puis `make benchmark-start`.
 
@@ -133,7 +161,7 @@ installé (`scanfire/database_schemas/model_benchmark/install.sql`), cas de test
 ```bash
 make benchmark-dry-run                       # premier plan : CSV + override + snapshot, aucune écriture DB, aucun predict
 make benchmark-start                         # arrière-plan : passage unique puis arrêt du conteneur
-make benchmark-start BENCHMARK_ARGS="--model cs2base_cosine_restarts_e24 --test-case 3 --force"
+make benchmark-start BENCHMARK_ARGS="--model csfarseg_r50_v2_e76 --test-case 3 --force"
 make logs-benchmark                          # suivre
 make benchmark-status                        # état + code retour (0 OK, 1 ≥ 1 modèle en échec, 2 registre invalide)
 make benchmark-check                         # contrôle des sorties (lecture seule), voir ci-dessous

@@ -1,0 +1,188 @@
+seed_everything: true
+
+trainer:
+#  detect_anomaly: true
+  accelerator: "gpu"
+  devices: -1
+  strategy: auto
+
+  gradient_clip_val: 1.0
+  precision: "bf16-mixed"  # bf16: no GradScaler needed, no overflow (same exponent as fp32)
+  sync_batchnorm: false
+  gradient_clip_algorithm: "norm"
+  logger:
+    class_path: lightning.pytorch.loggers.TensorBoardLogger
+    init_args:
+      save_dir: ./lightning_logs
+      name: 2026/changestar_farseg/csfarseg_r50_A_y23-25_water_film8-cbam_focal-lovasz-boundary_cosine-restarts_tiled_v3
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: "val_iou"
+        mode: "max"
+        verbose: True
+        patience: 15          # > T_0 (20) : laisse au cycle suivant le temps de remonter après le restart
+        min_delta: 1e-3
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        # Dossier séparé : ne mélange pas ces checkpoints avec ceux du run v1
+        # dont on reprend les poids (weights_from_checkpoint_path ci-dessous).
+        dirpath: ./models_checkpoints/2026/changestar_farseg/tiled/v3/
+        monitor: "val_iou"    # IoU de la classe brûlée
+        mode: "max"
+        save_top_k: 5
+        save_last: true       # garde aussi le dernier état (reprise d'entraînement)
+        filename: "csfarseg_r50_A_y23-25_8film-cbam_tiled-v3-{epoch:02d}-{val_iou:.3f}"
+    - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
+      init_args:
+        max_samples: 50
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: "epoch"
+
+    #- class_path: lightning.pytorch.callbacks.StochasticWeightAveraging
+    #  init_args:
+    #    swa_lrs: 1e-5         # must be ≤ base lr (1e-4) for AdamW; 1e-3 was 10× too high
+    #    annealing_epochs: 5
+    #    swa_epoch_start: 0.8
+    #    annealing_strategy: cos
+
+  accumulate_grad_batches: 4    # batch effectif = 8 × 4 = 32
+  max_epochs: 240
+  check_val_every_n_epoch: 1
+
+model:
+  class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
+  init_args:
+    # ChangeStar(FarSeg) de torchgeo (ICCV 2021), via
+    # geo_deep_learning/models/change_detection/sub_models/changestar_torchgeo.py
+    change_detection_model: "changestar_farseg"
+    backbone_kwargs:
+      backbone: resnet50              # resnet18 | resnet34 | resnet50 | resnet101
+      # Poids préentraînés (téléchargés au premier lancement, torchgeo >= 0.9) :
+      #   "ResNet50_Weights.IMAGENET1K_V2"       (torchvision)
+      #   "ResNet50_Weights.SENTINEL1_ALL_MOCO"  (torchgeo, SAR VV/VH)
+      # conv1 est adaptée au nombre réel de canaux (moyenne des filtres répliquée).
+      # backbone_weights: "ResNet18_Weights.IMAGENET1K_V1"
+      backbone_weights: "ResNet50_Weights.SENTINEL1_ALL_MOCO"
+
+      inference_mode: t1t2            # t1t2 (pré→post) | t2t1 | mean
+      # true = entraîne aussi t2→t1 (symétrie de l'article) ; le modèle ne distingue
+      # alors plus baisse/hausse de rétrodiffusion. Si true : deep_supervision: true
+      # et deep_supervision_weights: [1.0, 1.0].
+      bidirectional_training: false
+      changemixin_inner_channels: 16
+      changemixin_num_convs: 4
+      # Tête de raffinement pleine résolution : ChangeMixin travaille à H/4
+      # (blocs de 400 m à 100 m/pixel) ; la tête fusionne ce contexte avec une
+      # branche légère sur les images pleine résolution et prédit un résidu.
+      # Initialisée à zéro : démarre comme ChangeStar seul.
+      full_res_refine: true
+      refine_channels: 16
+    image_size: [256,256]
+    # in_channels est déduit des band_names du DataModule (pas besoin de le fixer).
+    max_samples: 10
+    num_classes: 1  # binary change detection
+    deep_supervision: false  # ChangeStar(FarSeg) n'a qu'une tête de sortie
+    # deep_supervision_weights: [1.0, 1.0]  # seulement avec bidirectional_training: true
+    speckle_noise_std: 0.15  # SAR-specific multiplicative speckle augmentation
+    # --- Conditioning & regularization modules ---
+    use_metadata_film: true       # encode SAT_PASS/BEAM via FiLM instead of constant bands
+    film_embed_dim: 8            # embedding dimension for FiLM conditioner
+
+    use_cbam: true
+    cbam_reduction: 4
+
+    use_channel_dropout: true     # Drop aléatoire de bandes SAR (train only) — always useful
+    channel_dropout_prob: 0.1     # prob de drop par canal (0.1 = conservateur)
+
+    use_dfa: false                # Obligatoire : pas de têtes intermédiaires à pondérer
+    dfa_gate_hidden: 16
+
+    use_signed_difference: true       # ajoute (x1 - x2) signé en canaux d'entrée (direction du changement)
+    signed_difference_channels: null  # null = ajoute toutes les bandes ; ex. 3 = projection 1x1 apprise
+    signed_difference_normalize: true # borne les canaux signés à [-1, 1] via tanh
+
+    # BCE sur une bande autour des contours de brûlis de la vérité terrain.
+    # boundary_width: 2 -> bande de 5 px (±200 m à 100 m/pixel). 0 = désactivé.
+    boundary_loss_weight: 0.3
+    boundary_width: 2
+
+    burned_class_weight: 2.0  # >1 penalizes false negatives on class burn (to test : bcw ->[2,5])
+    main_loss:
+      class_path: segmentation_models_pytorch.losses.FocalLoss
+      init_args:
+        mode: "binary"
+        gamma: 1.5
+        ignore_index: 255
+    secondary_loss:
+      class_path: segmentation_models_pytorch.losses.LovaszLoss
+      init_args:
+        mode: "binary"
+        ignore_index: 255
+    loss_ratio:
+      - 0.6  # weight for the main_loss
+      - 0.4  # weight for the secondary_loss
+    optimizer:
+      class_path: torch.optim.AdamW
+      init_args:
+        lr: 1e-4              # LR max de chaque cycle (CosineAnnealingWarmRestarts part du lr de l'optimiseur)
+        weight_decay: 0.05
+        betas:
+        - 0.9
+        - 0.999
+    # Échauffement linéaire construit dans le code (configure_optimizers) :
+    # un SequentialLR en YAML ne peut pas être instancié par jsonargparse.
+    lr_warmup_iters: 5          # 5 époques (interval: epoch) : 3e-5 → 3e-4
+    lr_warmup_start_factor: 0.1
+    scheduler:
+      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
+      init_args:
+        T_0: 10               # cycles de 20 époques (après l'échauffement)
+        T_mult: 1             # longueur constante (2 = 20 → 40 → 80)
+        eta_min: 1e-6         # LR plancher
+    scheduler_config:
+      interval: "epoch"
+      frequency: 1
+
+    class_labels: [ "unburn", "burn" ]
+    class_colors: [ "#000000", "#FF0000" ]
+    # PAS de reprise des poids v1 : v1 a été entraîné avec split_ratios
+    # [0.8, 0.1, 0.1] et tile_stride 192. Le découpage par feu change avec ces
+    # paramètres, donc des feux de val/test de la v2 étaient dans le train de la
+    # v1 -> fuite de données, val_iou/test_iou surestimés.
+    # weights_from_checkpoint_path: /app/models_checkpoints/2026/changestar_farseg/tiled/csfarseg_r50_A_y23-25_8film-cbam_tiled-epoch=00-val_iou=0.784.ckpt
+    # weights_strict: true    # à remettre si on reprend des poids de même architecture ET même découpage
+
+data:
+  class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
+  init_args:
+    batch_size: 8
+    num_workers: 10
+    separate_metadata: true  # SAT_PASS/BEAM as scalars, not image bands
+    patch_size:
+    - 256
+    - 256
+    train_overlap_buffer: 50
+    # ── Découpage train/val/test identique à changestar2_cosine_restarts(_v2) ──
+    # _split_by_column répartit les feux (graine 42) selon le NOMBRE DE TUILES
+    # par feu : split_ratios ET tile_size/tile_stride (ainsi que csv, beams,
+    # dataset_years) doivent être identiques pour obtenir les mêmes feux en val/test.
+    tile_size: [ 256, 256 ]
+    tile_stride: [ 256, 256 ]   # était 192 : aligné pour obtenir le même découpage
+    split_on_columns: db_nbac_fire_id
+    csv_root_folder: /mnt/geospatial/projet_RCM_scanfire/
+    patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
+    csv_file_name: tbl_input_pre_post_data.csv
+    split_ratios: [0.7, 0.15, 0.15]
+    # burned_oversample_factor: 2.0
+
+    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'NDSV','RFDI', 'RR','RL']
+
+    beams:
+    - 'A'
+    satellite_pass:   # null = both Ascending + Descending
+    dataset_years:
+    - 2025
+    - 2023

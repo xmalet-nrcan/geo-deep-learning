@@ -31,6 +31,8 @@ from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA
 from geo_deep_learning.models.change_detection.change_detection_model import ChangeDetectionModel
 from geo_deep_learning.tools.visualization import visualize_prediction
 from geo_deep_learning.utils.geotiff_merge import (
+    DEFAULT_MERGED_ALL_MIN_PAIRS,
+    DEFAULT_MERGED_ALL_PROB_THRESHOLD,
     extract_scalar,
     group_merge_key,
     merge_predictions,
@@ -56,7 +58,7 @@ DEEP_SUPERVISION_WEIGHTS = [0.1, 0.1, 0.15, 0.2, 1.0]
 # Default ascending probability thresholds defining exclusive confidence bands
 # for probability-zone vectorization (see ``predict_step``/``_new_manifest``).
 # Pixels below the first threshold (0.3) are left unclassified/unzoned.
-DEFAULT_PROBABILITY_ZONE_THRESHOLDS = (0.3, 0.5, 0.7, 0.8, 0.9, 1.0)
+DEFAULT_PROBABILITY_ZONE_THRESHOLDS = (0.3, 0.5,0.6, 0.7, 0.8, 0.9, 1.0)
 
 # Sentinel written to probability GeoTIFFs for invalid/masked pixels.
 # Probabilities live in [0, 1], so a negative value is an unambiguous nodata.
@@ -140,6 +142,8 @@ class ChangeDetectionChangeFormer(LightningModule):
             predict_output_layout: Literal["production", "benchmark"] = "production",
             predict_run_name: str | None = None,
             predict_write_merged_all: bool | None = None,
+            merged_all_min_pairs: int = DEFAULT_MERGED_ALL_MIN_PAIRS,
+            merged_all_prob_threshold: float = DEFAULT_MERGED_ALL_PROB_THRESHOLD,
             deep_supervision: bool = True,
             deep_supervision_weights: list[float] | None = None,
             speckle_noise_std: float = 0.15,
@@ -157,6 +161,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             probability_zone_thresholds: list[float] | None = None,
             probability_zone_class_index: int = -1,
             backbone_kwargs: dict[str, Any] | None = None,
+            boundary_loss_weight: float = 0.0,
+            boundary_width: int = 2,
+            lr_warmup_iters: int = 0,
+            lr_warmup_start_factor: float = 0.1,
             **kwargs: object,  # noqa: ARG002
     ) -> None:
         """Initialize the model.
@@ -224,6 +232,25 @@ class ChangeDetectionChangeFormer(LightningModule):
                       encoder_weights: imagenet   # or null
                       embed_dim: 256
                       fusion: concat_diff         # concat | diff | signed_diff
+            boundary_loss_weight: Weight of an extra BCE restricted to a band
+                around the ground-truth burn boundaries (see
+                :meth:`_boundary_bce_loss`). Pushes the model to place its
+                frontiers precisely. ``0`` (default) disables it. Added to the
+                train, val and test losses alike (so ``val_loss`` stays
+                comparable to the training objective).
+            boundary_width: Half-width, in pixels, of that boundary band
+                (``2`` -> a 5-pixel-wide band, i.e. ±200 m at 100 m/pixel).
+            lr_warmup_iters: Linear learning-rate warm-up length, in scheduler
+                steps (i.e. epochs when ``scheduler_config.interval`` is
+                ``"epoch"``, batches when it is ``"step"``). When > 0, the
+                configured ``scheduler`` is wrapped in
+                ``SequentialLR([LinearLR, scheduler])`` and only starts after
+                the warm-up. Built in code because jsonargparse cannot
+                instantiate the nested schedulers of a ``SequentialLR`` given
+                in YAML (they need the optimizer). Ignored for ``OneCycleLR``
+                (it has its own warm-up, ``pct_start``). ``0`` = disabled.
+            lr_warmup_start_factor: LR multiplier at the first warm-up step
+                (``0.1`` -> starts at 10 % of the optimizer ``lr``).
             predict_output_dir: Root directory for predict outputs. In the
                 ``production`` layout a ``predictions`` sub-folder is appended
                 when missing; in the ``benchmark`` layout it is used as-is.
@@ -249,10 +276,19 @@ class ChangeDetectionChangeFormer(LightningModule):
                   Re-running the same model overwrites its rasters (idempotent).
             predict_run_name: Optional run label (e.g. benchmark model name)
                 written to the manifest as ``run_name``.
-            predict_write_merged_all: Write the global ``merged_all.tif`` per
-                event. ``None`` (default) ⇒ ``True`` in the ``production`` layout,
-                ``False`` in the ``benchmark`` layout (it mixes different
-                pre/post pairs and would be meaningless for comparison).
+            predict_write_merged_all: Write the global
+                ``merged_all_beam-<beam>_pass-<pass>.tif`` (+ ``*_prob.tif``) per
+                event and beam/satellite pass. ``None`` (default) ⇒ ``True`` in
+                the ``production`` layout, ``False`` in the ``benchmark`` layout
+                (it mixes different pre/post pairs and would be meaningless for
+                comparison).
+            merged_all_min_pairs: Temporal confirmation for ``merged_all``: a
+                pixel is burned only if at least this many pre/post pairs detect
+                it (capped at the number of pairs with valid data there). See
+                :func:`~geo_deep_learning.utils.geotiff_merge.temporal_confirmation_merge`.
+            merged_all_prob_threshold: Probability above which a pair counts as
+                a detection, also applied to the persistence probability
+                (mean probability from the first detection onward).
         """
         super().__init__()
         self.save_hyperparameters()
@@ -304,6 +340,22 @@ class ChangeDetectionChangeFormer(LightningModule):
         )
         self.probability_zone_class_index = probability_zone_class_index
         self.backbone_kwargs = dict(backbone_kwargs or {})
+        if boundary_loss_weight < 0:
+            msg = "boundary_loss_weight must be >= 0"
+            raise ValueError(msg)
+        if boundary_width < 1:
+            msg = "boundary_width must be >= 1"
+            raise ValueError(msg)
+        self.boundary_loss_weight = float(boundary_loss_weight)
+        self.boundary_width = int(boundary_width)
+        if lr_warmup_iters < 0:
+            msg = "lr_warmup_iters must be >= 0"
+            raise ValueError(msg)
+        if not 0.0 < lr_warmup_start_factor <= 1.0:
+            msg = "lr_warmup_start_factor must be in (0, 1]"
+            raise ValueError(msg)
+        self.lr_warmup_iters = int(lr_warmup_iters)
+        self.lr_warmup_start_factor = float(lr_warmup_start_factor)
 
         self.changed_num_classes = num_classes + 1 if num_classes == 1 else num_classes
         self.labels = (
@@ -376,6 +428,11 @@ class ChangeDetectionChangeFormer(LightningModule):
             if predict_write_merged_all is None
             else bool(predict_write_merged_all)
         )
+        if merged_all_min_pairs < 1:
+            msg = f"merged_all_min_pairs must be >= 1, got {merged_all_min_pairs}"
+            raise ValueError(msg)
+        self.merged_all_min_pairs = int(merged_all_min_pairs)
+        self.merged_all_prob_threshold = float(merged_all_prob_threshold)
         self.weights_strict = (
             (predict_output_layout == PREDICT_LAYOUT_BENCHMARK)
             if weights_strict is None
@@ -571,15 +628,55 @@ class ChangeDetectionChangeFormer(LightningModule):
     def configure_optimizers(self) -> list[list[dict[str, Any]]]:
         """Configure optimizers."""
         optimizer = self.optimizer(self.parameters())
-        if (
-                self.hparams["scheduler"]["class_path"]
-                == "torch.optim.lr_scheduler.OneCycleLR"
-        ):
+        if self._scheduler_class_path() == "torch.optim.lr_scheduler.OneCycleLR":
+            if self.lr_warmup_iters > 0:
+                logger.warning(
+                    "lr_warmup_iters=%d ignored: OneCycleLR already warms up (pct_start).",
+                    self.lr_warmup_iters,
+                )
             scheduler = self._build_onecycle_scheduler(optimizer)
         else:
-            scheduler = self.scheduler(optimizer)
+            scheduler = self._with_warmup(optimizer, self.scheduler(optimizer))
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
+
+    def _scheduler_class_path(self) -> str | None:
+        """Dotted class path of the configured scheduler.
+
+        ``hparams["scheduler"]`` is a ``{"class_path": ...}`` dict when built by
+        LightningCLI, but the raw callable when the task is instantiated in code
+        (tests, notebooks) — handle both instead of assuming the dict.
+        """
+        spec = self.hparams.get("scheduler")
+        if isinstance(spec, dict):
+            return spec.get("class_path")
+        func = getattr(spec, "func", spec)  # functools.partial
+        if isinstance(func, type):
+            return f"{func.__module__}.{func.__qualname__}"
+        return None
+
+    def _with_warmup(
+            self,
+            optimizer: torch.optim.Optimizer,
+            scheduler: Any,
+    ) -> Any:
+        """Prepend a linear LR warm-up to ``scheduler`` (no-op when disabled)."""
+        if self.lr_warmup_iters <= 0:
+            return scheduler
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            msg = "lr_warmup_iters is not supported with ReduceLROnPlateau (not chainable)"
+            raise ValueError(msg)
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=self.lr_warmup_start_factor,
+            end_factor=1.0,
+            total_iters=self.lr_warmup_iters,
+        )
+        return torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup, scheduler],
+            milestones=[self.lr_warmup_iters],
+        )
 
     def _build_onecycle_scheduler(
             self, optimizer: torch.optim.Optimizer,
@@ -1134,6 +1231,20 @@ class ChangeDetectionChangeFormer(LightningModule):
         main_loss = main_loss + burn_penalty
         final_head_loss = final_head_loss + burn_penalty
 
+        # Boundary-band BCE (sharper burn frontiers), on the final head only
+        if self.boundary_loss_weight > 0:
+            boundary_loss = self._boundary_bce_loss(
+                logits_no_nan, one_hot, common_data_mask, self.boundary_width,
+            )
+            weighted_boundary = self.boundary_loss_weight * boundary_loss
+            main_loss = main_loss + weighted_boundary
+            final_head_loss = final_head_loss + weighted_boundary
+            if self.training and getattr(self, "_trainer", None) is not None:
+                self.log(
+                    "boundary_loss", boundary_loss,
+                    on_step=False, on_epoch=True, sync_dist=True, batch_size=batch_size,
+                )
+
         # Dernière vérification
         if not torch.isfinite(main_loss):
             raise RuntimeError(
@@ -1423,6 +1534,56 @@ class ChangeDetectionChangeFormer(LightningModule):
         penalty_map = penalty_map * valid_mask
         valid_pixels = valid_mask.sum().clamp_min(1.0)
         return penalty_map.sum() / valid_pixels
+
+    @staticmethod
+    def _boundary_band(target: Tensor, valid_mask: Tensor, width: int) -> Tensor:
+        """Band of ``±width`` pixels around the edges of a binary ``[B, 1, H, W]`` mask.
+
+        Computed as morphological dilation minus erosion (max-pooling), then
+        restricted to valid pixels so nodata borders never create fake edges
+        inside the band.
+        """
+        kernel = 2 * width + 1
+        dilated = F.max_pool2d(target, kernel, stride=1, padding=width)
+        eroded = -F.max_pool2d(-target, kernel, stride=1, padding=width)
+        return ((dilated - eroded) > 0).to(target.dtype) * valid_mask
+
+    @classmethod
+    def _boundary_bce_loss(
+            cls,
+            logits: Tensor,
+            one_hot: Tensor,
+            valid_mask: Tensor,
+            width: int,
+    ) -> Tensor:
+        """BCE restricted to a band around the ground-truth change boundaries.
+
+        Uses the change-vs-no-change logit ``logsumexp(l_1..l_C) - l_0``, whose
+        sigmoid equals the softmax probability of "change" for any number of
+        classes (``l_1 - l_0`` in the binary case), so the loss is consistent
+        with the ``argmax`` predictions whatever the backbone's logit scale.
+        Pixels near both sides of each edge are roughly balanced by
+        construction, so no pos_weight is applied. Returns 0 when the batch
+        contains no boundary (e.g. no burned pixel).
+        """
+        if valid_mask.dim() == 3:  # noqa: PLR2004
+            valid_mask = valid_mask.unsqueeze(1)
+        valid = (valid_mask > MASK_VALID_THRESHOLD).to(logits.dtype)
+
+        if logits.shape[1] > 1:
+            change_logit = torch.logsumexp(logits[:, 1:], dim=1, keepdim=True) - logits[:, :1]
+            change_target = 1.0 - one_hot[:, :1]
+        else:
+            change_logit = logits
+            change_target = one_hot[:, :1]
+        change_target = change_target.to(logits.dtype)
+
+        band = cls._boundary_band(change_target * valid, valid, width)
+        n_band = band.sum()
+        if n_band == 0:
+            return torch.zeros((), device=logits.device, dtype=logits.dtype)
+        bce = F.binary_cross_entropy_with_logits(change_logit, change_target, reduction="none")
+        return (bce * band).sum() / n_band
 
     def _log_visualizations(  # noqa: PLR0913
             self,
@@ -1937,6 +2098,19 @@ class ChangeDetectionChangeFormer(LightningModule):
         manifest["predictions"].append(entry)
         return out_path
 
+    def _merge_predictions(
+            self,
+            group_tile_paths: dict[tuple[str, ...], list[Path]],
+            event_all_tile_paths: dict[str, list[Path]],
+    ) -> None:
+        """Run the cross-cell merges with this module's ``merged_all`` settings."""
+        merge_predictions(
+            group_tile_paths, event_all_tile_paths,
+            write_merged_all=self.predict_write_merged_all,
+            merged_all_min_pairs=self.merged_all_min_pairs,
+            merged_all_prob_threshold=self.merged_all_prob_threshold,
+        )
+
     def _save_assembled_predictions(
             self,
             assembled: dict[str, dict[str, Any]],
@@ -1985,7 +2159,7 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         self._write_manifests(manifest, base_dir, predict_date)
         # Merge across cells / groups (same logic as per-tile path)
-        merge_predictions(group_tile_paths, event_all_tile_paths, write_merged_all=self.predict_write_merged_all)
+        self._merge_predictions(group_tile_paths, event_all_tile_paths)
         logger.info("All blended predictions saved to %s", base_dir)
 
     def on_predict_end(self) -> None:
@@ -2025,6 +2199,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             getattr(dm, "tile_stride", None),
             no_data_value=NO_DATA,
             positive_class_index=self.probability_zone_class_index,
+            probability_nodata=PROBABILITY_NODATA,
         )
         if used_blending and assembled:
             logger.info("Using overlap blending for %d source images.", len(assembled))
@@ -2043,7 +2218,7 @@ class ChangeDetectionChangeFormer(LightningModule):
             )
 
         self._write_manifests(manifest, base_dir, predict_date)
-        merge_predictions(group_tile_paths, event_all_tile_paths, write_merged_all=self.predict_write_merged_all)
+        self._merge_predictions(group_tile_paths, event_all_tile_paths)
         logger.info("All predictions saved to %s", base_dir)
 
     def _crop_prediction_to_cell(

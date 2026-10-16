@@ -21,3 +21,5 @@ environment_full_conda_bckp.yml
 /venv
 /.claude
 data/
+/poetry.lock
+/notebooks/view_logs.ipynb

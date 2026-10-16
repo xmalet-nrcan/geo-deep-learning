@@ -56,7 +56,7 @@ services:
   event_detection_orchestrator:
     build:
       context: .
-      dockerfile: orchestrator.Dockerfile
+      dockerfile: Dockerfile
     runtime: nvidia
     shm_size: '32gb'
     container_name: event_detection_orchestrator
@@ -71,7 +71,7 @@ services:
       - LOGGER_LEVEL=INFO
       - PREDICT_CONFIG=/app/configs/model_conf.yaml
     volumes:
-      - "./configs/rcm_change_detection_predict.yaml:/app/configs/model_conf.yaml:ro"
+      - "./configs/rcm_change_detection_predict_changestar_farseg.yaml:/app/configs/model_conf.yaml:ro"
       - "./models_checkpoints:/app/models_checkpoints:rw"
       #- "./lightning_logs:/app/lightning_logs:rw"
       - "../scanfire/scanfire_modules:/app/scanfire_modules:ro"
@@ -90,7 +90,7 @@ services:
   model_benchmark_orchestrator:
     build:
       context: .
-      dockerfile: orchestrator.Dockerfile
+      dockerfile: Dockerfile
     runtime: nvidia
     shm_size: '32gb'
     container_name: model_benchmark_orchestrator

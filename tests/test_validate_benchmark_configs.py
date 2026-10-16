@@ -290,6 +290,32 @@ def test_compare_hparams_architecture_mismatch(
     assert any(i.message.startswith(fragment) for i in _errors(issues)), issues
 
 
+def test_compare_hparams_ignores_backbone_weights(defaults: dict) -> None:
+    cfg = _config()
+    cfg["model"]["init_args"]["backbone_kwargs"] = {"backbone": "resnet50", "backbone_weights": None}
+    ckpt_kwargs = {"backbone": "resnet50", "backbone_weights": "ResNet50_Weights.SENTINEL1_ALL_MOCO"}
+    issues = vbc.compare_hparams(
+        "m",
+        cfg["model"]["init_args"],
+        cfg["data"]["init_args"],
+        _ckpt_hparams(backbone_kwargs=ckpt_kwargs),
+        defaults,
+        expected_in_channels=10,
+    )
+    assert issues == []
+
+    # Other backbone_kwargs entries are still architecture.
+    issues = vbc.compare_hparams(
+        "m",
+        cfg["model"]["init_args"],
+        cfg["data"]["init_args"],
+        _ckpt_hparams(backbone_kwargs={**ckpt_kwargs, "backbone": "resnet101"}),
+        defaults,
+        expected_in_channels=10,
+    )
+    assert any(i.message.startswith("backbone_kwargs") for i in _errors(issues)), issues
+
+
 def test_compare_hparams_soft_mismatch_is_warning(defaults: dict) -> None:
     cfg = _config()
     issues = vbc.compare_hparams(

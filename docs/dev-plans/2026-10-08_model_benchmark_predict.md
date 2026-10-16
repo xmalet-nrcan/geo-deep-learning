@@ -23,7 +23,7 @@ pour comparaison directe :
   `event-{event_id}_start-{YYYYMMDD}_end_{YYYYMMDD}_pre-g{gid_pre}-{YYYYMMDD}_post-g{gid_post}-{YYYYMMDD}_cell-{cell_id}_beam-{beam}_pass-{sat_pass}.tif`
 - Jeu de test défini en base : **1..N groupes PRE** et **1..N groupes ACTIVE/POST** par cas de test.
 - Exécution pilotée par un orchestrateur **calqué sur `event_detection_orchestrator`**
-  (même image `orchestrator.Dockerfile`, même mount `../scanfire/scanfire_modules`, même
+  (même image `Dockerfile`, même mount `../scanfire/scanfire_modules`, même
   pattern `Processor` → export CSV → subprocess `train.py predict`), en **passage unique**.
 
 ### Hors périmètre (v1)
@@ -330,7 +330,7 @@ Nouveau service dans `docker-compose.yaml`, profil `benchmark` (ne démarre pas 
   model_benchmark_orchestrator:
     build:
       context: .
-      dockerfile: orchestrator.Dockerfile
+      dockerfile: Dockerfile
     runtime: nvidia
     shm_size: '32gb'
     container_name: model_benchmark_orchestrator
@@ -705,7 +705,7 @@ Constat : `fct_generate_test_pairs` renvoie le nombre de **nouvelles** paires (0
 Fichiers : `docker-compose.yaml`, `Makefile`, `.env` (doc des variables, pas de secrets commités).
 
 Tâches :
-- [x] Service `model_benchmark_orchestrator` (profil `benchmark`, `restart: "no"`, image `orchestrator.Dockerfile`, mounts `configs`, `models_checkpoints`, `../scanfire/scanfire_modules`, `/mnt/geospatial/…`).
+- [x] Service `model_benchmark_orchestrator` (profil `benchmark`, `restart: "no"`, image `Dockerfile`, mounts `configs`, `models_checkpoints`, `../scanfire/scanfire_modules`, `/mnt/geospatial/…`).
 - [x] Cibles `benchmark-start`, `benchmark-dry-run`, `logs-benchmark` + entrées dans `help`.
 - [x] Vérifier que `make up` / `orchestrator-start` ne démarrent **pas** le benchmark.
 
@@ -733,7 +733,7 @@ Validation (poste Windows, sans GPU ni `make`) :
   - `BENCHMARK_ARGS="--test-case 2" up -d --build --force-recreate` → arguments transmis par variable, run tracé
     `failed` (« checkpoint not found », attendu hors serveur), conteneur `exited (exit code 1)` ;
   - `rm --stop --force` → conteneur supprimé.
-- Non testé ici : image `orchestrator.Dockerfile` (GPU) et predict réel → P8 sur le serveur.
+- Non testé ici : image `Dockerfile` (GPU) et predict réel → P8 sur le serveur.
 
 Écarts / ajouts par rapport au plan :
 | Sujet | Plan | Réalisé | Raison |
@@ -850,7 +850,14 @@ Tâches :
 ### 12.1 Modèles
 | `name` (registre) | Config d'entraînement | Checkpoint | `change_detection_model` | `band_names` | `beams` | Flags (FiLM / CBAM / signed-diff / DFA) |
 |---|---|---|---|---|---|---|
-| | | | | | | |
+| `csfarseg_r50_v2_e76` (**prod, référence**) | `rcm_change_detection_changestar_farseg_v2.yaml` | `2026/changestar_farseg/tiled/v2/csfarseg_r50_A_y23-25_8film-cbam_tiled-v2-epoch=76-val_iou=0.727.ckpt` | `changestar_farseg` (R50, `full_res_refine`) | 9 : `LOCALINCANGLE, PDN, PSN, PVN, S0, NDSV, RFDI, RR, RL` | A | FiLM 8 / CBAM / signed-diff norm. / — |
+| `cs2base_cosine_restarts_e24` (ancienne prod) | `rcm_change_detection_changestar2_cosine_restarts.yaml` | `2026/changestar2/tiled/new/cs2base_A_y23_25_water-film8-all-cosine-restarts-tiled-epoch=24-val_loss=0.484.ckpt` | `changestar2` | 9 (ordre prod) | A | FiLM 8 / CBAM / signed-diff norm. / — |
+| `cs2base_cosine_restarts_v2` | `rcm_change_detection_changestar2_cosine_restarts_v2.yaml` | `2026/changestar2/tiled/new/cs2base_A_y23_25_water-film8-mchi_rrrl-cosine-restarts-tiled-v2-epoch=29-val_iou=0.703.ckpt` | `changestar2` | 9 (ordre prod) | A | FiLM 8 / CBAM / signed-diff norm. / — |
+| `changeformer_v7_all9bands` | `rcm_change_detection_changeformer_all9bands.yaml` | `2026/changeformer7/tiled/bands_all9/cf7_A_y23-25_cosine-restarts-tiled-bands-all9-epoch=49-val_loss=0.481.ckpt` | `changeformer_7` | 9 : `…, S0, RR, RL, NDSV, RFDI` (ordre ≠) | A | FiLM 8 / CBAM / signed-diff norm. / — |
+
+Inférence : `csfarseg_r50_v2_e76`, `cs2base_cosine_restarts_v2`, `changeformer_v7_all9bands` utilisent la
+stratégie de la prod (`predict_overlap_buffer: 100`, `tile_stride: [128, 128]`) pour comparer à inférence égale ;
+`cs2base_cosine_restarts_e24` garde buffer 50 / pas 256.
 
 ### 12.2 Cas de test
 | `name` | `event_id` | Groupes pre (`group_id` / date) | Groupes active-post (`group_id` / date) | `cell_ids` | `reference_end_date` | Absent du jeu d'entraînement ? |
