@@ -5,7 +5,8 @@
 # configs/rcm_change_detection_predict_changestar_farseg.yaml (architecture,
 # entrées, stratégie d'inférence), sans les clés injectées par l'orchestrateur.
 # Entraînement : configs/rcm_change_detection_changestar_farseg_v2.yaml (run v2,
-# backbone_weights: null — les poids viennent du checkpoint).
+# backbone_weights: SENTINEL1_ALL_MOCO). Ici null : init seule, écrasée par le
+# checkpoint ; ignoré par validate_benchmark_configs.py (INIT_ONLY_BACKBONE_KWARGS).
 #
 # Ne PAS renseigner ici (injecté par l'orchestrateur via benchmark_override.yaml,
 # voir README.md §Override) :
