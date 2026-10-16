@@ -87,6 +87,10 @@ ARCHITECTURE_HPARAMS = (
     "signed_difference_normalize",
     "backbone_kwargs",
 )
+#: ``backbone_kwargs`` entries that only set the initialisation (pretrained weights,
+#: overwritten by the checkpoint): ignored when comparing with the checkpoint, so a
+#: predict config can keep ``null`` and avoid downloading weights in the container.
+INIT_ONLY_BACKBONE_KWARGS = ("backbone_weights",)
 #: Inference-relevant init_args: a mismatch is suspicious but not fatal.
 SOFT_HPARAMS = ("image_size",)
 
@@ -388,8 +392,11 @@ def check_static(model: BenchmarkModel, cfg: dict) -> list[Issue]:
 
 
 def _normalize(key: str, value: Any) -> Any:
-    if key == "backbone_kwargs" and value is None:
-        return {}
+    if key == "backbone_kwargs":
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            value = {k: v for k, v in value.items() if k not in INIT_ONLY_BACKBONE_KWARGS}
     if isinstance(value, tuple):
         return [_normalize(key, v) for v in value]
     if isinstance(value, list):
