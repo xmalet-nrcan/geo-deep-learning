@@ -471,7 +471,8 @@ def test_production_layout_unchanged(tmp_path: Path) -> None:
         f"{EVENT_ID}/{date}/C2/{_output_name('C2')}",
         f"{EVENT_ID}/{date}/C2/{_output_name('C2').replace('.tif', '_prob.tif')}",
         f"{EVENT_ID}/{date}/{_merged_name()}",
-        f"{EVENT_ID}/{date}/merged_all.tif",
+        f"{EVENT_ID}/{date}/merged_all_beam-A_pass-ASC.tif",
+        f"{EVENT_ID}/{date}/merged_all_beam-A_pass-ASC_prob.tif",
     }
     manifest = json.loads((base / "manifest.json").read_text())
     assert "output_layout" not in manifest
@@ -541,4 +542,4 @@ def test_merge_predictions_write_merged_all(
     )
 
     assert (tmp_path / _merged_name()).exists()
-    assert (tmp_path / "merged_all.tif").exists() is write_merged_all
+    assert (tmp_path / "merged_all_beam-A_pass-ASC.tif").exists() is write_merged_all
