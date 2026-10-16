@@ -22,7 +22,7 @@ models:
       pleine résolution, beam A, 2023-2025, FiLM 8, CBAM, signed-diff, run v2,
       epoch 76 (val_iou 0.727). Inférence : buffer 100, tuiles 256 / pas 128.
 
-  - name: cs2base_cosine_restarts_e24
+  - name: cs2base_cosine_restarts_no_output_refined
     config: cs2base_cosine_restarts_e24_predict.yaml
     enabled: true
     description: >-
@@ -31,7 +31,7 @@ models:
       Inférence : buffer 50, tuiles 256 / pas 256.
 
 
-  - name: cs2base_cosine_restarts_v2
+  - name: cs2base_cosine_restarts_output_refined
     config: cs2base_cosine_restarts_v2_predict.yaml
     enabled: true
     description: >-
