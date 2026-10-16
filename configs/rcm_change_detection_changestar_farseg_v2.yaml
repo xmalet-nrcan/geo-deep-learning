@@ -64,7 +64,7 @@ model:
       #   "ResNet50_Weights.IMAGENET1K_V2"       (torchvision)
       #   "ResNet50_Weights.SENTINEL1_ALL_MOCO"  (torchgeo, SAR VV/VH)
       # conv1 est adaptée au nombre réel de canaux (moyenne des filtres répliquée).
-      backbone_weights: null
+      backbone_weights: ResNet50_Weights.SENTINEL1_ALL_MOCO
       inference_mode: t1t2            # t1t2 (pré→post) | t2t1 | mean
       # true = entraîne aussi t2→t1 (symétrie de l'article) ; le modèle ne distingue
       # alors plus baisse/hausse de rétrodiffusion. Si true : deep_supervision: true
@@ -107,7 +107,7 @@ model:
     boundary_loss_weight: 0.5
     boundary_width: 2
 
-    burned_class_weight: 2.0  # >1 penalizes false negatives on class burn (to test : bcw ->[2,5])
+    burned_class_weight: 3.0  # >1 penalizes false negatives on class burn (to test : bcw ->[2,5])
     main_loss:
       class_path: segmentation_models_pytorch.losses.FocalLoss
       init_args:
@@ -125,7 +125,7 @@ model:
     optimizer:
       class_path: torch.optim.AdamW
       init_args:
-        lr: 3e-4              # LR max de chaque cycle (CosineAnnealingWarmRestarts part du lr de l'optimiseur)
+        lr: 1e-4              # LR max de chaque cycle (CosineAnnealingWarmRestarts part du lr de l'optimiseur)
         weight_decay: 0.05
         betas:
         - 0.9
@@ -162,7 +162,7 @@ data:
     patch_size:
     - 256
     - 256
-    train_overlap_buffer: 50
+    train_overlap_buffer: null
     # ── Découpage train/val/test identique à changestar2_cosine_restarts(_v2) ──
     # _split_by_column répartit les feux (graine 42) selon le NOMBRE DE TUILES
     # par feu : split_ratios ET tile_size/tile_stride (ainsi que csv, beams,

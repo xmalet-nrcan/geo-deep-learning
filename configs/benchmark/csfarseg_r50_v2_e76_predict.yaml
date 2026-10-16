@@ -1,0 +1,111 @@
+# =============================================================================
+# Benchmark predict config — csfarseg_r50_v2_e76
+# -----------------------------------------------------------------------------
+# Modèle de PRODUCTION actuel (référence du benchmark) : copie conforme de
+# configs/rcm_change_detection_predict_changestar_farseg.yaml (architecture,
+# entrées, stratégie d'inférence), sans les clés injectées par l'orchestrateur.
+# Entraînement : configs/rcm_change_detection_changestar_farseg_v2.yaml (run v2,
+# backbone_weights: null — les poids viennent du checkpoint).
+#
+# Ne PAS renseigner ici (injecté par l'orchestrateur via benchmark_override.yaml,
+# voir README.md §Override) :
+#   model.init_args.predict_output_dir / predict_output_layout / predict_run_name /
+#   predict_write_merged_all / weights_strict (forcé à true), data.init_args.dataset_class / csv_root_folder /
+#   csv_file_name, trainer.devices / callbacks / logger.
+# merged_all_* : sans objet (predict_write_merged_all: false en benchmark).
+# =============================================================================
+seed_everything: true
+
+trainer:
+  accelerator: "gpu"
+  devices: 1
+  strategy: auto
+  precision: "bf16-mixed"
+  callbacks: []
+
+model:
+  class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
+  init_args:
+    # --- Architecture (identique à changestar_farseg_v2) ---
+    change_detection_model: "changestar_farseg"
+    backbone_kwargs:
+      backbone: resnet50
+      backbone_weights: null      # les poids viennent du checkpoint
+      inference_mode: t1t2        # pré → post, comme à l'entraînement
+      bidirectional_training: false
+      changemixin_inner_channels: 16
+      changemixin_num_convs: 4
+      full_res_refine: true
+      refine_channels: 16
+    image_size: [256, 256]
+    max_samples: 10
+    num_classes: 1
+    deep_supervision: false
+
+    use_metadata_film: true
+    film_embed_dim: 8
+
+    use_cbam: true
+    cbam_reduction: 4
+
+    use_channel_dropout: true
+    channel_dropout_prob: 0.15
+
+    use_dfa: false
+    dfa_gate_hidden: 16
+
+    use_signed_difference: true
+    signed_difference_channels: null
+    signed_difference_normalize: true
+
+    # --- Requis par le constructeur, sans effet en predict ---
+    speckle_noise_std: 0.15
+    burned_class_weight: 2.0
+    boundary_loss_weight: 0.5
+    boundary_width: 2
+    main_loss:
+      class_path: segmentation_models_pytorch.losses.FocalLoss
+      init_args:
+        mode: "binary"
+        gamma: 1.5
+        ignore_index: 255
+    secondary_loss:
+      class_path: segmentation_models_pytorch.losses.LovaszLoss
+      init_args:
+        mode: "binary"
+        ignore_index: 255
+    loss_ratio: [0.6, 0.4]
+    optimizer:
+      class_path: torch.optim.AdamW
+      init_args:
+        lr: 3e-4
+        weight_decay: 0.05
+    scheduler:
+      class_path: torch.optim.lr_scheduler.ConstantLR
+    class_labels: ["unburn", "burn"]
+    class_colors: ["#000000", "#FF0000"]
+    weights_from_checkpoint_path: /app/models_checkpoints/2026/changestar_farseg/tiled/v2/csfarseg_r50_A_y23-25_8film-cbam_tiled-v2-epoch=76-val_iou=0.727.ckpt
+
+data:
+  class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
+  init_args:
+    # Placeholders — remplacés par l'override du benchmark (README.md §Override)
+    csv_root_folder: __set_by_benchmark_override__
+    csv_file_name: __set_by_benchmark_override__
+    patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
+    batch_size: 8
+    num_workers: 10
+    separate_metadata: true
+    patch_size: [256, 256]
+    # Stratégie d'inférence de la prod (meilleurs résultats) : buffer 100 + tuiles
+    # 256 au pas de 128 (fusion des chevauchements). Reprise telle quelle par
+    # les autres modèles du benchmark pour une comparaison à inférence égale.
+    predict_overlap_buffer: 100
+    tile_size: [256, 256]
+    tile_stride: [128, 128]
+    band_names: ['LOCALINCANGLE', 'PDN', 'PSN', 'PVN', 'S0', 'NDSV', 'RFDI', 'RR', 'RL']
+    # Filtres conservés tels quels (décision 5)
+    beams:
+      - 'A'
+    satellite_pass:
+    dataset_years:
