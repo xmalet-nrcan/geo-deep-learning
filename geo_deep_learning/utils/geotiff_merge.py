@@ -212,6 +212,12 @@ def merge_average(datasets: list[Any]) -> tuple[np.ndarray, Affine]:
     mosaic_count_safe[mask_no_coverage] = 1.0
     mosaic = mosaic_sum.astype(np.float64) / mosaic_count_safe
 
+    # Integer rasters hold class labels: round half-up (majority vote, ties →
+    # higher class) instead of letting astype() truncate, which kept a pixel
+    # burned only when *every* overlapping pair agreed (5/7 = 0.71 → 0).
+    if np.issubdtype(np.dtype(datasets[0].dtypes[0]), np.integer):
+        mosaic = np.floor(mosaic + 0.5)
+
     # Restore nodata where no tile contributed
     nodata = datasets[0].nodata
     if nodata is not None:
