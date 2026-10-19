@@ -533,6 +533,7 @@ class ChangeDetectionChangeFormer(PredictOutputMixin, LightningModule):
         predict re-masking. Folding the static ``water_mask`` (``> 0`` = water)
         into it here — once, for every stage — guarantees water is excluded
         everywhere ``mask-common`` is used, instead of only at predict time.
+        ``mask`` (the fire ground truth used for the loss) is left untouched.
         Geometric augmentations then flip the folded mask consistently.
         """
         if "mask-common" in batch and "water_mask" in batch:

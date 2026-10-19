@@ -605,6 +605,7 @@ def test_water_is_folded_into_mask_common(tmp_path: Path) -> None:
     expected_invalid[..., 0, 0] = True
     expected_invalid[..., 1:3, 1] = True
     assert torch.equal(batch["mask-common"] < 0.5, expected_invalid)
+    assert (batch["mask"] == 0).all()  # the fire ground truth is left untouched
 
 
 def test_water_stays_aligned_with_mask_common_under_augmentation(tmp_path: Path) -> None:
