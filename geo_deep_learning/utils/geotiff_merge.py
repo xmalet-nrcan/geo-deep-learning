@@ -203,15 +203,21 @@ def merge_average(datasets: list[Any]) -> tuple[np.ndarray, Affine]:
     Uses two passes of ``rasterio.merge`` with ``method='sum'`` and
     ``method='count'`` to compute the average.  Falls back to the
     flip workaround if the rasterio version rejects negative pixel height.
+
+    Both passes force ``nodata=0`` for the *output fill*. By default rasterio
+    fills uncovered / all-nodata pixels with the first dataset's nodata
+    (e.g. 32767), so ``count`` was never 0 there and ``sum / count`` gave
+    ``1`` (= burned) for every masked pixel (water, invalid SAR) and every
+    coverage gap. Input pixels are still masked with each dataset's own nodata.
     """
     try:
-        mosaic_sum, transform = rio_merge(datasets, method="sum")
-        mosaic_count, _ = rio_merge(datasets, method="count")
+        mosaic_sum, transform = rio_merge(datasets, method="sum", nodata=0)
+        mosaic_count, _ = rio_merge(datasets, method="count", nodata=0)
     except Exception as e:
         if "negative pixel height" not in str(e):
             raise
-        mosaic_sum, transform = merge_with_flip(datasets, method="sum")
-        mosaic_count, _ = merge_with_flip(datasets, method="count")
+        mosaic_sum, transform = merge_with_flip(datasets, method="sum", nodata=0)
+        mosaic_count, _ = merge_with_flip(datasets, method="count", nodata=0)
 
     # Average: sum / count, avoiding division by zero
     mask_no_coverage = mosaic_count == 0
@@ -234,7 +240,7 @@ def merge_average(datasets: list[Any]) -> tuple[np.ndarray, Affine]:
     return mosaic, transform
 
 
-def merge_with_flip(datasets: list[Any], method: str = "first") -> tuple[np.ndarray, Affine]:
+def merge_with_flip(datasets: list[Any], method: str = "first", **merge_kwargs: Any) -> tuple[np.ndarray, Affine]:
     """Merge datasets after flipping to positive pixel height.
 
     Workaround for rasterio, which rejects "upside down" rasters (pixel
@@ -268,7 +274,7 @@ def merge_with_flip(datasets: list[Any], method: str = "first") -> tuple[np.ndar
         else:
             flipped_datasets.append(ds)
 
-    mosaic, mosaic_transform = rio_merge(flipped_datasets, method=method)
+    mosaic, mosaic_transform = rio_merge(flipped_datasets, method=method, **merge_kwargs)
 
     # Close flipped in-memory datasets
     for ds in flipped_datasets:
