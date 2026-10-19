@@ -94,16 +94,16 @@ def merge_date(value: Any) -> str:
 
 
 def group_merge_key(  # noqa: PLR0913
-    event_date_dir: str,
-    event_id: Any,
-    event_start_date: Any,
-    event_end_date: Any,
-    group_id_pre: Any,
-    group_date_pre: Any,
-    group_id_post: Any,
-    group_date_post: Any,
-    beam: Any,
-    sat_pass: Any,
+        event_date_dir: str,
+        event_id: Any,
+        event_start_date: Any,
+        event_end_date: Any,
+        group_id_pre: Any,
+        group_date_pre: Any,
+        group_id_post: Any,
+        group_date_post: Any,
+        beam: Any,
+        sat_pass: Any,
 ) -> tuple[str, ...]:
     """Return the complete provenance key for one cross-cell merge."""
     return tuple(map(str, (
@@ -121,33 +121,35 @@ def group_merge_key(  # noqa: PLR0913
 
 
 def merged_group_filename(  # noqa: PLR0913
-    event_id: str,
-    event_start_date: str,
-    event_end_date: str,
-    group_id_pre: str,
-    group_date_pre: str,
-    group_id_post: str,
-    group_date_post: str,
-    beam: str,
-    sat_pass: str,
+        event_id: str,
+        event_start_date: str,
+        event_end_date: str,
+        group_id_pre: str,
+        group_date_pre: str,
+        group_id_post: str,
+        group_date_post: str,
+        beam: str,
+        sat_pass: str,
 ) -> str:
     """Build the cross-cell merge name without a ``cell_id`` component."""
     return (
         f"event-{event_id}"
         f"_start-{merge_date(event_start_date)}"
         f"_end_{merge_date(event_end_date)}"
-        f"_pre-g{group_id_pre}-{merge_date(group_date_pre)}"
-        f"_post-g{group_id_post}-{merge_date(group_date_post)}"
-        f"_beam-{beam}_pass-{sat_pass}.tif"
+        f"_beam-{beam}_pass-{sat_pass}"
+        f"_pre-{merge_date(group_date_pre)}-g{group_id_pre}"
+        f"_post-{merge_date(group_date_post)}-g{group_id_post}"
+        ".tif"
+
     )
 
 
 def prediction_output_filename(
-    output_name: str | None,
-    *,
-    pair_id: str | None,
-    legacy_name: str,
-    suffix: str = "",
+        output_name: str | None,
+        *,
+        pair_id: str | None,
+        legacy_name: str,
+        suffix: str = "",
 ) -> str:
     """Return a safe GeoTIFF filename, preferring the CSV output name.
 
@@ -316,9 +318,9 @@ def single_merge(tile_paths: list[Path], output_path: Path) -> None:
 
 
 def chunked_merge(
-    tile_paths: list[Path],
-    output_path: Path,
-    chunk_size: int = 100,
+        tile_paths: list[Path],
+        output_path: Path,
+        chunk_size: int = 100,
 ) -> None:
     """Merge many tiles without exceeding the OS open-file limit.
 
@@ -451,11 +453,11 @@ def _common_grid(rasters: list[Path]) -> tuple[Affine, int, int]:
 
 
 def temporal_confirmation_merge(
-    pairs: list[list[Path]],
-    output_path: Path,
-    *,
-    min_pairs: int = DEFAULT_MERGED_ALL_MIN_PAIRS,
-    prob_threshold: float = DEFAULT_MERGED_ALL_PROB_THRESHOLD,
+        pairs: list[list[Path]],
+        output_path: Path,
+        *,
+        min_pairs: int = DEFAULT_MERGED_ALL_MIN_PAIRS,
+        prob_threshold: float = DEFAULT_MERGED_ALL_PROB_THRESHOLD,
 ) -> None:
     """Mosaic several pre/post pairs with a per-pixel temporal confirmation rule.
 
@@ -529,18 +531,18 @@ def temporal_confirmation_merge(
     with rio.open(output_path, "w", **profile, dtype="uint16", nodata=CLASS_NODATA) as dst:
         dst.write(cls_out[np.newaxis])
     with rio.open(
-        probability_path(output_path), "w", **profile, dtype="float32", nodata=PROBABILITY_NODATA,
+            probability_path(output_path), "w", **profile, dtype="float32", nodata=PROBABILITY_NODATA,
     ) as dst:
         dst.write(prob_out[np.newaxis])
 
 
 def merge_predictions(  # noqa: PLR0913
-    group_tile_paths: dict[tuple[str, ...], list[Path]],
-    event_all_tile_paths: dict[str, list[Path]],
-    *,
-    write_merged_all: bool = True,
-    merged_all_min_pairs: int = DEFAULT_MERGED_ALL_MIN_PAIRS,
-    merged_all_prob_threshold: float = DEFAULT_MERGED_ALL_PROB_THRESHOLD,
+        group_tile_paths: dict[tuple[str, ...], list[Path]],
+        event_all_tile_paths: dict[str, list[Path]],
+        *,
+        write_merged_all: bool = True,
+        merged_all_min_pairs: int = DEFAULT_MERGED_ALL_MIN_PAIRS,
+        merged_all_prob_threshold: float = DEFAULT_MERGED_ALL_PROB_THRESHOLD,
 ) -> None:
     """Merge tiles in two passes.
 
@@ -555,16 +557,16 @@ def merge_predictions(  # noqa: PLR0913
     """
     # --- Pass 1 : merge par paire pré/post et configuration SAR ---
     for (
-        event_date_dir_str,
-        event_id,
-        event_start_date,
-        event_end_date,
-        group_pre,
-        group_date_pre,
-        group_post,
-        group_date_post,
-        beam,
-        sat_pass,
+            event_date_dir_str,
+            event_id,
+            event_start_date,
+            event_end_date,
+            group_pre,
+            group_date_pre,
+            group_post,
+            group_date_post,
+            beam,
+            sat_pass,
     ), tile_paths in group_tile_paths.items():
         event_date_dir = Path(event_date_dir_str)
         if len(tile_paths) == 1:
