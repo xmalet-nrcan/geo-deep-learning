@@ -50,15 +50,13 @@ def test_probability_is_nodata_where_prediction_is_nodata():
     np.testing.assert_allclose(prob[~invalid], 0.3, rtol=1e-5)
 
 
-def test_water_and_ground_truth_ignore_become_nodata_after_blending():
+def test_water_becomes_nodata_after_blending():
     size = 8
     valid = torch.ones((size, size), dtype=torch.bool)
     tile = _tile(0, 0, size, valid, source=size, buf=0, cell=size)
     water = torch.zeros((1, size, size))
     water[0, :2, :] = 1.0  # top rows are water
-    ignore = torch.zeros((1, size, size), dtype=torch.bool)
-    ignore[0, :, -2:] = True  # right columns are ignored by the ground truth
-    tile["water_mask"], tile["ignore_mask"] = water, ignore
+    tile["water_mask"] = water
 
     out = _blend_tile_group(
         [tile], overlap_h=4, overlap_w=4, blend_window_cache={},
@@ -67,6 +65,5 @@ def test_water_and_ground_truth_ignore_become_nodata_after_blending():
 
     expected = np.zeros((size, size), dtype=bool)
     expected[:2, :] = True
-    expected[:, -2:] = True
     np.testing.assert_array_equal(out["predictions"] == NO_DATA, expected)
     np.testing.assert_array_equal(out["probability"] == PROB_NODATA, expected)

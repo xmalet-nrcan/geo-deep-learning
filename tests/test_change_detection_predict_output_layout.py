@@ -545,8 +545,8 @@ def test_merge_predictions_write_merged_all(
     assert (tmp_path / "merged_all_beam-A_pass-ASC.tif").exists() is write_merged_all
 
 
-def test_predict_step_masks_water_common_and_ignored_pixels(tmp_path: Path) -> None:
-    """``mask-common``, ``water_mask`` and ``mask`` (255) all turn into NO_DATA."""
+def test_predict_step_masks_water_and_common_mask_pixels(tmp_path: Path) -> None:
+    """``mask-common`` and ``water_mask`` pixels both turn into NO_DATA."""
     from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA  # noqa: PLC0415
     from geo_deep_learning.tasks_with_models.change_detection_changeformer import (  # noqa: PLC0415
         PROBABILITY_NODATA,
@@ -560,8 +560,6 @@ def test_predict_step_masks_water_common_and_ignored_pixels(tmp_path: Path) -> N
     common[..., 0, 0] = 0  # invalid SAR pixel
     water = torch.zeros((1, 1, TILE, TILE))
     water[..., 1, 1] = 1  # water pixel
-    mask = torch.zeros((1, 1, TILE, TILE))
-    mask[..., 2, 2] = 255  # ignored by the ground truth
 
     out = module.predict_step(
         {
@@ -569,7 +567,6 @@ def test_predict_step_masks_water_common_and_ignored_pixels(tmp_path: Path) -> N
             "image": torch.zeros((1, 3, TILE, TILE)),
             "mask-common": common,
             "water_mask": water,
-            "mask": mask,
             "pre_post_name": ["a|b"],
             "cell_id": ["c"],
             "profile": {},
@@ -580,10 +577,9 @@ def test_predict_step_masks_water_common_and_ignored_pixels(tmp_path: Path) -> N
     )
 
     expected = torch.zeros((1, TILE, TILE), dtype=torch.bool)
-    expected[0, 0, 0] = expected[0, 1, 1] = expected[0, 2, 2] = True
+    expected[0, 0, 0] = expected[0, 1, 1] = True
     assert torch.equal(out["predictions"] == NO_DATA, expected)
     assert torch.equal(out["probability"] == PROBABILITY_NODATA, expected)
-    assert torch.equal(out["ignore_mask"].squeeze(1), mask.squeeze(1) == 255)
 
 
 def _water_batch() -> dict:

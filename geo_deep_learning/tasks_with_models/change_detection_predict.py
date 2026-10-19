@@ -27,7 +27,7 @@ from rasterio.transform import Affine
 from torch import Tensor
 
 from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA
-from geo_deep_learning.tools.losses.change_detection_loss import IGNORE_MASK_INDEX, MASK_VALID_THRESHOLD
+from geo_deep_learning.tools.losses.change_detection_loss import MASK_VALID_THRESHOLD
 from geo_deep_learning.utils.geotiff_merge import (
     extract_scalar,
     group_merge_key,
@@ -103,9 +103,8 @@ class PredictOutputMixin:
         # binary mask — see ``probability_zone_thresholds``/``_new_manifest``.
         y_prob = probs[:, self.probability_zone_class_index, :, :].clone()
 
-        # --- Exclure les pixels invalides, l'eau et les pixels ignorés avec NO_DATA (32767) ---
-        # Les trois entrées du dataset (``mask-common``, ``water_mask``, ``mask``)
-        # sont appliquées, voir :meth:`_invalid_pixel_mask`.
+        # --- Exclure les pixels invalides et l'eau avec NO_DATA (32767) ---
+        # ``mask-common`` et ``water_mask`` sont appliqués, voir :meth:`_invalid_pixel_mask`.
         invalid_mask = self._invalid_pixel_mask(batch, like=y_pred)
         y_pred = y_pred.masked_fill(invalid_mask, NO_DATA)
         y_prob = y_prob.masked_fill(invalid_mask, PROBABILITY_NODATA)
@@ -162,13 +161,10 @@ class PredictOutputMixin:
     def _invalid_pixel_mask(batch: dict[str, Any], *, like: Tensor) -> Tensor:
         """Boolean ``[B, H, W]`` mask of pixels whose prediction must be ``NO_DATA``.
 
-        Union of the three per-pixel layers carried by the dataset samples:
+        Union of the per-pixel layers carried by the dataset samples:
 
         - ``mask-common``: SAR acquisition validity (``< MASK_VALID_THRESHOLD`` → invalid);
-        - ``water_mask``: static water raster (``> 0`` → water);
-        - ``mask``: ground-truth label, where :data:`IGNORE_MASK_INDEX` (255) marks
-          pixels to ignore. In predict runs without ground truth the dataset
-          provides an all-zero placeholder, which masks nothing.
+        - ``water_mask``: static water raster (``> 0`` → water).
 
         Each layer is applied independently, so water can never be vectorized as
         burn even when ``mask-common`` does not contain it.
