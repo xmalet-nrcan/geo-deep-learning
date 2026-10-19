@@ -1,47 +1,68 @@
-"""Change Detection with ChangeFormer model for RCM SAR data."""
+"""Change Detection with ChangeFormer model for RCM SAR data.
 
-import json
+The Lightning task lives here; the self-contained pieces it relies on are split out:
+
+* :mod:`~geo_deep_learning.tasks_with_models.change_detection_predict` — ``predict_step``
+  (TTA), GeoTIFF / manifest writing and cross-cell merging (:class:`PredictOutputMixin`).
+* :mod:`~geo_deep_learning.tools.losses.change_detection_loss` — target preparation,
+  logit sanitising, burned false-negative penalty, boundary-band BCE.
+* :mod:`~geo_deep_learning.utils.tiling` — tile-ownership and neighbour-buffer geometry.
+* :mod:`~geo_deep_learning.tools.schedulers.builders` — warm-up / OneCycle scheduler builders.
+* :mod:`~geo_deep_learning.tools.change_detection_figures` — validation / test figures.
+"""
+
 import logging
-import math
 import warnings
-from collections import defaultdict
 from collections.abc import Callable
-from datetime import datetime
-from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 import kornia as krn
-import numpy as np
-import rasterio as rio
 import torch
 import torch.nn.functional as F
 from kornia.augmentation import AugmentationSequential
 from lightning.pytorch import LightningModule, Trainer
 from lightning.pytorch.cli import LRSchedulerCallable, OptimizerCallable
-from lightning.pytorch.loggers import TensorBoardLogger
-from matplotlib import pyplot as plt
-from rasterio.transform import Affine
 from torch import Tensor
 from torchmetrics import F1Score, JaccardIndex, Precision, Recall
 from torchmetrics.classification import BinaryJaccardIndex, BinaryPrecision, BinaryRecall
 from torchmetrics.segmentation import MeanIoU
 from torchmetrics.wrappers import ClasswiseWrapper
 
-from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA
 from geo_deep_learning.models.change_detection.change_detection_model import ChangeDetectionModel
-from geo_deep_learning.tools.visualization import visualize_prediction
+from geo_deep_learning.tasks_with_models.change_detection_predict import (
+    BENCHMARK_LATEST_MANIFEST,  # noqa: F401  (re-exported)
+    BENCHMARK_RUNS_DIRNAME,  # noqa: F401  (re-exported)
+    DEFAULT_PROBABILITY_ZONE_THRESHOLDS,
+    PREDICT_LAYOUT_BENCHMARK,
+    PREDICT_LAYOUT_PRODUCTION,
+    PREDICT_OUTPUT_LAYOUTS,
+    PROBABILITY_NODATA,  # noqa: F401  (re-exported)
+    PredictOutputMixin,
+)
+from geo_deep_learning.tools.change_detection_figures import (
+    MIN_BURNED_RATIO_FOR_VISUALIZATION,  # noqa: F401  (re-exported)
+    log_change_detection_figures,
+)
+from geo_deep_learning.tools.losses.change_detection_loss import (
+    IGNORE_MASK_INDEX,
+    MASK_VALID_THRESHOLD,
+    boundary_bce_loss,
+    burned_false_negative_penalty,
+    patch_degenerate_samples,
+    prepare_one_hot_targets,
+    sanitize_logits,
+)
+from geo_deep_learning.tools.schedulers.builders import (
+    build_onecycle_scheduler,
+    scheduler_class_path,
+    with_warmup,
+)
 from geo_deep_learning.utils.geotiff_merge import (
     DEFAULT_MERGED_ALL_MIN_PAIRS,
     DEFAULT_MERGED_ALL_PROB_THRESHOLD,
-    extract_scalar,
-    group_merge_key,
-    merge_predictions,
-    parse_crs,
-    prediction_output_filename,
-    transform_coeffs,
 )
 from geo_deep_learning.utils.models import load_weights_from_checkpoint
-from geo_deep_learning.utils.tile_reassembly import reassemble_overlapping_tiles
+from geo_deep_learning.utils.tiling import mask_buffer_zone, tile_ownership_mask
 
 warnings.filterwarnings(
     "ignore",
@@ -49,48 +70,14 @@ warnings.filterwarnings(
 )
 
 logger = logging.getLogger(__name__)
-IGNORE_MASK_INDEX = 255
 
 # Deep supervision weights for ChangeFormer's 5 output heads (c4→c1→final).
 # Intermediate heads get decreasing weight; the final head gets the most.
 DEEP_SUPERVISION_WEIGHTS = [0.1, 0.1, 0.15, 0.2, 1.0]
 
-# Default ascending probability thresholds defining exclusive confidence bands
-# for probability-zone vectorization (see ``predict_step``/``_new_manifest``).
-# Pixels below the first threshold (0.3) are left unclassified/unzoned.
-DEFAULT_PROBABILITY_ZONE_THRESHOLDS = (0.3, 0.5,0.6, 0.7, 0.8, 0.9, 1.0)
-
-# Sentinel written to probability GeoTIFFs for invalid/masked pixels.
-# Probabilities live in [0, 1], so a negative value is an unambiguous nodata.
-PROBABILITY_NODATA = -1.0
-
-# Only visualize samples with at least this fraction of valid pixels labeled
-# "burned" (class 1) — keeps validation/test figures informative.
-MIN_BURNED_RATIO_FOR_VISUALIZATION = 0.10
-
-# Replacement value for NaN logits before they reach the loss functions.
-# Using 0.0 (a neutral / low-confidence score) avoids injecting an
-# artificially "certain" class prediction into the loss — see docstring on
-# ``_sanitize_logits`` for details on why an extreme value here is unsafe.
-NAN_LOGIT_REPLACEMENT = 0.0
-
-# Threshold above which a ``mask-common`` / validity-mask pixel is considered
-# valid (values are floats after augmentation/interpolation, not strict 0/1).
-MASK_VALID_THRESHOLD = 0.5
-
-# Samples with fewer than this fraction of valid pixels are patched with
-# low-amplitude noise and excluded from the loss (see
-# ``_patch_degenerate_samples``) to avoid near-zero LayerNorm variance.
-MIN_VALID_RATIO_FOR_PATCH = 0.05
-
-# Predict output directory layouts (see ``predict_output_layout`` in ``__init__``).
-PREDICT_LAYOUT_PRODUCTION = "production"
-PREDICT_LAYOUT_BENCHMARK = "benchmark"
-PREDICT_OUTPUT_LAYOUTS = (PREDICT_LAYOUT_PRODUCTION, PREDICT_LAYOUT_BENCHMARK)
-
-# Benchmark layout: per-run manifests live under ``<dir>/_runs/<predict_date>/``.
-BENCHMARK_RUNS_DIRNAME = "_runs"
-BENCHMARK_LATEST_MANIFEST = "manifest_latest.json"
+# Key under which ``water_mask`` goes through the kornia geometric augmentations
+# (kornia infers the data type from the key prefix, see ``on_after_batch_transfer``).
+WATER_AUG_KEY = "mask-water"
 
 
 class _ForwardLossOutput(NamedTuple):
@@ -114,7 +101,7 @@ class _ForwardLossOutput(NamedTuple):
     batch_size: int
 
 
-class ChangeDetectionChangeFormer(LightningModule):
+class ChangeDetectionChangeFormer(PredictOutputMixin, LightningModule):
     """Change Detection with ChangeFormer V6 model."""
 
     def __init__(  # noqa: PLR0913
@@ -534,7 +521,23 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         transformed = self._pad_aug(keys_to_pad)
         batch.update(transformed)
+        self._fold_water_into_common_mask(batch)
         return batch
+
+    @staticmethod
+    def _fold_water_into_common_mask(batch: dict[str, Any]) -> None:
+        """Mark water pixels invalid in ``batch["mask-common"]``, in place.
+
+        ``mask-common`` is the single validity mask read by the loss, the
+        metrics (and their tile-ownership restriction), the figures and the
+        predict re-masking. Folding the static ``water_mask`` (``> 0`` = water)
+        into it here — once, for every stage — guarantees water is excluded
+        everywhere ``mask-common`` is used, instead of only at predict time.
+        Geometric augmentations then flip the folded mask consistently.
+        """
+        if "mask-common" in batch and "water_mask" in batch:
+            land = batch["water_mask"] <= 0
+            batch["mask-common"] = batch["mask-common"] * land.to(batch["mask-common"].dtype)
 
     def configure_model(self) -> None:
         """Configure model."""
@@ -628,110 +631,21 @@ class ChangeDetectionChangeFormer(LightningModule):
     def configure_optimizers(self) -> list[list[dict[str, Any]]]:
         """Configure optimizers."""
         optimizer = self.optimizer(self.parameters())
-        if self._scheduler_class_path() == "torch.optim.lr_scheduler.OneCycleLR":
+        if scheduler_class_path(self.hparams.get("scheduler")) == "torch.optim.lr_scheduler.OneCycleLR":
             if self.lr_warmup_iters > 0:
                 logger.warning(
                     "lr_warmup_iters=%d ignored: OneCycleLR already warms up (pct_start).",
                     self.lr_warmup_iters,
                 )
-            scheduler = self._build_onecycle_scheduler(optimizer)
+            scheduler = build_onecycle_scheduler(
+                optimizer, self.trainer, self.hparams.get("scheduler", {}).get("init_args", {}),
+            )
         else:
-            scheduler = self._with_warmup(optimizer, self.scheduler(optimizer))
+            scheduler = with_warmup(
+                optimizer, self.scheduler(optimizer), self.lr_warmup_iters, self.lr_warmup_start_factor,
+            )
 
         return [optimizer], [{"scheduler": scheduler, **self.scheduler_config}]
-
-    def _scheduler_class_path(self) -> str | None:
-        """Dotted class path of the configured scheduler.
-
-        ``hparams["scheduler"]`` is a ``{"class_path": ...}`` dict when built by
-        LightningCLI, but the raw callable when the task is instantiated in code
-        (tests, notebooks) — handle both instead of assuming the dict.
-        """
-        spec = self.hparams.get("scheduler")
-        if isinstance(spec, dict):
-            return spec.get("class_path")
-        func = getattr(spec, "func", spec)  # functools.partial
-        if isinstance(func, type):
-            return f"{func.__module__}.{func.__qualname__}"
-        return None
-
-    def _with_warmup(
-            self,
-            optimizer: torch.optim.Optimizer,
-            scheduler: Any,
-    ) -> Any:
-        """Prepend a linear LR warm-up to ``scheduler`` (no-op when disabled)."""
-        if self.lr_warmup_iters <= 0:
-            return scheduler
-        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            msg = "lr_warmup_iters is not supported with ReduceLROnPlateau (not chainable)"
-            raise ValueError(msg)
-        warmup = torch.optim.lr_scheduler.LinearLR(
-            optimizer,
-            start_factor=self.lr_warmup_start_factor,
-            end_factor=1.0,
-            total_iters=self.lr_warmup_iters,
-        )
-        return torch.optim.lr_scheduler.SequentialLR(
-            optimizer,
-            schedulers=[warmup, scheduler],
-            milestones=[self.lr_warmup_iters],
-        )
-
-    def _build_onecycle_scheduler(
-            self, optimizer: torch.optim.Optimizer,
-    ) -> torch.optim.lr_scheduler.OneCycleLR:
-        """Build a ``OneCycleLR`` scheduler, inferring ``total_steps`` when needed.
-
-        Lightning's ``trainer.estimated_stepping_batches`` is normally used,
-        but falls back to computing steps from the DataModule's
-        ``epoch_size`` (IterableDataset case) or, failing that, to an
-        explicit ``total_steps`` from the YAML config.
-        """
-        init_args = self.hparams.get("scheduler", {}).get("init_args", {})
-        max_lr = init_args.get("max_lr")
-        extra_kwargs = {
-            key: init_args[key]
-            for key in (
-                "pct_start", "anneal_strategy", "div_factor",
-                "final_div_factor", "three_phase", "cycle_momentum",
-            )
-            if key in init_args
-        }
-
-        stepping_batches = self.trainer.estimated_stepping_batches
-        if stepping_batches > -1:
-            return torch.optim.lr_scheduler.OneCycleLR(
-                optimizer,
-                max_lr=max_lr,
-                total_steps=stepping_batches,
-                **extra_kwargs,
-            )
-
-        epoch_size = getattr(self.trainer.datamodule, "epoch_size", None)
-        if stepping_batches == -1 and epoch_size is not None:
-            batch_size = self.trainer.datamodule.batch_size
-            accumulate_grad_batches = self.trainer.accumulate_grad_batches
-            max_epochs = self.trainer.max_epochs
-            steps_per_epoch = math.ceil(
-                epoch_size / (batch_size * accumulate_grad_batches),
-            )
-            buffer_steps = int(steps_per_epoch * accumulate_grad_batches)
-            return torch.optim.lr_scheduler.OneCycleLR(
-                optimizer,
-                max_lr=max_lr,
-                steps_per_epoch=steps_per_epoch + buffer_steps,
-                epochs=max_epochs,
-                **extra_kwargs,
-            )
-
-        total_steps = init_args.get("total_steps")
-        return torch.optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=max_lr,
-            total_steps=total_steps,
-            **extra_kwargs,
-        )
 
     def forward(
             self,
@@ -774,12 +688,18 @@ class ChangeDetectionChangeFormer(LightningModule):
         }
         if "mask-common" in batch:
             keys_to_aug["mask-common"] = batch["mask-common"].to(torch.float32)
+        if "water_mask" in batch:
+            # kornia only augments dict keys that start with a DataKey name
+            # (``image*``, ``mask*``…); a bare ``water_mask`` key would be passed
+            # through un-flipped. Hence the ``mask-`` prefix.
+            keys_to_aug[WATER_AUG_KEY] = batch["water_mask"].to(torch.float32)
         if "mask" in batch:
             keys_to_aug["mask"] = batch["mask"]
 
         transformed = self._geo_aug(keys_to_aug)
         for key in transformed:
-            batch[key] = transformed[key].to(device, non_blocking=True)
+            target_key = "water_mask" if key == WATER_AUG_KEY else key
+            batch[target_key] = transformed[key].to(device, non_blocking=True)
 
         # 2. Intensity augmentations + SAR-specific multiplicative speckle noise,
         # both applied per image key (generic, images only).
@@ -891,89 +811,15 @@ class ChangeDetectionChangeFormer(LightningModule):
     # Tile-ownership mask (makes tiled metrics comparable to non-tiled)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _axis_tile_starts(source: int, tile: int, stride: int) -> list[int]:
-        """Reproduce the tile origins used at tiling time for one axis.
-
-        Mirrors ``TiledChangeDetectionDataset._expand_files_with_tiles`` so the
-        model can reconstruct, per sample, the full set of tile positions from
-        ``source_height`` / ``source_width`` alone.
-        """
-        if source <= tile:
-            return [0]
-        starts = list(range(0, (source - tile) + 1, stride))
-        last = source - tile
-        if last not in starts:
-            starts.append(last)
-        return sorted(set(starts))
-
-    @staticmethod
-    def _scalar_at(field: Any, index: int) -> int:
-        """Return ``int(field[index])``, handling both Tensor and list/tuple batches.
-
-        Batched per-sample scalar fields (e.g. ``tile_row_start``,
-        ``buffer_size``, ``original_height``) may arrive as a ``Tensor`` or as
-        a plain Python list depending on the collate function. This was
-        previously reimplemented ad hoc in three places
-        (``_mask_buffer_zone``, ``_tile_ownership_mask``, ``_write_prediction_batch``).
-        """
-        value = field[index]
-        return int(value.item()) if isinstance(field, torch.Tensor) else int(value)
-
-    @staticmethod
-    def _axis_ownership_end(starts: list[int], start: int, tile: int) -> int:
-        """Local exclusive end index of the region a tile *exclusively* owns.
-
-        A source pixel is owned by the tile with the **largest** start that
-        still covers it.  In tile-local coordinates a tile therefore owns
-        ``[0, next_start - start)`` (or the full tile for the last one),
-        guaranteeing a partition of the source with no overlap and no gap.
-        """
-        nexts = [s for s in starts if s > start]
-        return tile if not nexts else (min(nexts) - start)
-
-    def _tile_ownership_mask(
-            self,
-            batch: dict[str, Any],
-            ref_shape: torch.Size,
-    ) -> Tensor | None:
-        """Return a ``[B, 1, H, W]`` mask keeping only pixels each tile owns.
-
-        Eliminates double-counting of overlapping tiles in the metrics so that
-        tiled evaluation counts every source pixel exactly once — matching the
-        non-tiled setup.  Returns ``None`` when tiling is inactive (no-op).
-        """
-        if "tile_row_start" not in batch or "source_height" not in batch:
-            return None
-        dm = getattr(self.trainer, "datamodule", None)
-        tile_size = getattr(dm, "tile_size", None)
-        tile_stride = getattr(dm, "tile_stride", None)
-        if not tile_size or not tile_stride:
-            return None
-
-        tile_h, tile_w = tile_size
-        stride_h, stride_w = tile_stride
-        b, _, h, w = ref_shape
-        mask = torch.zeros((b, 1, h, w), dtype=torch.float32)
-
-        for i in range(b):
-            r = self._scalar_at(batch["tile_row_start"], i)
-            c = self._scalar_at(batch["tile_col_start"], i)
-            sh = self._scalar_at(batch["source_height"], i)
-            sw = self._scalar_at(batch["source_width"], i)
-
-            row_starts = self._axis_tile_starts(sh, tile_h, stride_h)
-            col_starts = self._axis_tile_starts(sw, tile_w, stride_w)
-            row_end = min(self._axis_ownership_end(row_starts, r, tile_h), h)
-            col_end = min(self._axis_ownership_end(col_starts, c, tile_w), w)
-
-            if row_end > 0 and col_end > 0:
-                mask[i, 0, :row_end, :col_end] = 1.0
-        return mask
-
     def _apply_tile_ownership(self, batch: dict[str, Any], common_mask: Tensor) -> Tensor:
         """Restrict ``common_mask`` to owned pixels so overlapping tiles are counted once."""
-        own = self._tile_ownership_mask(batch, common_mask.shape)
+        dm = getattr(self.trainer, "datamodule", None)
+        own = tile_ownership_mask(
+            batch,
+            common_mask.shape,
+            getattr(dm, "tile_size", None),
+            getattr(dm, "tile_stride", None),
+        )
         if own is None:
             return common_mask
         return common_mask * own.to(common_mask.device, common_mask.dtype)
@@ -1136,7 +982,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         y = batch["mask"]
         batch_size = x_post.shape[0]
 
-        common_data_mask = self._mask_buffer_zone(batch, batch["mask-common"], batch_size)
+        common_data_mask = mask_buffer_zone(batch, batch["mask-common"], batch_size)
         # Propagate the modified mask so that metrics in training_step /
         # validation_step / test_step use the same valid-pixel set as the loss.
         batch["mask-common"] = common_data_mask
@@ -1160,7 +1006,7 @@ class ChangeDetectionChangeFormer(LightningModule):
                     x_post.min().item(), x_post.max().item(), x_post.mean().item(),
                 )
 
-        self._patch_degenerate_samples(x_pre, x_post, y, common_data_mask, batch_size)
+        patch_degenerate_samples(x_pre, x_post, y, common_data_mask, batch_size)
 
         raw_output = self(
             x_pre,
@@ -1201,10 +1047,10 @@ class ChangeDetectionChangeFormer(LightningModule):
             )
             return _ForwardLossOutput(x_pre, x_post, y_float, dummy_one_hot, logits_safe, zero_loss, zero_loss, zero_loss, zero_loss, batch_size)
 
-        logits_no_nan = self._sanitize_logits(logits)
+        logits_no_nan = sanitize_logits(logits)
 
         # Préparation du one-hot (+ variante avec ignore_index pour la loss)
-        one_hot, one_hot_for_loss = self._prepare_one_hot_targets(y, common_data_mask, num_classes)
+        one_hot, one_hot_for_loss = prepare_one_hot_targets(y, common_data_mask, num_classes)
 
         # Vérifier qu'il reste des pixels valides
         if common_data_mask.sum() == 0:
@@ -1227,13 +1073,15 @@ class ChangeDetectionChangeFormer(LightningModule):
             final_head_loss = main_loss
 
         # Burned-class false-negative penalty (uses burned_class_weight)
-        burn_penalty = self._burned_false_negative_penalty(logits_no_nan, one_hot, common_data_mask)
+        burn_penalty = burned_false_negative_penalty(
+            logits_no_nan, one_hot, common_data_mask, self.burned_class_weight,
+        )
         main_loss = main_loss + burn_penalty
         final_head_loss = final_head_loss + burn_penalty
 
         # Boundary-band BCE (sharper burn frontiers), on the final head only
         if self.boundary_loss_weight > 0:
-            boundary_loss = self._boundary_bce_loss(
+            boundary_loss = boundary_bce_loss(
                 logits_no_nan, one_hot, common_data_mask, self.boundary_width,
             )
             weighted_boundary = self.boundary_loss_weight * boundary_loss
@@ -1258,187 +1106,6 @@ class ChangeDetectionChangeFormer(LightningModule):
             x_pre, x_post, y_float, one_hot, logits_no_nan,
             main_loss, focal_loss_val, lovasz_loss_val, final_head_loss, batch_size,
         )
-
-    @staticmethod
-    def _sanitize_logits(logits: Tensor) -> Tensor:
-        """Replace non-finite values in logits with numerically-safe ones.
-
-        NaN is replaced with ``NAN_LOGIT_REPLACEMENT`` (0.0) — a neutral,
-        low-confidence score — rather than an extreme value.  An earlier
-        version of this code used ``nan=1e15``: since softmax subtracts the
-        per-pixel max before exponentiating, a 1e15 logit would deterministically
-        assign ~100% probability to that class for the affected pixel,
-        injecting a large, meaningless gradient into the loss.  ``posinf``/
-        ``neginf`` are clamped to ``1.0``/``0.0`` as before.
-        """
-        return torch.nan_to_num(logits, nan=NAN_LOGIT_REPLACEMENT, posinf=1.0, neginf=0.0)
-
-    @staticmethod
-    def _buffer_valid_region(
-            buf: int, tr: int, tc: int, tile_h: int, tile_w: int, oh: int, ow: int,
-    ) -> tuple[int, int, int, int]:
-        """Valid (non-buffer) region of one tile, in tile-local pixel coordinates.
-
-        Returns ``(row_start, row_end, col_start, col_end)`` bounding the
-        pixels of a ``tile_h x tile_w`` tile — cropped from an expanded
-        ``(cell + 2*buf)`` image at offset ``(tr, tc)`` — that fall inside
-        the true, un-buffered ``oh x ow`` cell. Either span collapses
-        (``*_end <= *_start``) when the tile lies entirely within the
-        neighbour-context buffer ring, i.e. it owns zero true-cell pixels.
-
-        The non-tiled case is the special case ``tr = tc = 0`` and
-        ``tile_h, tile_w = oh + 2*buf, ow + 2*buf`` (the whole buffered
-        image treated as a single "tile").
-        """
-        row_start = max(0, buf - tr)
-        row_end = min(tile_h, buf + oh - tr)
-        col_start = max(0, buf - tc)
-        col_end = min(tile_w, buf + ow - tc)
-        return row_start, row_end, col_start, col_end
-
-    @staticmethod
-    def _mask_buffer_zone(
-            batch: dict[str, Any],
-            common_data_mask: Tensor,
-            batch_size: int,
-    ) -> Tensor:
-        """Zero out the neighbour-context buffer zone (``train_overlap_buffer``).
-
-        When spatial context is loaded from adjacent cells the image is
-        ``(h + 2b) × (w + 2b)`` but the ground-truth label mask only covers
-        the central ``(h × w)`` region.  The buffer zone is zeroed in the
-        returned mask so the loss is never computed there.  The dataset
-        stores ``buffer_size``, ``cell_orig_height``, ``cell_orig_width``
-        whenever a non-zero buffer was applied (train or predict).
-        """
-        if "buffer_size" not in batch:
-            return common_data_mask
-
-        buf_raw = batch["buffer_size"]
-        buf = ChangeDetectionChangeFormer._scalar_at(buf_raw, 0)
-        if buf <= 0:
-            return common_data_mask
-
-        common_data_mask = common_data_mask.clone()
-
-        if "tile_row_start" in batch:
-            # --- Tiled + buffered ---
-            # Each tile is a crop of the expanded (cell + 2*buf) image.  The
-            # valid zone (central cell, excluding neighbour context) spans
-            # rows [buf, buf + orig_h) × cols [buf, buf + orig_w) in the
-            # expanded image.  We compute the intersection of this valid
-            # zone with each tile's coverage area and mask everything
-            # outside.  Without this per-tile logic, masking buf pixels
-            # from ALL 4 edges of EVERY tile wrongly discarded up to 63 % of
-            # valid pixels on interior tiles that don't touch the buffer
-            # boundary at all.
-            tile_h, tile_w = common_data_mask.shape[2], common_data_mask.shape[3]
-            orig_h_batch = batch["cell_orig_height"]
-            orig_w_batch = batch["cell_orig_width"]
-            tile_row_start = batch["tile_row_start"]
-            tile_col_start = batch["tile_col_start"]
-
-            for i in range(batch_size):
-                tr = ChangeDetectionChangeFormer._scalar_at(tile_row_start, i)
-                tc = ChangeDetectionChangeFormer._scalar_at(tile_col_start, i)
-                oh = ChangeDetectionChangeFormer._scalar_at(orig_h_batch, i)
-                ow = ChangeDetectionChangeFormer._scalar_at(orig_w_batch, i)
-
-                vr_start, vr_end, vc_start, vc_end = ChangeDetectionChangeFormer._buffer_valid_region(
-                    buf, tr, tc, tile_h, tile_w, oh, ow,
-                )
-
-                if vr_start > 0:
-                    common_data_mask[i, :, :vr_start, :] = 0.0
-                if vr_end < tile_h:
-                    common_data_mask[i, :, vr_end:, :] = 0.0
-                if vc_start > 0:
-                    common_data_mask[i, :, :, :vc_start] = 0.0
-                if vc_end < tile_w:
-                    common_data_mask[i, :, :, vc_end:] = 0.0
-        else:
-            # --- Non-tiled + buffered ---
-            # The full expanded image: mask buf pixels from all edges.
-            # BUGFIX: ``row_start``/``row_end`` (and column counterparts) are
-            # clamped so a buffer >= half the image size correctly zeroes
-            # the *entire* mask.  The previous code only masked when
-            # ``buf < img_h`` and otherwise did nothing — but with
-            # ``buf >= img_h`` the unconditional slice
-            # ``common_data_mask[:, :, img_h - buf:, :]`` would have used a
-            # *negative* start index (Python counts from the end), silently
-            # zeroing the wrong rows instead of the whole mask.
-            img_h, img_w = common_data_mask.shape[2], common_data_mask.shape[3]
-            row_start = min(buf, img_h)
-            row_end = max(img_h - buf, row_start)
-            col_start = min(buf, img_w)
-            col_end = max(img_w - buf, col_start)
-            common_data_mask[:, :, :row_start, :] = 0.0
-            common_data_mask[:, :, row_end:, :] = 0.0
-            common_data_mask[:, :, :, :col_start] = 0.0
-            common_data_mask[:, :, :, col_end:] = 0.0
-
-        return common_data_mask
-
-    @staticmethod
-    def _patch_degenerate_samples(
-            x_pre: Tensor,
-            x_post: Tensor,
-            y: Tensor,
-            common_data_mask: Tensor,
-            batch_size: int,
-    ) -> None:
-        """Replace near-empty samples with low-amplitude noise, in place.
-
-        Samples with too few valid pixels can make LayerNorm compute a
-        variance close to zero, which explodes gradients.  Such samples are
-        overwritten with uniform noise, excluded from the loss (mask set to
-        0), and their target zeroed out.
-        """
-        valid_ratio = common_data_mask.flatten(1).mean(dim=1)  # [B]
-        bad_mask = valid_ratio < MIN_VALID_RATIO_FOR_PATCH  # [B] booléen
-        if not bad_mask.any():
-            return
-
-        n_bad = bad_mask.sum().item()
-        logger.debug(
-            "Patching %d/%d samples with <%.0f%% valid pixels (ratios: %s)",
-            n_bad, batch_size, MIN_VALID_RATIO_FOR_PATCH * 100,
-            [f"{r:.3f}" for r, b in zip(valid_ratio.tolist(), bad_mask.tolist()) if b],
-        )
-        # Remplir les samples quasi-vides avec du bruit uniforme [0, 0.01]
-        # pour que LayerNorm ait une variance > 0
-        noise = torch.rand_like(x_pre[0:1]) * 0.01
-        for idx in bad_mask.nonzero(as_tuple=True)[0]:
-            x_pre[idx] = noise[0]
-            x_post[idx] = noise[0]
-            common_data_mask[idx] = 0.0  # exclure ces samples de la loss
-            y[idx] = 0
-
-    @staticmethod
-    def _prepare_one_hot_targets(
-            y: Tensor,
-            common_data_mask: Tensor,
-            num_classes: int,
-    ) -> tuple[Tensor, Tensor]:
-        """Build the one-hot target and its ignore-index-aware loss variant.
-
-        Returns ``(one_hot, one_hot_for_loss)``.  Invalid pixels in
-        ``one_hot_for_loss`` are filled with ``IGNORE_MASK_INDEX`` so that
-        FocalLoss/LovaszLoss (which both natively support
-        ``ignore_index=255``) skip them — avoiding the previous
-        mask-multiplication approach which biased Lovász sorting (invalid
-        pixels got error=1) and added phantom class-0 contributions to
-        FocalLoss.
-        """
-        y_one_hot = y.squeeze(1) if y.dim() == 4 else y  # noqa: PLR2004
-        y_one_hot = y_one_hot.clamp(min=0, max=num_classes - 1)  # clamp aussi les 255 → num_classes-1
-        one_hot = F.one_hot(y_one_hot.long(), num_classes=num_classes)
-        one_hot = one_hot.permute(0, 3, 1, 2).contiguous().float()
-
-        invalid_pixels = common_data_mask < MASK_VALID_THRESHOLD  # [B, 1, H, W], True=invalid
-        one_hot_for_loss = one_hot.clone()
-        one_hot_for_loss.masked_fill_(invalid_pixels.expand_as(one_hot), IGNORE_MASK_INDEX)
-        return one_hot, one_hot_for_loss
 
     def _compute_single_head_loss(
             self,
@@ -1479,7 +1146,7 @@ class ChangeDetectionChangeFormer(LightningModule):
         final_head_loss = torch.tensor(0.0, device=device, dtype=dtype)
 
         for head_idx, head_output in enumerate(all_outputs):
-            head_logits = self._sanitize_logits(head_output)
+            head_logits = sanitize_logits(head_output)
             # Resize intermediate heads to final resolution
             if head_logits.shape[2] != target_h or head_logits.shape[3] != target_w:
                 head_logits = F.interpolate(
@@ -1499,92 +1166,6 @@ class ChangeDetectionChangeFormer(LightningModule):
 
         return total_loss / weight_sum, total_focal / weight_sum, total_lovasz / weight_sum, final_head_loss
 
-    def _burned_false_negative_penalty(
-            self,
-            logits: Tensor,
-            one_hot: Tensor,
-            valid_mask: Tensor,
-    ) -> Tensor:
-        """Add extra penalty on positive (burned) pixels to reduce false negatives."""
-        if self.burned_class_weight <= 1.0:
-            return torch.zeros((), device=logits.device, dtype=logits.dtype)
-
-        if logits.shape[1] > 1:
-            burned_logits = logits[:, 1:2, :, :]
-            burned_targets = one_hot[:, 1:2, :, :]
-        else:
-            burned_logits = logits
-            burned_targets = one_hot
-
-        if valid_mask.dim() == 3:
-            valid_mask = valid_mask.unsqueeze(1)
-        valid_mask = valid_mask.to(dtype=logits.dtype)
-
-        pos_weight = torch.tensor(
-            self.burned_class_weight,
-            device=logits.device,
-            dtype=logits.dtype,
-        )
-        penalty_map = F.binary_cross_entropy_with_logits(
-            burned_logits,
-            burned_targets,
-            pos_weight=pos_weight,
-            reduction="none",
-        )
-        penalty_map = penalty_map * valid_mask
-        valid_pixels = valid_mask.sum().clamp_min(1.0)
-        return penalty_map.sum() / valid_pixels
-
-    @staticmethod
-    def _boundary_band(target: Tensor, valid_mask: Tensor, width: int) -> Tensor:
-        """Band of ``±width`` pixels around the edges of a binary ``[B, 1, H, W]`` mask.
-
-        Computed as morphological dilation minus erosion (max-pooling), then
-        restricted to valid pixels so nodata borders never create fake edges
-        inside the band.
-        """
-        kernel = 2 * width + 1
-        dilated = F.max_pool2d(target, kernel, stride=1, padding=width)
-        eroded = -F.max_pool2d(-target, kernel, stride=1, padding=width)
-        return ((dilated - eroded) > 0).to(target.dtype) * valid_mask
-
-    @classmethod
-    def _boundary_bce_loss(
-            cls,
-            logits: Tensor,
-            one_hot: Tensor,
-            valid_mask: Tensor,
-            width: int,
-    ) -> Tensor:
-        """BCE restricted to a band around the ground-truth change boundaries.
-
-        Uses the change-vs-no-change logit ``logsumexp(l_1..l_C) - l_0``, whose
-        sigmoid equals the softmax probability of "change" for any number of
-        classes (``l_1 - l_0`` in the binary case), so the loss is consistent
-        with the ``argmax`` predictions whatever the backbone's logit scale.
-        Pixels near both sides of each edge are roughly balanced by
-        construction, so no pos_weight is applied. Returns 0 when the batch
-        contains no boundary (e.g. no burned pixel).
-        """
-        if valid_mask.dim() == 3:  # noqa: PLR2004
-            valid_mask = valid_mask.unsqueeze(1)
-        valid = (valid_mask > MASK_VALID_THRESHOLD).to(logits.dtype)
-
-        if logits.shape[1] > 1:
-            change_logit = torch.logsumexp(logits[:, 1:], dim=1, keepdim=True) - logits[:, :1]
-            change_target = 1.0 - one_hot[:, :1]
-        else:
-            change_logit = logits
-            change_target = one_hot[:, :1]
-        change_target = change_target.to(logits.dtype)
-
-        band = cls._boundary_band(change_target * valid, valid, width)
-        n_band = band.sum()
-        if n_band == 0:
-            return torch.zeros((), device=logits.device, dtype=logits.dtype)
-        bce = F.binary_cross_entropy_with_logits(change_logit, change_target, reduction="none")
-        return (bce * band).sum() / n_band
-
     def _log_visualizations(  # noqa: PLR0913
             self,
             trainer: Trainer,
@@ -1595,780 +1176,16 @@ class ChangeDetectionChangeFormer(LightningModule):
             *,
             epoch_suffix: bool = True,
     ) -> int:
-        """Log visualization figures comparing input diff, ground truth, and prediction.
-
-        Generates side-by-side images of:
-          - Absolute difference between post and pre images (3 selected bands)
-          - Ground truth mask (if available)
-          - Model prediction (with water/no-data pixels shown distinctly)
-
-        Args:
-            trainer: Lightning trainer (used for logger access)
-            batch: Batch dict with keys: image, image_pre, pre_post_name, mask,
-                   has_mask, mask-common
-            outputs: Model logits [B, C, H, W]
-            max_samples: Max number of samples to visualize
-            artifact_prefix: Prefix for artifact path ("test" or "val")
-            epoch_suffix: Whether to add epoch info to artifact filename
-
-        Returns:
-            Number of samples actually visualized
-        """
-        if batch is None or outputs is None:
-            return 0
-
-        try:
-            image_batch = batch["image"]
-            pre_image_batch = batch["image_pre"]
-            batch_image_name = batch["pre_post_name"]
-            has_mask_flags = batch.get("has_mask", torch.tensor([True] * len(image_batch)))
-            mask_batch = batch["mask"].squeeze(1).long()
-            common_mask = batch.get("mask-common")  # [B, 1, H, W] or None
-
-            num_samples = min(max_samples, len(image_batch))
-            num_logged = 0
-
-            # Determine which bands to use for RGB visualization.
-            num_bands = image_batch.shape[1]
-            if self.use_metadata_film:
-                # No metadata bands in image — all bands are data
-                available = list(range(num_bands))
-            else:
-                # Legacy: skip band 0 (COMMON_MASK) and last 2 (SAT_PASS, BEAM).
-                data_band_start = 1  # skip COMMON_MASK
-                data_band_end = max(num_bands - 2, data_band_start + 1)  # skip SAT_PASS, BEAM
-                available = list(range(data_band_start, data_band_end))
-            # Take 3 evenly spaced bands (or fewer if not enough)
-            if len(available) >= 3:  # noqa: PLR2004
-                rgb_indices = [available[0], available[len(available) // 2], available[-1]]
-            else:
-                rgb_indices = available[:3]
-
-            for i in range(len(image_batch)):
-                if num_logged >= num_samples:
-                    break
-
-                # --- Filter: only visualize samples with enough burned pixels ---
-                # (see MIN_BURNED_RATIO_FOR_VISUALIZATION at module level)
-                has_real_mask = has_mask_flags[i] if isinstance(
-                    has_mask_flags, (list, torch.Tensor)) else has_mask_flags
-                if not has_real_mask:
-                    continue  # no ground truth → skip
-
-                mask_i_for_filter = mask_batch[i]  # [H, W], values: 0=unburn, 1=burn, 255=ignore
-                if common_mask is not None:
-                    valid_pixels = (common_mask[i].squeeze(0) > MASK_VALID_THRESHOLD)  # [H, W]
-                else:
-                    valid_pixels = (mask_i_for_filter != IGNORE_MASK_INDEX)
-
-                valid_count = valid_pixels.sum()
-                if valid_count == 0:
-                    continue
-
-                burned_count = ((mask_i_for_filter == 1) & valid_pixels).sum()
-                burned_ratio = burned_count.float() / valid_count.float()
-                if burned_ratio < MIN_BURNED_RATIO_FOR_VISUALIZATION:
-                    continue
-                image_post = image_batch[i]
-                image_pre = pre_image_batch[i]
-                image_name = batch_image_name[i].replace('\n', '')
-
-                # Compute absolute difference on selected bands
-                image_diff = torch.abs(image_post - image_pre)
-                vis_image = image_diff[rgb_indices, :, :]  # [3, H, W] or fewer
-                # Normalize to [0, 1] for matplotlib (avoids clipping warning)
-                vmin = vis_image.min()
-                vmax = vis_image.max()
-                if vmax - vmin > 1e-6:
-                    vis_image = (vis_image - vmin) / (vmax - vmin)
-                else:
-                    vis_image = torch.zeros_like(vis_image)
-
-                # Prediction with water/no-data masking
-                pred = torch.argmax(outputs[i], dim=0)  # [H, W]
-                if common_mask is not None:
-                    invalid = (common_mask[i].squeeze(0) < MASK_VALID_THRESHOLD)  # [H, W]
-                    # Use a distinct value (255) for visualization of masked pixels
-                    pred = pred.clone()
-                    pred[invalid] = self.changed_num_classes  # = 2 → index du gris dans la colormap
-
-                # Ground truth mask (always present here — filtered above)
-                mask_i = mask_batch[i]
-
-                fig = visualize_prediction(
-                    image=vis_image,
-                    mask=mask_i,
-                    prediction=pred,
-
-                    sample_name=image_name[:80],  # truncate long names
-                    num_classes=self.num_classes,
-                    class_colors=self.class_colors,
-                )
-
-                # Build artifact path
-                # Use a short, filesystem-safe name
-                safe_name = Path(image_name[:60].replace('|', '_').replace('/', '_')).stem
-                base_path = f"{artifact_prefix}/{safe_name}"
-                if epoch_suffix and trainer is not None:
-                    artifact_file = f"{base_path}/idx_{i}_epoch_{trainer.current_epoch}.png"
-                else:
-                    artifact_file = f"{base_path}/idx_{i}.png"
-
-                # Log to appropriate logger
-                if hasattr(trainer.logger, "experiment") and hasattr(
-                        trainer.logger.experiment, "log_figure"):
-                    trainer.logger.experiment.log_figure(
-                        figure=fig,
-                        artifact_file=artifact_file,
-                        run_id=getattr(trainer.logger, "run_id", None),
-                    )
-                elif isinstance(trainer.logger, TensorBoardLogger):
-                    trainer.logger.experiment.add_figure(
-                        tag=artifact_file,
-                        figure=fig,
-                        global_step=trainer.current_epoch if epoch_suffix else 0,
-                    )
-                else:
-                    logger.warning("Logger does not support figure logging.")
-
-                # Explicitly close figure to prevent memory leak
-                plt.close(fig)
-                num_logged += 1
-
-        except Exception:
-            logger.exception("Error in visualization logging")
-            return 0
-
-        return num_logged
-
-    def predict_step(
-            self,
-            batch: dict[str, Any],
-            batch_idx: int,
-            dataloader_idx: int = 0,
-    ) -> dict[str, Any]:
-        """Run prediction step with optional Test-Time Augmentation (TTA).
-
-        TTA applies 4 self-inverse geometric transforms (identity, horizontal
-        flip, vertical flip, and both flips i.e. a 180° rotation), runs
-        inference on each, inverts the transform, and averages the softmax
-        probabilities. This reduces noise-related false positives —
-        particularly important for SAR data where speckle can cause spurious
-        detections. Note: unlike the training augmentations, 90°/270°
-        rotations are *not* included here (see :meth:`_tta_forward`).
-        """
-        x_pre = batch["image_pre"]
-        x_post = batch["image"]
-
-        with torch.no_grad():
-            logits = self._tta_forward(
-                x_pre, x_post,
-                sat_pass=batch.get("sat_pass_value"),
-                beam=batch.get("beam_value"),
-                pre_season=batch.get("pre_season"),
-                post_season=batch.get("post_season"),
-                time_delta=batch.get("time_delta_bin"),
-                processing_year=batch.get("processing_year"),
-            )
-
-        # Convertir en probabilités et en classes prédites (binaire: 2 classes
-        # 0=no-change/1=change, ou multiclasse: identique via softmax+argmax)
-        probs = torch.softmax(logits, dim=1)  # [B, C, H, W]
-        y_pred = torch.argmax(probs, dim=1)  # [B, H, W]
-
-        # Positive-class probability surface, used downstream to vectorize
-        # probability zones (exclusive confidence bands) rather than a single
-        # binary mask — see ``probability_zone_thresholds``/``_new_manifest``.
-        y_prob = probs[:, self.probability_zone_class_index, :, :].clone()
-
-        # --- Exclure les pixels invalides et l'eau avec NO_DATA (32767) ---
-        # ``mask-common`` décrit la validité des acquisitions SAR, mais ne
-        # contient pas nécessairement l'eau. Apply both masks even when the
-        # common mask is available so water can never be vectorized as burn.
-        invalid_mask = torch.zeros_like(y_pred, dtype=torch.bool)
-        if "mask-common" in batch:
-            common_mask = batch["mask-common"]  # [B, 1, H, W] bool ou float
-            invalid_mask |= common_mask.squeeze(1) < MASK_VALID_THRESHOLD
-        if "water_mask" in batch:
-            water_mask = batch["water_mask"]  # [B, 1, H, W]
-            invalid_mask |= water_mask.squeeze(1) > 0  # eau = valeur > 0
-        y_pred = y_pred.masked_fill(invalid_mask, NO_DATA)
-        y_prob = y_prob.masked_fill(invalid_mask, PROBABILITY_NODATA)
-
-        # Retourner un dict avec tout ce qu'il faut pour sauvegarder après
-        result = {
-            "predictions": y_pred,  # [B, H, W] classes entières
-            "probability": y_prob,  # [B, H, W] proba classe positive, pour zonage
-            "probabilities": probs,  # [B, C, H, W] probabilités par classe
-            "logits": logits,  # [B, C, H, W] logits bruts
-            "pre_post_name": batch["pre_post_name"],
-            "cell_id": batch["cell_id"],
-            "profile": batch["profile"],  # profil rasterio pour écriture GeoTIFF
-            "original_height": batch["original_height"],
-            "original_width": batch["original_width"],
-        }
-
-        # --- Propager le masque commun pour le re-masquage après blending overlap ---
-        if "mask-common" in batch:
-            result["mask_common"] = batch["mask-common"]
-        if "water_mask" in batch:
-            result["water_mask"] = batch["water_mask"]
-
-        # --- Propager les métadonnées optionnelles (event_id, db_nbac_fire_id, etc.) ---
-        for key in ("pair_id",
-                    "event_id",
-                    "db_nbac_fire_id",
-                    "event_start_date",
-                    "event_end_date",
-                    "beam",
-                    "sat_pass",
-                    "output_name",
-                    'group_date_pre',
-                    'group_date_post',
-                    'group_id_pre',
-                    'group_id_post',
-                    'tile_row_start',
-                    'tile_col_start',
-                    'source_height',
-                    'source_width',
-                    'buffer_size',
-                    'cell_orig_height',
-                    'cell_orig_width'):
-            if key in batch:
-                result[key] = batch[key]
-
-        if batch.get("has_mask", torch.tensor(False)).any():
-            result["mask"] = batch["mask"]
-
-        return result
-
-    def _tta_forward(
-            self,
-            x_pre: Tensor,
-            x_post: Tensor,
-            sat_pass: Tensor | None = None,
-            beam: Tensor | None = None,
-            **metadata_kwargs: Tensor,
-    ) -> Tensor:
-        """Average predictions over geometric transformations."""
-        transforms = [
-            lambda t: t,
-            lambda t: torch.flip(t, dims=(-1,)),
-            lambda t: torch.flip(t, dims=(-2,)),
-            lambda t: torch.flip(t, dims=(-2, -1)),
-        ]
-
-        probs_sum: Tensor | None = None
-
-        for transform in transforms:
-            aug_pre = transform(x_pre)
-            aug_post = transform(x_post)
-
-            # This must call the forward path without TTA.
-            out = self(
-                aug_pre,
-                aug_post,
-                sat_pass=sat_pass,
-                beam=beam,
-                **metadata_kwargs,
-            )
-
-            if isinstance(out, (list, tuple)):
-                out = out[-1]
-
-            if out.shape[1] == 1:
-                probabilities = torch.sigmoid(out)
-            else:
-                probabilities = torch.softmax(out, dim=1)
-
-            # These transformations are their own inverse.
-            probabilities = transform(probabilities)
-
-            probs_sum = (
-                probabilities
-                if probs_sum is None
-                else probs_sum + probabilities
-            )
-
-        avg_probs = probs_sum / len(transforms)
-        eps = 1e-7
-
-        if avg_probs.shape[1] == 1:
-            return torch.logit(avg_probs.clamp(eps, 1.0 - eps))
-
-        return torch.log(avg_probs.clamp_min(eps))
-
-    # ------------------------------------------------------------------
-    # Saving predictions (GeoTIFF + manifest + cross-tile merging)
-    #
-    # Overlap-blended tile reassembly (``create_blend_window``,
-    # ``build_source_profile``, ``reassemble_overlapping_tiles``) and the
-    # generic GeoTIFF-merging routines (``safe_merge``, ``chunked_merge``,
-    # ``merge_predictions``, filename helpers, …) live in
-    # ``geo_deep_learning.utils.geotiff_merge`` /
-    # ``geo_deep_learning.utils.tile_reassembly`` — imported at the top of
-    # this module — since they are pure, reusable I/O logic with no
-    # dependency on the LightningModule itself.
-    # ------------------------------------------------------------------
-
-    def _new_manifest(self, base_dir: Path, predict_date: str, *, overlap_blended: bool = False) -> dict[str, Any]:
-        """Create the skeleton of the prediction manifest written alongside GeoTIFFs."""
-        manifest: dict[str, Any] = {
-            "prediction_date": predict_date,
-            "model_name": self.change_detection_model,
-            "checkpoint": str(self.weights_from_checkpoint_path or ""),
-            "base_dir": str(base_dir),
-            # Thresholds used to define exclusive probability-zone bands, consumed
-            # by scanfire's ``vectorize_probability_zones``/``SegmentationIngestionService``
-            # when a ``probability_tif_path`` is present in a prediction entry.
-            "probability_thresholds": self.probability_zone_thresholds,
-            "predictions": [],
-        }
-        if overlap_blended:
-            manifest["overlap_blended"] = True
-        if self.predict_output_layout != PREDICT_LAYOUT_PRODUCTION:
-            manifest["output_layout"] = self.predict_output_layout
-        if self.predict_run_name:
-            manifest["run_name"] = self.predict_run_name
-        return manifest
-
-    @staticmethod
-    def _write_manifest_file(manifest: dict[str, Any], base_dir: Path) -> None:
-        manifest_path = base_dir / "manifest.json"
-        with open(manifest_path, "w") as f:
-            json.dump(manifest, f, indent=2, default=str)
-        logger.info("Saved prediction manifest to %s", manifest_path)
-
-    def _write_manifests(self, manifest: dict[str, Any], base_dir: Path, predict_date: str) -> None:
-        """Write the run manifest according to :attr:`predict_output_layout`.
-
-        - ``production``: ``<base_dir>/manifest.json`` (unchanged, read by scanfire).
-        - ``benchmark``: ``<base_dir>/_runs/<predict_date>/manifest.json`` (history,
-          one per run) + a copy at ``<base_dir>/manifest_latest.json``.
-        """
-        if self.predict_output_layout == PREDICT_LAYOUT_PRODUCTION:
-            self._write_manifest_file(manifest, base_dir)
-            return
-
-        run_dir = base_dir / BENCHMARK_RUNS_DIRNAME / predict_date
-        run_dir.mkdir(parents=True, exist_ok=True)
-        self._write_manifest_file(manifest, run_dir)
-        latest_path = base_dir / BENCHMARK_LATEST_MANIFEST
-        with open(latest_path, "w") as f:
-            json.dump(manifest, f, indent=2, default=str)
-        logger.info("Saved latest benchmark manifest to %s", latest_path)
-
-    def _resolve_predict_base_dir(self) -> Path:
-        """Root directory of predict outputs, according to :attr:`predict_output_layout`.
-
-        - ``production``: ``predict_output_dir`` (or ``trainer.default_root_dir``)
-          with a ``predictions`` sub-folder appended when missing (historical
-          behaviour, expected by scanfire).
-        - ``benchmark``: ``predict_output_dir`` used as-is (typically
-          ``<benchmark_output_root>/<model_name>``); falls back to
-          ``<default_root_dir>/benchmark/<predict_run_name or change_detection_model>``.
-        """
-        if self.predict_output_layout == PREDICT_LAYOUT_PRODUCTION:
-            if self.predict_output_dir is not None:
-                base_dir = Path(self.predict_output_dir)
-                if base_dir.name != "predictions":
-                    base_dir = base_dir / "predictions"
-                return base_dir
-            return Path(self.trainer.default_root_dir) / "predictions"
-
-        if self.predict_output_dir is not None:
-            return Path(self.predict_output_dir)
-        run_name = self.predict_run_name or str(self.change_detection_model)
-        return Path(self.trainer.default_root_dir) / "benchmark" / run_name
-
-    def _prediction_dirs(
-            self,
-            base_dir: Path,
-            event_id: str,
-            predict_date: str,
-            cell_id: str,
-    ) -> tuple[Path, Path]:
-        """Return ``(tile_dir, merge_dir)`` for one prediction.
-
-        ``tile_dir`` receives the per-cell GeoTIFF (+ ``_prob``); ``merge_dir``
-        receives the cross-cell merges (per pre/post pair, ``merged_all.tif``).
-
-        - ``production``: ``<base>/<event_id>/<predict_date>/<cell_id>`` and
-          ``<base>/<event_id>/<predict_date>``.
-        - ``benchmark``: both ``<base>/<event_id>`` (cell-level names already
-          contain ``_cell-<id>``; merged names do not → no collision).
-        """
-        if self.predict_output_layout == PREDICT_LAYOUT_PRODUCTION:
-            merge_dir = base_dir / str(event_id) / predict_date
-            return merge_dir / str(cell_id), merge_dir
-        event_dir = base_dir / str(event_id)
-        return event_dir, event_dir
-
-    @staticmethod
-    def _write_single_geotiff_prediction(  # noqa: PLR0913
-            *,
-            pred_np: np.ndarray,
-            profile: dict[str, Any],
-            tile_dir: Path,
-            merge_dir: Path,
-            cell_id: str,
-            pair_id: str | None,
-            event_id: str,
-            event_start_date: str | None,
-            event_end_date: str | None,
-            beam: str | None,
-            sat_pass: str | None,
-            group_id_pre: str,
-            group_id_post: str,
-            group_date_pre: str,
-            group_date_post: str,
-            output_name: str | None,
-            legacy_name: str,
-            manifest: dict[str, Any],
-            group_tile_paths: dict[tuple[str, ...], list[Path]],
-            event_all_tile_paths: dict[str, list[Path]],
-            overlap_blended: bool = False,
-            prob_np: np.ndarray | None = None,
-    ) -> Path:
-        """Write one prediction GeoTIFF, register it for merging, and append its manifest entry.
-
-        Shared by both the per-tile path (:meth:`_write_prediction_batch`)
-        and the overlap-blended path (:meth:`_save_assembled_predictions`)
-        in :meth:`on_predict_end`, which used to duplicate this logic
-        (~100 lines) — including a less defensive affine-transform parser
-        in the per-tile path (see
-        :func:`geo_deep_learning.utils.geotiff_merge.transform_coeffs`).
-
-        When ``prob_np`` is provided, a sibling single-band ``float32``
-        probability GeoTIFF (positive/burn-class probability, nodata
-        :data:`PROBABILITY_NODATA`) is written next to the class raster and
-        referenced in the manifest entry as ``probability_tif_path``, for
-        downstream probability-zone vectorization.
-
-        ``tile_dir`` / ``merge_dir`` come from :meth:`_prediction_dirs` (layout
-        dependent): the raster is written to ``tile_dir`` and registered for the
-        cross-cell merges written to ``merge_dir``.
-        """
-        tile_dir.mkdir(parents=True, exist_ok=True)
-
-        out_name = prediction_output_filename(output_name, pair_id=pair_id, legacy_name=legacy_name)
-        out_path = tile_dir / out_name
-
-        with rio.open(str(out_path), "w", **profile) as dst:
-            dst.write(pred_np[np.newaxis, :, :])
-
-        logger.info("Saved prediction to %s (%dx%d)", out_path, pred_np.shape[1], pred_np.shape[0])
-
-        prob_path: Path | None = None
-        if prob_np is not None:
-            prob_path = out_path.with_name(f"{out_path.stem}_prob{out_path.suffix}")
-            prob_profile = {**profile, "dtype": "float32", "nodata": PROBABILITY_NODATA, "count": 1}
-            with rio.open(str(prob_path), "w", **prob_profile) as dst:
-                dst.write(prob_np[np.newaxis, :, :].astype(np.float32))
-            logger.info("Saved probability raster to %s", prob_path)
-
-        event_date_key = str(merge_dir)
-        merge_key = group_merge_key(
-            event_date_key, event_id, event_start_date, event_end_date,
-            group_id_pre, group_date_pre, group_id_post, group_date_post,
-            beam, sat_pass,
+        """Log input-diff / ground-truth / prediction figures (see :func:`log_change_detection_figures`)."""
+        return log_change_detection_figures(
+            trainer,
+            batch,
+            outputs,
+            max_samples,
+            num_classes=self.num_classes,
+            changed_num_classes=self.changed_num_classes,
+            class_colors=self.class_colors,
+            use_metadata_film=self.use_metadata_film,
+            artifact_prefix=artifact_prefix,
+            epoch_suffix=epoch_suffix,
         )
-        group_tile_paths[merge_key].append(out_path)
-        event_all_tile_paths[event_date_key].append(out_path)
-
-        entry = {
-            "pair_id": pair_id,
-            "event_id": event_id,
-            "event_start_date": event_start_date,
-            "event_end_date": event_end_date,
-            "cell_id": cell_id,
-            "beam": beam,
-            "sat_pass": sat_pass,
-            "group_id_pre": group_id_pre,
-            "group_id_post": group_id_post,
-            "group_date_pre": group_date_pre,
-            "group_date_post": group_date_post,
-            "output_name": out_name,
-            "tif_path": str(out_path),
-        }
-        if prob_path is not None:
-            entry["probability_tif_path"] = str(prob_path)
-        if overlap_blended:
-            entry["overlap_blended"] = True
-        manifest["predictions"].append(entry)
-        return out_path
-
-    def _merge_predictions(
-            self,
-            group_tile_paths: dict[tuple[str, ...], list[Path]],
-            event_all_tile_paths: dict[str, list[Path]],
-    ) -> None:
-        """Run the cross-cell merges with this module's ``merged_all`` settings."""
-        merge_predictions(
-            group_tile_paths, event_all_tile_paths,
-            write_merged_all=self.predict_write_merged_all,
-            merged_all_min_pairs=self.merged_all_min_pairs,
-            merged_all_prob_threshold=self.merged_all_prob_threshold,
-        )
-
-    def _save_assembled_predictions(
-            self,
-            assembled: dict[str, dict[str, Any]],
-            base_dir: Path,
-            predict_date: str,
-    ) -> None:
-        """Save overlap-blended source-level predictions as GeoTIFFs and merge.
-
-        Mirrors the structure of the per-tile path in :meth:`on_predict_end`
-        (via the shared :meth:`_write_single_geotiff_prediction` helper):
-        individual GeoTIFFs → manifest JSON → group merge → global merge.
-        """
-        group_tile_paths: dict[tuple[str, ...], list[Path]] = defaultdict(list)
-        event_all_tile_paths: dict[str, list[Path]] = defaultdict(list)
-        manifest = self._new_manifest(base_dir, predict_date, overlap_blended=True)
-
-        for source_key, info in assembled.items():
-            safe_name = Path(source_key.replace("|", "_").replace("/", "_")).stem
-            cell_id = str(info["cell_id"])
-            event_id = str(info.get("event_id", "unknown_event"))
-            tile_dir, merge_dir = self._prediction_dirs(base_dir, event_id, predict_date, cell_id)
-            self._write_single_geotiff_prediction(
-                pred_np=info["predictions"],  # [H, W] uint16
-                profile=info["profile"],
-                tile_dir=tile_dir,
-                merge_dir=merge_dir,
-                cell_id=cell_id,
-                pair_id=info.get("pair_id"),
-                event_id=event_id,
-                event_start_date=info.get("event_start_date"),
-                event_end_date=info.get("event_end_date"),
-                beam=info.get("beam"),
-                sat_pass=info.get("sat_pass"),
-                group_id_pre=str(info.get("group_id_pre", "all")),
-                group_id_post=str(info.get("group_id_post", "all")),
-                group_date_pre=str(info.get("group_date_pre", "all")),
-                group_date_post=str(info.get("group_date_post", "all")),
-                output_name=info.get("output_name"),
-                legacy_name=safe_name,
-                manifest=manifest,
-                group_tile_paths=group_tile_paths,
-                event_all_tile_paths=event_all_tile_paths,
-                overlap_blended=True,
-                prob_np=info.get("probability"),
-            )
-
-        self._write_manifests(manifest, base_dir, predict_date)
-        # Merge across cells / groups (same logic as per-tile path)
-        self._merge_predictions(group_tile_paths, event_all_tile_paths)
-        logger.info("All blended predictions saved to %s", base_dir)
-
-    def on_predict_end(self) -> None:
-        """Appelé après que tous les predict_step soient terminés.
-
-        Structure de sortie (``predict_output_layout``) :
-
-        - ``production`` (défaut, consommée par scanfire) ::
-
-            output_dir / predictions / EVENT_ID / PREDICTION_DATE / cell_id / image.tif
-            output_dir / predictions / EVENT_ID / PREDICTION_DATE / merged.tif
-            output_dir / predictions / manifest.json
-
-        - ``benchmark`` (comparaison multi-modèles) ::
-
-            output_dir / EVENT_ID / image.tif (+ _prob.tif, + fusion par paire pre/post)
-            output_dir / _runs / PREDICTION_DATE / manifest.json
-            output_dir / manifest_latest.json
-        """
-        predictions = self.trainer.predict_loop.predictions
-        if not predictions:
-            logger.warning("No predictions to save.")
-            return
-
-        # --- Base output directory ---
-        predict_date = datetime.now().strftime("%Y%m%d_%H%M")
-        base_dir = self._resolve_predict_base_dir()
-
-        base_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Saving predictions to %s (layout=%s)", base_dir, self.predict_output_layout)
-
-        # --- Try overlap-based tile reassembly (cosine blending) ---
-        dm = getattr(self.trainer, "datamodule", None)
-        assembled, used_blending = reassemble_overlapping_tiles(
-            predictions,
-            getattr(dm, "tile_size", None),
-            getattr(dm, "tile_stride", None),
-            no_data_value=NO_DATA,
-            positive_class_index=self.probability_zone_class_index,
-            probability_nodata=PROBABILITY_NODATA,
-        )
-        if used_blending and assembled:
-            logger.info("Using overlap blending for %d source images.", len(assembled))
-            self._save_assembled_predictions(assembled, base_dir, predict_date)
-            return
-
-        # --- Phase 1 : écrire chaque tuile individuelle ---
-        # On collecte les chemins par (event_id, predict_date) pour le merge
-        group_tile_paths: dict[tuple[str, ...], list[Path]] = defaultdict(list)
-        event_all_tile_paths: dict[str, list[Path]] = defaultdict(list)
-        manifest = self._new_manifest(base_dir, predict_date)
-
-        for batch_result in predictions:
-            self._write_prediction_batch(
-                batch_result, base_dir, predict_date, manifest, group_tile_paths, event_all_tile_paths,
-            )
-
-        self._write_manifests(manifest, base_dir, predict_date)
-        self._merge_predictions(group_tile_paths, event_all_tile_paths)
-        logger.info("All predictions saved to %s", base_dir)
-
-    def _crop_prediction_to_cell(
-            self,
-            pred_np: np.ndarray,
-            transform: Affine,
-            batch_result: dict[str, Any],
-            tile_h: int,
-            tile_w: int,
-            index: int,
-    ) -> tuple[np.ndarray | None, Affine, int, int]:
-        """Crop the neighbour-context buffer ring off a saved prediction tile.
-
-        Mirrors the training-time masking in :meth:`_mask_buffer_zone`: without
-        this, pixels computed from a *neighbouring* cell's territory (added
-        only to give the model spatial context — see ``predict_overlap_buffer``)
-        leaked into the saved GeoTIFF, overlapping the neighbour cell's own,
-        independently-produced prediction once everything is mosaicked into
-        ``merged.tif``. No-op when buffer metadata is absent (unbuffered runs).
-
-        Returns ``(None, transform, 0, 0)`` when the tile lies entirely inside
-        the buffer ring (owns zero true-cell pixels) — the caller should then
-        skip writing that tile.
-        """
-        buf_raw = batch_result.get("buffer_size")
-        cell_h_raw = batch_result.get("cell_orig_height")
-        cell_w_raw = batch_result.get("cell_orig_width")
-        if buf_raw is None or cell_h_raw is None or cell_w_raw is None:
-            return pred_np, transform, tile_h, tile_w
-
-        buf = self._scalar_at(buf_raw, index)
-        if buf <= 0:
-            return pred_np, transform, tile_h, tile_w
-
-        oh = self._scalar_at(cell_h_raw, index)
-        ow = self._scalar_at(cell_w_raw, index)
-        tile_row_starts = batch_result.get("tile_row_start")
-        tile_col_starts = batch_result.get("tile_col_start")
-        tr = self._scalar_at(tile_row_starts, index) if tile_row_starts is not None else 0
-        tc = self._scalar_at(tile_col_starts, index) if tile_col_starts is not None else 0
-
-        row_start, row_end, col_start, col_end = self._buffer_valid_region(buf, tr, tc, tile_h, tile_w, oh, ow)
-        if row_end <= row_start or col_end <= col_start:
-            return None, transform, 0, 0
-
-        cropped = pred_np[row_start:row_end, col_start:col_end]
-        shifted = transform * Affine.translation(col_start, row_start)
-        return cropped, shifted, row_end - row_start, col_end - col_start
-
-    def _write_prediction_batch(  # noqa: PLR0913
-            self,
-            batch_result: dict[str, Any],
-            base_dir: Path,
-            predict_date: str,
-            manifest: dict[str, Any],
-            group_tile_paths: dict[tuple[str, ...], list[Path]],
-            event_all_tile_paths: dict[str, list[Path]],
-    ) -> None:
-        """Write every sample of one predict batch (per-tile, non-blended path)."""
-        y_pred = batch_result["predictions"]  # [B, H_padded, W_padded]
-        y_prob = batch_result.get("probability")  # [B, H_padded, W_padded] float32 ou None
-        names = batch_result["pre_post_name"]
-        batch_cell_id = batch_result["cell_id"]
-        batch_profiles = batch_result["profile"]
-        orig_heights = batch_result["original_height"]  # Tensor [B] ou list
-        orig_widths = batch_result["original_width"]  # Tensor [B] ou list
-        batch_size = y_pred.shape[0]
-
-        batch_pair_ids = batch_result.get("pair_id")
-        batch_output_names = batch_result.get("output_name")
-        # event_id : peut être un Tensor, une list, ou absent.
-        # Fallback pour le training dataset qui a db_nbac_fire_id.
-        batch_event_ids = batch_result.get("event_id")
-        if batch_event_ids is None:
-            batch_event_ids = batch_result.get("db_nbac_fire_id")
-        batch_group_id_pre = batch_result.get("group_id_pre")
-        batch_group_id_post = batch_result.get("group_id_post")
-        batch_group_date_pre = batch_result.get("group_date_pre")
-        batch_group_date_post = batch_result.get("group_date_post")
-        batch_event_start_dates = batch_result.get("event_start_date")
-        batch_event_end_dates = batch_result.get("event_end_date")
-        batch_beams = batch_result.get("beam")
-        batch_sat_passes = batch_result.get("sat_pass")
-
-        for i in range(batch_size):
-            cell_id = batch_cell_id[i]
-            sample_name = names[i].replace("\n", "").replace("|", "_").replace("/", "_")
-
-            # --- Récupérer les dimensions originales ---
-            orig_h = self._scalar_at(orig_heights, i)
-            orig_w = self._scalar_at(orig_widths, i)
-
-            # --- Découper le padding (crop au coin supérieur-gauche) ---
-            pred_np = y_pred[i, :orig_h, :orig_w].cpu().numpy().astype(np.uint16)
-
-            # --- Reconstruire le profil rasterio ---
-            crs_val = batch_profiles["crs"][i] if isinstance(batch_profiles["crs"], (list, tuple)) else batch_profiles["crs"]
-            coeffs = transform_coeffs(batch_profiles["transform"], i)
-            logger.debug("Transform coefficients: %s", coeffs)
-
-            # --- Retirer l'anneau de contexte voisin (predict_overlap_buffer) ---
-            pred_np, transform, out_h, out_w = self._crop_prediction_to_cell(
-                pred_np, Affine(*coeffs), batch_result, orig_h, orig_w, i,
-            )
-            if pred_np is None:
-                logger.debug("Tile %s owns no true-cell pixels (fully inside buffer ring); skipping.", sample_name)
-                continue
-
-            # --- Same crop applied to the probability surface, if available ---
-            prob_np = None
-            if y_prob is not None:
-                raw_prob_np = y_prob[i, :orig_h, :orig_w].cpu().numpy().astype(np.float32)
-                prob_np, _, _, _ = self._crop_prediction_to_cell(
-                    raw_prob_np, Affine(*coeffs), batch_result, orig_h, orig_w, i,
-                )
-
-            profile_i = {
-                "driver": "GTiff",
-                "dtype": "uint16",
-                "count": 1,
-                "nodata": 32767,
-                "height": out_h,  # ← dimensions ORIGINALES, pas paddées
-                "width": out_w,  # ← dimensions ORIGINALES, pas paddées
-                "crs": parse_crs(crs_val),
-                "transform": transform,
-            }
-
-            event_id = extract_scalar(batch_event_ids, i, default="unknown_event")
-            tile_dir, merge_dir = self._prediction_dirs(base_dir, event_id, predict_date, cell_id)
-            self._write_single_geotiff_prediction(
-                pred_np=pred_np,
-                profile=profile_i,
-                tile_dir=tile_dir,
-                merge_dir=merge_dir,
-                cell_id=cell_id,
-                pair_id=extract_scalar(batch_pair_ids, i, default=None),
-                event_id=event_id,
-                event_start_date=extract_scalar(batch_event_start_dates, i, default=None),
-                event_end_date=extract_scalar(batch_event_end_dates, i, default=None),
-                beam=extract_scalar(batch_beams, i, default=None),
-                sat_pass=extract_scalar(batch_sat_passes, i, default=None),
-                group_id_pre=extract_scalar(batch_group_id_pre, i, default="all"),
-                group_id_post=extract_scalar(batch_group_id_post, i, default="all"),
-                group_date_pre=extract_scalar(batch_group_date_pre, i, default="all"),
-                group_date_post=extract_scalar(batch_group_date_post, i, default="all"),
-                output_name=extract_scalar(batch_output_names, i, default=""),
-                legacy_name=f"cell-{cell_id}_{sample_name}",
-                manifest=manifest,
-                group_tile_paths=group_tile_paths,
-                event_all_tile_paths=event_all_tile_paths,
-                prob_np=prob_np,
-            )
-

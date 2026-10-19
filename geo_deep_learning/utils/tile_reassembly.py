@@ -141,6 +141,8 @@ def _collect_tile_info(batch_result: dict[str, Any], index: int) -> dict[str, An
         tile_info["mask_common"] = batch_result["mask_common"][index].cpu()
     if "water_mask" in batch_result:
         tile_info["water_mask"] = batch_result["water_mask"][index].cpu()
+    if "ignore_mask" in batch_result:
+        tile_info["ignore_mask"] = batch_result["ignore_mask"][index].cpu()
 
     return tile_info
 
@@ -163,7 +165,7 @@ def _blend_tile_group(
     prob_accum = np.zeros((num_classes, source_h, source_w), dtype=np.float64)
     weight_accum = np.zeros((source_h, source_w), dtype=np.float64)
     mask_accum = np.zeros((source_h, source_w), dtype=np.float32)
-    water_accum = np.zeros((source_h, source_w), dtype=bool)
+    masked_accum = np.zeros((source_h, source_w), dtype=bool)  # water + ground-truth ignore (255)
 
     for tile in tiles:
         r = tile.get("tile_row_start", 0)
@@ -190,13 +192,19 @@ def _blend_tile_group(
             wm = tile["water_mask"].numpy()
             if wm.ndim == 3:  # noqa: PLR2004
                 wm = wm.squeeze(0)
-            water_accum[r:r + th, c:c + tw] |= wm[:th, :tw] > 0
+            masked_accum[r:r + th, c:c + tw] |= wm[:th, :tw] > 0
+        # Ground-truth ignore pixels (label 255): same label in every overlapping tile.
+        if "ignore_mask" in tile:
+            im = tile["ignore_mask"].numpy()
+            if im.ndim == 3:  # noqa: PLR2004
+                im = im.squeeze(0)
+            masked_accum[r:r + th, c:c + tw] |= im[:th, :tw]
 
     weight_accum = np.maximum(weight_accum, 1e-8)
     blended_probs = (prob_accum / weight_accum[np.newaxis, :, :]).astype(np.float32)
 
     pred = np.argmax(blended_probs, axis=0).astype(np.uint16)
-    invalid = (mask_accum < 0.5) | water_accum  # noqa: PLR2004
+    invalid = (mask_accum < 0.5) | masked_accum  # noqa: PLR2004
     pred[invalid] = no_data_value
 
     first_tile = tiles[0]

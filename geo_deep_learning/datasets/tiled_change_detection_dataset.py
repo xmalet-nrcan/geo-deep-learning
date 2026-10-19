@@ -193,7 +193,7 @@ class TiledChangeDetectionDataset(ChangeDetectionDataset):
     def _tile_origins(source: int, tile: int, stride: int) -> list[int]:
         """Return the sorted, deduplicated tile-origin offsets covering *source*.
 
-        Mirrored by ``ChangeDetectionChangeFormer._axis_tile_starts`` so the
+        Mirrored by ``geo_deep_learning.utils.tiling.axis_tile_starts`` so the
         model can reconstruct tile positions from ``source_height`` /
         ``source_width`` alone — keep both implementations in sync.
         """

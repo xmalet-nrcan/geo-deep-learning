@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_EPSG = 3979
 
 
+CLASS_NODATA = 32767
+PROBABILITY_NODATA = CLASS_NODATA
+DEFAULT_MERGED_ALL_MIN_PAIRS = 3
+DEFAULT_MERGED_ALL_PROB_THRESHOLD = 0.6
 def parse_crs(crs_val: Any, default_epsg: int = DEFAULT_EPSG) -> RioCRS:
     """Parse a CRS value, falling back to ``default_epsg`` when empty/invalid."""
     try:
@@ -385,10 +389,6 @@ def chunked_merge(
             pass
 
 
-CLASS_NODATA = 32767
-PROBABILITY_NODATA = -1.0
-DEFAULT_MERGED_ALL_MIN_PAIRS = 3
-DEFAULT_MERGED_ALL_PROB_THRESHOLD = 0.6
 
 
 def merged_all_filename(beam: Any, sat_pass: Any, suffix: str = "") -> str:

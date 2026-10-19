@@ -12,6 +12,7 @@ smp_losses = pytest.importorskip("segmentation_models_pytorch.losses")
 from geo_deep_learning.tasks_with_models.change_detection_changeformer import (  # noqa: E402
     ChangeDetectionChangeFormer,
 )
+from geo_deep_learning.tools.schedulers.builders import scheduler_class_path  # noqa: E402
 
 
 def _task(scheduler, **kwargs) -> ChangeDetectionChangeFormer:
@@ -61,7 +62,7 @@ def test_no_warmup_keeps_plain_scheduler() -> None:
 
 
 def test_scheduler_class_path_from_code() -> None:
-    path = _task(CAWR)._scheduler_class_path()
+    path = scheduler_class_path(_task(CAWR).hparams.get("scheduler"))
     assert path == "torch.optim.lr_scheduler.CosineAnnealingWarmRestarts"
 
 

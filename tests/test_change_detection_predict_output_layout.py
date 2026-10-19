@@ -543,3 +543,81 @@ def test_merge_predictions_write_merged_all(
 
     assert (tmp_path / _merged_name()).exists()
     assert (tmp_path / "merged_all_beam-A_pass-ASC.tif").exists() is write_merged_all
+
+
+def test_predict_step_masks_water_common_and_ignored_pixels(tmp_path: Path) -> None:
+    """``mask-common``, ``water_mask`` and ``mask`` (255) all turn into NO_DATA."""
+    from geo_deep_learning.datasets.rcm_change_detection_dataset import NO_DATA  # noqa: PLC0415
+    from geo_deep_learning.tasks_with_models.change_detection_changeformer import (  # noqa: PLC0415
+        PROBABILITY_NODATA,
+    )
+
+    module = _make_module(tmp_path, [])
+    module._tta_forward = lambda x_pre, *_a, **_kw: torch.zeros(  # noqa: SLF001
+        x_pre.shape[0], 2, TILE, TILE,
+    )
+    common = torch.ones((1, 1, TILE, TILE))
+    common[..., 0, 0] = 0  # invalid SAR pixel
+    water = torch.zeros((1, 1, TILE, TILE))
+    water[..., 1, 1] = 1  # water pixel
+    mask = torch.zeros((1, 1, TILE, TILE))
+    mask[..., 2, 2] = 255  # ignored by the ground truth
+
+    out = module.predict_step(
+        {
+            "image_pre": torch.zeros((1, 3, TILE, TILE)),
+            "image": torch.zeros((1, 3, TILE, TILE)),
+            "mask-common": common,
+            "water_mask": water,
+            "mask": mask,
+            "pre_post_name": ["a|b"],
+            "cell_id": ["c"],
+            "profile": {},
+            "original_height": torch.tensor([TILE]),
+            "original_width": torch.tensor([TILE]),
+        },
+        0,
+    )
+
+    expected = torch.zeros((1, TILE, TILE), dtype=torch.bool)
+    expected[0, 0, 0] = expected[0, 1, 1] = expected[0, 2, 2] = True
+    assert torch.equal(out["predictions"] == NO_DATA, expected)
+    assert torch.equal(out["probability"] == PROBABILITY_NODATA, expected)
+    assert torch.equal(out["ignore_mask"].squeeze(1), mask.squeeze(1) == 255)
+
+
+def _water_batch() -> dict:
+    common = torch.ones((1, 1, TILE, TILE), dtype=torch.bool)
+    common[..., 0, 0] = False  # invalid SAR pixel
+    water = torch.zeros((1, 1, TILE, TILE))
+    water[..., 1:3, 1] = 1  # water pixels
+    return {
+        "image_pre": torch.zeros((1, 3, TILE, TILE)),
+        "image": torch.zeros((1, 3, TILE, TILE)),
+        "mask": torch.zeros((1, 1, TILE, TILE)),
+        "mask-common": common,
+        "water_mask": water,
+    }
+
+
+def test_water_is_folded_into_mask_common(tmp_path: Path) -> None:
+    """Loss / metrics / figures read ``mask-common``: it must exclude water too."""
+    module = _make_module(tmp_path, [])
+    batch = module.on_before_batch_transfer(_water_batch(), 0)
+
+    expected_invalid = torch.zeros((1, 1, TILE, TILE), dtype=torch.bool)
+    expected_invalid[..., 0, 0] = True
+    expected_invalid[..., 1:3, 1] = True
+    assert torch.equal(batch["mask-common"] < 0.5, expected_invalid)
+
+
+def test_water_stays_aligned_with_mask_common_under_augmentation(tmp_path: Path) -> None:
+    module = _make_module(tmp_path, [])
+    module._trainer.training = True  # noqa: SLF001
+    for seed in range(8):
+        torch.manual_seed(seed)
+        batch = module.on_before_batch_transfer(_water_batch(), 0)
+        batch = module.on_after_batch_transfer(batch, 0)
+        water = batch["water_mask"] > 0
+        assert water.sum() == 2
+        assert not batch["mask-common"][water].any(), "water must stay invalid after flips/rotations"

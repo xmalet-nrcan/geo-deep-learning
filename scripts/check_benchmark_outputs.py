@@ -57,7 +57,7 @@ import validate_benchmark_configs as vbc  # noqa: E402
 #: Must match ``geo_deep_learning.datasets.rcm_change_detection_dataset.NO_DATA`` and
 #: ``tasks_with_models.change_detection_changeformer.PROBABILITY_NODATA`` (tested).
 CLASS_NODATA = 32767
-PROB_NODATA = -1.0
+PROB_NODATA = CLASS_NODATA
 CLASS_DTYPE = "uint16"
 PROB_DTYPE = "float32"
 
