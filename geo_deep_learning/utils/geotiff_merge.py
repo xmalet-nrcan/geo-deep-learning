@@ -542,6 +542,30 @@ def temporal_confirmation_merge(
         dst.write(prob_out[np.newaxis])
 
 
+def merge_probability_rasters(tile_paths: list[Path], merged_path: Path) -> Path | None:
+    """Merge the ``*_prob.tif`` siblings of ``tile_paths`` next to ``merged_path``.
+
+    Plain average of the valid (non-nodata) probabilities of the overlapping
+    tiles: no probability threshold or other filtering is applied, and masked
+    pixels (water, invalid) stay nodata. The output is the ``*_prob.tif`` sibling
+    of ``merged_path`` (see :func:`probability_path`).
+
+    Returns the written path, or ``None`` when a tile has no probability raster
+    (a partial mosaic would silently under-cover the class raster).
+    """
+    prob_paths = [probability_path(p) for p in tile_paths]
+    missing = [p for p in prob_paths if not p.exists()]
+    if missing:
+        logger.warning(
+            "Probability merge skipped for %s: %d/%d probability raster(s) missing (e.g. %s).",
+            merged_path.name, len(missing), len(prob_paths), missing[0].name,
+        )
+        return None
+    prob_merged_path = probability_path(merged_path)
+    chunked_merge(prob_paths, prob_merged_path)
+    return prob_merged_path
+
+
 def merge_predictions(  # noqa: PLR0913
         group_tile_paths: dict[tuple[str, ...], list[Path]],
         event_all_tile_paths: dict[str, list[Path]],
@@ -552,7 +576,8 @@ def merge_predictions(  # noqa: PLR0913
 ) -> None:
     """Merge tiles in two passes.
 
-    1. Per event/pre-post pair/beam/pass → one self-describing GeoTIFF
+    1. Per event/pre-post pair/beam/pass → one self-describing GeoTIFF, plus its
+       ``*_prob.tif`` (plain average of the cells' probabilities, no filtering)
     2. Per event/date dir **and beam/satellite pass** →
        ``merged_all_beam-<beam>_pass-<pass>.tif`` (+ ``*_prob.tif``), built by
        :func:`temporal_confirmation_merge` over the pairs sorted by post date.
@@ -592,6 +617,9 @@ def merge_predictions(  # noqa: PLR0913
         try:
             chunked_merge(tile_paths, merged_path)
             logger.info("Saved merged group to %s", merged_path)
+            prob_merged_path = merge_probability_rasters(tile_paths, merged_path)
+            if prob_merged_path is not None:
+                logger.info("Saved merged group probability to %s", prob_merged_path)
         except Exception:
             logger.exception(
                 "Failed to merge event %s, group %s/%s, beam %s, pass %s in %s",

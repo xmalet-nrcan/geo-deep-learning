@@ -15,6 +15,8 @@ Per model of ``configs/benchmark/models.yaml`` (enabled, or ``--model``), in
 2. **Files** — every per-cell ``…_cell-<id>_beam-…_pass-….tif`` has its
    ``_prob.tif`` (and vice-versa) and its per pre/post pair merged raster
    (same name without ``_cell-<id>``); the event id of the name matches its folder.
+   A merged ``…_prob.tif`` (plain average of the cells' probabilities) must have its merged
+   class raster.
 3. **Filters** (decision 5) — no output for a beam / satellite pass excluded by
    the model config (``data.init_args.beams`` / ``satellite_pass``).
 4. **Expected** (``--csv-dir``, default ``BENCHMARK_CSV_DIR``) — every
@@ -110,7 +112,7 @@ class OutputFile:
     @property
     def kind(self) -> str:
         if self.cell is None:
-            return "merged"
+            return "merged_prob" if self.is_prob else "merged"
         return "prob" if self.is_prob else "cell"
 
     @property
@@ -257,7 +259,7 @@ def scan_model(
                 add(ERROR, "files", f"{out.key}: probability raster missing")
             if out.merged_key not in merged_keys:
                 add(ERROR, "files", f"{out.key}: per-pair merged raster {out.merged_name} missing")
-        elif out.kind == "prob":
+        elif out.kind in ("prob", "merged_prob"):
             cls = f"{out.event_dir}/{out.name.removesuffix(PROB_SUFFIX)}.tif"
             if cls not in by_key:
                 add(ERROR, "files", f"{out.key}: class raster missing")

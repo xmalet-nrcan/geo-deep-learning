@@ -10,6 +10,7 @@ pour comparaison :
 <output_root>/<name>/<event_id>/<output_name>.tif          # par cellule (classes, nodata 32767)
 <output_root>/<name>/<event_id>/<output_name>_prob.tif     # probabilité brûlé (float32, nodata -1.0)
 <output_root>/<name>/<event_id>/<fusion par paire pre/post>.tif   # sans _cell-
+<output_root>/<name>/<event_id>/<fusion par paire pre/post>_prob.tif   # moyenne des probabilités des cellules, sans filtre ni seuil
 <output_root>/<name>/_runs/<YYYYMMDD_HHMM>/manifest.json   # historique
 <output_root>/<name>/manifest_latest.json
 <output_root>/<name>/_confirmation/<test_case_id>/<paramètres>/merged_all_beam-<b>_pass-<p>.tif  # (+ _prob)

@@ -144,7 +144,7 @@ def test_real_writer_outputs_are_valid(bench) -> None:
     assert _levels(findings, WARNING) == []
     for m in outputs:
         kinds = sorted(o.kind for o in m.files.values())
-        assert kinds == ["cell", "cell", "merged", "prob", "prob"]
+        assert kinds == ["cell", "cell", "merged", "merged_prob", "prob", "prob"]
     summary = cbo.summary_lines(outputs, findings)
     assert summary[1].split()[1:5] == ["1", "2", "2", "1"]
 
