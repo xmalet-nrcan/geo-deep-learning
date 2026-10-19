@@ -28,7 +28,7 @@ DEFAULT_EPSG = 3979
 
 
 CLASS_NODATA = 32767
-PROBABILITY_NODATA = CLASS_NODATA
+PROBABILITY_NODATA = -1.0  # must stay < first probability-zone threshold (see change_detection_predict.py)
 DEFAULT_MERGED_ALL_MIN_PAIRS = 3
 DEFAULT_MERGED_ALL_PROB_THRESHOLD = 0.6
 def parse_crs(crs_val: Any, default_epsg: int = DEFAULT_EPSG) -> RioCRS:

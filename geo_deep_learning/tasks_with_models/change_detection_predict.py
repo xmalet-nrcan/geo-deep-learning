@@ -48,7 +48,10 @@ DEFAULT_PROBABILITY_ZONE_THRESHOLDS = (0.3, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 
 # Sentinel written to probability GeoTIFFs for invalid/masked pixels.
 # Probabilities live in [0, 1], so a negative value is an unambiguous nodata.
-PROBABILITY_NODATA = NO_DATA
+# It MUST stay below the first probability-zone threshold (and equal to scanfire's
+# ``vectorize.PROBABILITY_NODATA``): a larger value such as ``NO_DATA`` (32767) would
+# be binned in the top confidence band, vectorizing masked pixels (water, invalid).
+PROBABILITY_NODATA = -1.0
 
 # Predict output directory layouts (see ``predict_output_layout`` in ``__init__``).
 PREDICT_LAYOUT_PRODUCTION = "production"
