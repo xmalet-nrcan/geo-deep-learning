@@ -161,6 +161,15 @@ def test_layout_errors(bench) -> None:
     assert "unexpected sub-folder" in errors
 
 
+def test_confirmation_folder_is_ignored(bench) -> None:
+    conf = bench["out"] / "m1" / cbo.CONFIRMATION_DIRNAME / "42" / "mp3_t0.5"
+    conf.mkdir(parents=True)
+    (conf / "merged_all_beam-A_pass-ASC.tif").write_bytes(b"x")
+    findings, _ = _run(bench, rasters=False)
+    assert _levels(findings, ERROR) == []
+    assert not any(cbo.CONFIRMATION_DIRNAME in f for f in _levels(findings, WARNING))
+
+
 def test_missing_prob_and_merged(bench) -> None:
     ev = bench["event_dir"]
     cell = _cell_name(ev)

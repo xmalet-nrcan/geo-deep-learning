@@ -8,8 +8,10 @@ orchestrator container: ``make benchmark-check``).
 Per model of ``configs/benchmark/models.yaml`` (enabled, or ``--model``), in
 ``<output_root>/<model>/``:
 
-1. **Layout** — ``<event_id>/`` folders only (+ ``_runs/``, ``manifest_latest.json``);
-   no production layout (``predictions/``), no ``merged_all.tif``.
+1. **Layout** — ``<event_id>/`` folders only (+ ``_runs/``, ``_confirmation/``,
+   ``manifest_latest.json``); no production layout (``predictions/``), no ``merged_all.tif``
+   in the event folders. ``_confirmation/`` (temporal-confirmation mosaics rebuilt by the
+   scanfire orchestrator) is not checked.
 2. **Files** — every per-cell ``…_cell-<id>_beam-…_pass-….tif`` has its
    ``_prob.tif`` (and vice-versa) and its per pre/post pair merged raster
    (same name without ``_cell-<id>``); the event id of the name matches its folder.
@@ -61,6 +63,9 @@ PROB_DTYPE = "float32"
 
 PROB_SUFFIX = "_prob.tif"
 RUNS_DIRNAME = "_runs"
+#: Temporal-confirmation mosaics written by the scanfire benchmark orchestrator
+#: (``<model>/_confirmation/<test_case_id>/<params>/merged_all_beam-…``), outside the event folders.
+CONFIRMATION_DIRNAME = "_confirmation"
 LATEST_MANIFEST = "manifest_latest.json"
 MERGED_ALL = "merged_all.tif"
 PRODUCTION_DIRNAME = "predictions"
@@ -215,7 +220,7 @@ def scan_model(
         add(WARNING, "layout", f"no {RUNS_DIRNAME}/<date>/manifest.json")
 
     for entry in sorted(root.iterdir()):
-        if entry.name in (RUNS_DIRNAME, PRODUCTION_DIRNAME, LATEST_MANIFEST):
+        if entry.name in (RUNS_DIRNAME, CONFIRMATION_DIRNAME, PRODUCTION_DIRNAME, LATEST_MANIFEST):
             continue
         if not entry.is_dir():
             add(WARNING, "layout", f"unexpected file at model root: {entry.name}")

@@ -12,10 +12,16 @@ pour comparaison :
 <output_root>/<name>/<event_id>/<fusion par paire pre/post>.tif   # sans _cell-
 <output_root>/<name>/_runs/<YYYYMMDD_HHMM>/manifest.json   # historique
 <output_root>/<name>/manifest_latest.json
+<output_root>/<name>/_confirmation/<test_case_id>/<paramètres>/merged_all_beam-<b>_pass-<p>.tif  # (+ _prob)
 ```
 
 `output_name` = convention prod (`scanfire …/orchestrator/prediction_naming.py`) →
-noms **identiques entre modèles** pour un même cas de test. Pas de `merged_all.tif`.
+noms **identiques entre modèles** pour un même cas de test. Le predict n'écrit pas de `merged_all.tif`
+(`predict_write_merged_all: false`) : la confirmation temporelle (`merged_all_min_pairs` /
+`merged_all_prob_threshold`) est recalculée par l'orchestrateur scanfire à partir des rasters par paire,
+sous `_confirmation/`, avec des paramètres modifiables sans relancer le predict (`--confirm-*`,
+`--confirm-only`) ; les polygones vont dans `model_benchmark.test_run_merged_all`. Les clés `merged_all_*`
+des configs n'ont donc pas d'effet en benchmark (et changer la config relance le predict).
 
 ## Fichiers
 
