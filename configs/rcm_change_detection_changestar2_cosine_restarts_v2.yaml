@@ -1,0 +1,152 @@
+seed_everything: true
+
+trainer:
+#  detect_anomaly: true
+  accelerator: "gpu"
+  devices: -1
+  strategy: auto
+
+  gradient_clip_val: 1.0
+  precision: "bf16-mixed"  # bf16: no GradScaler needed, no overflow (same exponent as fp32)
+  sync_batchnorm: false
+  gradient_clip_algorithm: "norm"
+  logger:
+    class_path: lightning.pytorch.loggers.TensorBoardLogger
+    init_args:
+      save_dir: ./lightning_logs
+      name: 2026/changestar2/tiled/new/cs2base_A_y23_25_water_film8-mchi_rrrl-cbam_focal-lovasz_cosine-restarts-v2
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: "val_loss"
+        mode: "min"
+        verbose: True
+        patience: 30          # > T_0 (20) : laisse au cycle suivant le temps de redescendre après le pic du restart
+        min_delta: 1e-3
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: ./models_checkpoints/2026/changestar2/tiled/new
+        monitor: "val_iou"    # IoU de la classe brûlée (métrique visée) plutôt que val_loss
+        mode: "max"
+        save_top_k: 3
+        save_last: true       # garde aussi le dernier état (reprise d'entraînement)
+        filename: "cs2base_A_y23_25_water-film8-mchi_rrrl-cosine-restarts-tiled-v2-{epoch:02d}-{val_iou:.3f}"
+    - class_path: tools.callbacks.segmentation_visualization.VisualizationCallback
+      init_args:
+        max_samples: 50
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: "epoch"
+
+  accumulate_grad_batches: 4
+  max_epochs: 240
+  check_val_every_n_epoch: 1
+
+model:
+  class_path: tasks_with_models.change_detection_changeformer.ChangeDetectionChangeFormer
+  init_args:
+    change_detection_model: "changestar2"
+    image_size: [256,256]
+    max_samples: 10
+    num_classes: 1
+    deep_supervision: true
+    speckle_noise_std: 0.15
+    use_metadata_film: true
+    film_embed_dim: 8
+
+    use_cbam: true
+    cbam_reduction: 4
+
+    use_channel_dropout: true
+    channel_dropout_prob: 0.15
+
+    use_signed_difference: true       # ajoute (x1 - x2) signé en canaux d'entrée (direction du changement)
+    signed_difference_channels: null  # null = ajoute toutes les bandes ; ex. 3 = projection 1x1 apprise
+    signed_difference_normalize: true
+
+
+    use_dfa: false
+    dfa_gate_hidden: 16
+
+    burned_class_weight: 2.0
+    main_loss:
+      class_path: segmentation_models_pytorch.losses.FocalLoss
+      init_args:
+        mode: "binary"
+        gamma: 1.5
+        ignore_index: 255
+    secondary_loss:
+      class_path: segmentation_models_pytorch.losses.LovaszLoss
+      init_args:
+        mode: "binary"
+        ignore_index: 255
+    loss_ratio:
+      - 0.6
+      - 0.4
+    optimizer:
+      class_path: torch.optim.AdamW
+      init_args:
+        lr: 3e-4              # lr initial = max pour CosineAnnealingWarmRestarts
+        weight_decay: 0.05    # augmenté pour mieux régulariser (0.03 → 0.05)
+        betas:
+        - 0.9
+        - 0.999
+    # ═══════════════════════════════════════════════════════════════════
+    # CosineAnnealingWarmRestarts
+    # ───────────────────────────────────────────────────────────────────
+    # Avantages vs OneCycleLR pour le sur-entraînement :
+    #   1. Restarts périodiques → le LR remonte et "secoue" le modèle
+    #      hors des minima sharp qui généralisent mal
+    #   2. Agit comme régularisation implicite (sharp minima → flat minima)
+    #   3. Chaque fin de cycle (LR bas) donne un bon point de checkpoint,
+    #      compatible avec l'EarlyStopping (patience > T_0)
+    # Avec T_0=20, T_mult=1 : LR max aux époques 0, 20, 40, ... et LR bas
+    # en fin de cycle (19, 39, 59, ...). T_mult=2 donnerait 20 → 40 → 80.
+    # ═══════════════════════════════════════════════════════════════════
+    scheduler:
+      class_path: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
+      init_args:
+        T_0: 20               # cycles de 20 époques
+        T_mult: 1             # longueur constante des cycles
+        eta_min: 1e-6         # LR plancher (jamais zéro)
+    scheduler_config:
+      interval: "epoch"       # step par epoch (pas par batch comme OneCycleLR)
+      frequency: 1
+
+    class_labels: [ "unburn", "burn" ]
+    class_colors: [ "#000000", "#FF0000" ]
+#    weights_from_checkpoint_path: /app/models_checkpoints/2026/changestar2/tiled/new/cs2base_A_y23_water-film8-all-cosine-restarts-tiled-epoch=31-val_loss=0.223.ckpt
+
+data:
+  class_path: datamodules.rcm_change_detection_datamodule.RcmChangeDetectionDataModule
+  init_args:
+    batch_size: 8
+    num_workers: 10
+    separate_metadata: true
+    patch_size:
+    - 256
+    - 256
+    train_overlap_buffer: 50
+    burned_oversample_factor: 2.0
+    burned_tile_min_ratio: 0.0
+    tile_size: [ 256,256 ]
+    tile_stride: [ 256,256 ]
+    split_on_columns: db_nbac_fire_id
+    csv_root_folder: /mnt/geospatial/projet_RCM_scanfire/
+    patches_root_folder: /mnt/geospatial/projet_RCM_scanfire/grided_folder
+    csv_file_name: tbl_input_pre_post_data.csv
+    split_ratios: [0.7 ,0.15, 0.15]
+
+    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'NDSV','RFDI', 'RR','RL']
+#    band_names: [ 'LOCALINCANGLE',  'RR','RL']                  # INTENSITY
+#    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0']      # MCHI
+#    band_names: [ 'LOCALINCANGLE', 'PDN','PSN','PVN', 'S0' , 'RR','RL' ]   # MCHI + INTENSITY
+
+    beams:
+    - 'A'
+    # - 'B'
+    satellite_pass:
+    dataset_years:
+    - 2025
+    - 2023

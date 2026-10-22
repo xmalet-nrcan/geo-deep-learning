@@ -14,14 +14,35 @@
 output_root: /mnt/geospatial/projet_RCM_scanfire/benchmark_outputs
 
 models:
-  - name: cs2base_cosine_restarts_e24
+  - name: csfarseg_r50_v2_e76
+    config: csfarseg_r50_v2_e76_predict.yaml
+    enabled: true
+    description: >-
+      Modèle de production (référence) — ChangeStar(FarSeg) ResNet-50 + raffinement
+      pleine résolution, beam A, 2023-2025, FiLM 8, CBAM, signed-diff, run v2,
+      epoch 76 (val_iou 0.727). Inférence : buffer 100, tuiles 256 / pas 128.
+
+  - name: cs2base_cosine_restarts_no_output_refined
     config: cs2base_cosine_restarts_e24_predict.yaml
     enabled: true
     description: >-
-      Modèle de production (référence) — ChangeStar2, beam A, 2023-2025,
+      Ancien modèle de production — ChangeStar2, beam A, 2023-2025,
       FiLM 8, CBAM, signed-diff, cosine restarts, epoch 24.
+      Inférence : buffer 50, tuiles 256 / pas 256.
 
-  # Ajouter les modèles inventoriés en P0 (§12.1 du plan) à partir de _template_predict.yaml :
-  # - name: changeformer_v7_all9bands
-  #   config: changeformer_v7_all9bands_predict.yaml
-  #   enabled: true
+
+  - name: cs2base_cosine_restarts_output_refined
+    config: cs2base_cosine_restarts_v2_predict.yaml
+    enabled: true
+    description: >-
+      ChangeStar2, beam A, 2023-2025, FiLM 8, CBAM, signed-diff, 9 bandes,
+      cosine restarts v2 (même découpage que farseg v2).
+      Inférence alignée sur la prod : buffer 100, tuiles 256 / pas 128.
+
+  - name: changeformer_v7_all9bands
+    config: changeformer_v7_all9bands_predict.yaml
+    enabled: true
+    description: >-
+      ChangeFormer v7, beam A, 2023-2025, FiLM 8, CBAM, signed-diff,
+      9 bandes (ordre RR/RL avant NDSV/RFDI), cosine restarts T_0 30 / T_mult 2.
+      Inférence alignée sur la prod : buffer 100, tuiles 256 / pas 128.

@@ -144,7 +144,7 @@ def test_real_writer_outputs_are_valid(bench) -> None:
     assert _levels(findings, WARNING) == []
     for m in outputs:
         kinds = sorted(o.kind for o in m.files.values())
-        assert kinds == ["cell", "cell", "merged", "prob", "prob"]
+        assert kinds == ["cell", "cell", "merged", "merged_prob", "prob", "prob"]
     summary = cbo.summary_lines(outputs, findings)
     assert summary[1].split()[1:5] == ["1", "2", "2", "1"]
 
@@ -159,6 +159,15 @@ def test_layout_errors(bench) -> None:
     assert "merged_all.tif must not exist" in errors
     assert "production layout folder" in errors
     assert "unexpected sub-folder" in errors
+
+
+def test_confirmation_folder_is_ignored(bench) -> None:
+    conf = bench["out"] / "m1" / cbo.CONFIRMATION_DIRNAME / "42" / "mp3_t0.5"
+    conf.mkdir(parents=True)
+    (conf / "merged_all_beam-A_pass-ASC.tif").write_bytes(b"x")
+    findings, _ = _run(bench, rasters=False)
+    assert _levels(findings, ERROR) == []
+    assert not any(cbo.CONFIRMATION_DIRNAME in f for f in _levels(findings, WARNING))
 
 
 def test_missing_prob_and_merged(bench) -> None:

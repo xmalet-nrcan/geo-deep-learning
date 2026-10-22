@@ -8,11 +8,15 @@ orchestrator container: ``make benchmark-check``).
 Per model of ``configs/benchmark/models.yaml`` (enabled, or ``--model``), in
 ``<output_root>/<model>/``:
 
-1. **Layout** — ``<event_id>/`` folders only (+ ``_runs/``, ``manifest_latest.json``);
-   no production layout (``predictions/``), no ``merged_all.tif``.
+1. **Layout** — ``<event_id>/`` folders only (+ ``_runs/``, ``_confirmation/``,
+   ``manifest_latest.json``); no production layout (``predictions/``), no ``merged_all.tif``
+   in the event folders. ``_confirmation/`` (temporal-confirmation mosaics rebuilt by the
+   scanfire orchestrator) is not checked.
 2. **Files** — every per-cell ``…_cell-<id>_beam-…_pass-….tif`` has its
    ``_prob.tif`` (and vice-versa) and its per pre/post pair merged raster
    (same name without ``_cell-<id>``); the event id of the name matches its folder.
+   A merged ``…_prob.tif`` (plain average of the cells' probabilities) must have its merged
+   class raster.
 3. **Filters** (decision 5) — no output for a beam / satellite pass excluded by
    the model config (``data.init_args.beams`` / ``satellite_pass``).
 4. **Expected** (``--csv-dir``, default ``BENCHMARK_CSV_DIR``) — every
@@ -61,6 +65,9 @@ PROB_DTYPE = "float32"
 
 PROB_SUFFIX = "_prob.tif"
 RUNS_DIRNAME = "_runs"
+#: Temporal-confirmation mosaics written by the scanfire benchmark orchestrator
+#: (``<model>/_confirmation/<test_case_id>/<params>/merged_all_beam-…``), outside the event folders.
+CONFIRMATION_DIRNAME = "_confirmation"
 LATEST_MANIFEST = "manifest_latest.json"
 MERGED_ALL = "merged_all.tif"
 PRODUCTION_DIRNAME = "predictions"
@@ -105,7 +112,7 @@ class OutputFile:
     @property
     def kind(self) -> str:
         if self.cell is None:
-            return "merged"
+            return "merged_prob" if self.is_prob else "merged"
         return "prob" if self.is_prob else "cell"
 
     @property
@@ -215,7 +222,7 @@ def scan_model(
         add(WARNING, "layout", f"no {RUNS_DIRNAME}/<date>/manifest.json")
 
     for entry in sorted(root.iterdir()):
-        if entry.name in (RUNS_DIRNAME, PRODUCTION_DIRNAME, LATEST_MANIFEST):
+        if entry.name in (RUNS_DIRNAME, CONFIRMATION_DIRNAME, PRODUCTION_DIRNAME, LATEST_MANIFEST):
             continue
         if not entry.is_dir():
             add(WARNING, "layout", f"unexpected file at model root: {entry.name}")
@@ -252,7 +259,7 @@ def scan_model(
                 add(ERROR, "files", f"{out.key}: probability raster missing")
             if out.merged_key not in merged_keys:
                 add(ERROR, "files", f"{out.key}: per-pair merged raster {out.merged_name} missing")
-        elif out.kind == "prob":
+        elif out.kind in ("prob", "merged_prob"):
             cls = f"{out.event_dir}/{out.name.removesuffix(PROB_SUFFIX)}.tif"
             if cls not in by_key:
                 add(ERROR, "files", f"{out.key}: class raster missing")

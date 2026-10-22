@@ -6,3 +6,5 @@ shapely
 geoalchemy2
 nrcan-etl-toolbox
 python-dotenv
+psycopg
+psycopg[binary]

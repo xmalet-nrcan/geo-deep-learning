@@ -10,6 +10,7 @@ from __future__ import annotations
 import gc
 import logging
 import shutil
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_EPSG = 3979
 
 
+CLASS_NODATA = 32767
+PROBABILITY_NODATA = -1.0  # must stay < first probability-zone threshold (see change_detection_predict.py)
+DEFAULT_MERGED_ALL_MIN_PAIRS = 3
+DEFAULT_MERGED_ALL_PROB_THRESHOLD = 0.6
 def parse_crs(crs_val: Any, default_epsg: int = DEFAULT_EPSG) -> RioCRS:
     """Parse a CRS value, falling back to ``default_epsg`` when empty/invalid."""
     try:
@@ -93,16 +98,16 @@ def merge_date(value: Any) -> str:
 
 
 def group_merge_key(  # noqa: PLR0913
-    event_date_dir: str,
-    event_id: Any,
-    event_start_date: Any,
-    event_end_date: Any,
-    group_id_pre: Any,
-    group_date_pre: Any,
-    group_id_post: Any,
-    group_date_post: Any,
-    beam: Any,
-    sat_pass: Any,
+        event_date_dir: str,
+        event_id: Any,
+        event_start_date: Any,
+        event_end_date: Any,
+        group_id_pre: Any,
+        group_date_pre: Any,
+        group_id_post: Any,
+        group_date_post: Any,
+        beam: Any,
+        sat_pass: Any,
 ) -> tuple[str, ...]:
     """Return the complete provenance key for one cross-cell merge."""
     return tuple(map(str, (
@@ -120,33 +125,35 @@ def group_merge_key(  # noqa: PLR0913
 
 
 def merged_group_filename(  # noqa: PLR0913
-    event_id: str,
-    event_start_date: str,
-    event_end_date: str,
-    group_id_pre: str,
-    group_date_pre: str,
-    group_id_post: str,
-    group_date_post: str,
-    beam: str,
-    sat_pass: str,
+        event_id: str,
+        event_start_date: str,
+        event_end_date: str,
+        group_id_pre: str,
+        group_date_pre: str,
+        group_id_post: str,
+        group_date_post: str,
+        beam: str,
+        sat_pass: str,
 ) -> str:
     """Build the cross-cell merge name without a ``cell_id`` component."""
     return (
         f"event-{event_id}"
         f"_start-{merge_date(event_start_date)}"
         f"_end_{merge_date(event_end_date)}"
-        f"_pre-g{group_id_pre}-{merge_date(group_date_pre)}"
-        f"_post-g{group_id_post}-{merge_date(group_date_post)}"
-        f"_beam-{beam}_pass-{sat_pass}.tif"
+        f"_beam-{beam}_pass-{sat_pass}"
+        f"_pre-{merge_date(group_date_pre)}-g{group_id_pre}"
+        f"_post-{merge_date(group_date_post)}-g{group_id_post}"
+        ".tif"
+
     )
 
 
 def prediction_output_filename(
-    output_name: str | None,
-    *,
-    pair_id: str | None,
-    legacy_name: str,
-    suffix: str = "",
+        output_name: str | None,
+        *,
+        pair_id: str | None,
+        legacy_name: str,
+        suffix: str = "",
 ) -> str:
     """Return a safe GeoTIFF filename, preferring the CSV output name.
 
@@ -196,21 +203,33 @@ def merge_average(datasets: list[Any]) -> tuple[np.ndarray, Affine]:
     Uses two passes of ``rasterio.merge`` with ``method='sum'`` and
     ``method='count'`` to compute the average.  Falls back to the
     flip workaround if the rasterio version rejects negative pixel height.
+
+    Both passes force ``nodata=0`` for the *output fill*. By default rasterio
+    fills uncovered / all-nodata pixels with the first dataset's nodata
+    (e.g. 32767), so ``count`` was never 0 there and ``sum / count`` gave
+    ``1`` (= burned) for every masked pixel (water, invalid SAR) and every
+    coverage gap. Input pixels are still masked with each dataset's own nodata.
     """
     try:
-        mosaic_sum, transform = rio_merge(datasets, method="sum")
-        mosaic_count, _ = rio_merge(datasets, method="count")
+        mosaic_sum, transform = rio_merge(datasets, method="sum", nodata=0)
+        mosaic_count, _ = rio_merge(datasets, method="count", nodata=0)
     except Exception as e:
         if "negative pixel height" not in str(e):
             raise
-        mosaic_sum, transform = merge_with_flip(datasets, method="sum")
-        mosaic_count, _ = merge_with_flip(datasets, method="count")
+        mosaic_sum, transform = merge_with_flip(datasets, method="sum", nodata=0)
+        mosaic_count, _ = merge_with_flip(datasets, method="count", nodata=0)
 
     # Average: sum / count, avoiding division by zero
     mask_no_coverage = mosaic_count == 0
     mosaic_count_safe = mosaic_count.astype(np.float64)
     mosaic_count_safe[mask_no_coverage] = 1.0
     mosaic = mosaic_sum.astype(np.float64) / mosaic_count_safe
+
+    # Integer rasters hold class labels: round half-up (majority vote, ties →
+    # higher class) instead of letting astype() truncate, which kept a pixel
+    # burned only when *every* overlapping pair agreed (5/7 = 0.71 → 0).
+    if np.issubdtype(np.dtype(datasets[0].dtypes[0]), np.integer):
+        mosaic = np.floor(mosaic + 0.5)
 
     # Restore nodata where no tile contributed
     nodata = datasets[0].nodata
@@ -221,7 +240,7 @@ def merge_average(datasets: list[Any]) -> tuple[np.ndarray, Affine]:
     return mosaic, transform
 
 
-def merge_with_flip(datasets: list[Any], method: str = "first") -> tuple[np.ndarray, Affine]:
+def merge_with_flip(datasets: list[Any], method: str = "first", **merge_kwargs: Any) -> tuple[np.ndarray, Affine]:
     """Merge datasets after flipping to positive pixel height.
 
     Workaround for rasterio, which rejects "upside down" rasters (pixel
@@ -255,7 +274,7 @@ def merge_with_flip(datasets: list[Any], method: str = "first") -> tuple[np.ndar
         else:
             flipped_datasets.append(ds)
 
-    mosaic, mosaic_transform = rio_merge(flipped_datasets, method=method)
+    mosaic, mosaic_transform = rio_merge(flipped_datasets, method=method, **merge_kwargs)
 
     # Close flipped in-memory datasets
     for ds in flipped_datasets:
@@ -309,9 +328,9 @@ def single_merge(tile_paths: list[Path], output_path: Path) -> None:
 
 
 def chunked_merge(
-    tile_paths: list[Path],
-    output_path: Path,
-    chunk_size: int = 100,
+        tile_paths: list[Path],
+        output_path: Path,
+        chunk_size: int = 100,
 ) -> None:
     """Merge many tiles without exceeding the OS open-file limit.
 
@@ -376,34 +395,209 @@ def chunked_merge(
             pass
 
 
-def merge_predictions(
-    group_tile_paths: dict[tuple[str, ...], list[Path]],
-    event_all_tile_paths: dict[str, list[Path]],
-    *,
-    write_merged_all: bool = True,
+
+
+def merged_all_filename(beam: Any, sat_pass: Any, suffix: str = "") -> str:
+    """Name of the temporal-confirmation mosaic for one beam / satellite pass."""
+    return f"merged_all_beam-{beam}_pass-{sat_pass}{suffix}.tif"
+
+
+def probability_path(class_path: Path) -> Path:
+    """Sibling ``*_prob.tif`` written next to a class raster (may not exist)."""
+    return class_path.with_name(f"{class_path.stem}_prob{class_path.suffix}")
+
+
+def _read_class_and_probability(class_path: Path) -> tuple[np.ndarray, np.ndarray, Affine, Any]:
+    """Return ``(valid, prob, transform, crs)`` for one prediction raster.
+
+    ``prob`` is the positive-class probability read from the sibling
+    ``*_prob.tif``; when that file is missing, the hard class (0/1) is used
+    instead so the merge still works on class-only outputs.
+    """
+    with rio.open(class_path) as src:
+        cls = src.read(1)
+        transform, crs = src.transform, src.crs
+        cls_nodata = src.nodata if src.nodata is not None else CLASS_NODATA
+    valid = cls != cls_nodata
+
+    prob_path = probability_path(class_path)
+    if prob_path.exists():
+        with rio.open(prob_path) as src:
+            prob = src.read(1).astype(np.float32)
+            prob_nodata = src.nodata if src.nodata is not None else PROBABILITY_NODATA
+        valid &= prob != prob_nodata
+    else:
+        prob = (cls == 1).astype(np.float32)
+    return valid, prob, transform, crs
+
+
+def _common_grid(rasters: list[Path]) -> tuple[Affine, int, int]:
+    """Union grid of north-up rasters sharing the same pixel size."""
+    lefts, tops, rights, bottoms = [], [], [], []
+    res = None
+    for p in rasters:
+        with rio.open(p) as src:
+            t = src.transform
+            if t.b != 0 or t.d != 0 or t.e >= 0:
+                msg = f"temporal_confirmation_merge requires north-up rasters, got {t} for {p}"
+                raise ValueError(msg)
+            if res is None:
+                res = (t.a, -t.e)
+            elif not np.allclose(res, (t.a, -t.e)):
+                msg = f"Inconsistent pixel size {(t.a, -t.e)} vs {res} for {p}"
+                raise ValueError(msg)
+            b = src.bounds
+            lefts.append(b.left)
+            tops.append(b.top)
+            rights.append(b.right)
+            bottoms.append(b.bottom)
+    res_x, res_y = res
+    left, top = min(lefts), max(tops)
+    width = round((max(rights) - left) / res_x)
+    height = round((top - min(bottoms)) / res_y)
+    return Affine(res_x, 0.0, left, 0.0, -res_y, top), height, width
+
+
+def temporal_confirmation_merge(
+        pairs: list[list[Path]],
+        output_path: Path,
+        *,
+        min_pairs: int = DEFAULT_MERGED_ALL_MIN_PAIRS,
+        prob_threshold: float = DEFAULT_MERGED_ALL_PROB_THRESHOLD,
+) -> None:
+    """Mosaic several pre/post pairs with a per-pixel temporal confirmation rule.
+
+    ``pairs`` holds, in **chronological order of the post date**, the cell
+    rasters of each pre/post pair. Burned area only grows during a fire
+    season, so instead of averaging pairs of different dates (where an early
+    post image dilutes later detections), each pixel is classified from:
+
+    * ``n_valid``: pairs with valid data at the pixel;
+    * ``n_det``: pairs whose probability is ``>= prob_threshold``;
+    * ``persist_prob``: mean probability over the valid pairs **from the first
+      detection onward** (over all valid pairs if never detected).
+
+    A pixel is burned iff ``n_det >= min(min_pairs, n_valid)`` **and**
+    ``persist_prob >= prob_threshold``. Capping the required count at
+    ``n_valid`` keeps pixels seen by fewer than ``min_pairs`` pairs
+    classifiable (otherwise they could never be burned).
+
+    Writes ``output_path`` (uint16, 0/1, nodata 32767) and its ``*_prob.tif``
+    sibling holding ``persist_prob`` (float32, nodata -1).
+    """
+    rasters = [p for paths in pairs for p in paths]
+    if not rasters:
+        return
+
+    grid, height, width = _common_grid(rasters)
+    res_x, res_y, left, top = grid.a, -grid.e, grid.c, grid.f
+
+    n_valid = np.zeros((height, width), dtype=np.int16)
+    n_det = np.zeros((height, width), dtype=np.int16)
+    seen = np.zeros((height, width), dtype=bool)
+    sum_after = np.zeros((height, width), dtype=np.float32)
+    cnt_after = np.zeros((height, width), dtype=np.int16)
+    sum_all = np.zeros((height, width), dtype=np.float32)
+    crs = None
+
+    # Chronological order matters: "from the first detection onward".
+    for paths in pairs:
+        for p in paths:
+            valid, prob, t, crs = _read_class_and_probability(p)
+            r0 = round((top - t.f) / res_y)
+            c0 = round((t.c - left) / res_x)
+            h, w = prob.shape
+            win = np.s_[r0:r0 + h, c0:c0 + w]
+
+            det = valid & (prob >= prob_threshold)
+            n_valid[win] += valid
+            n_det[win] += det
+            sum_all[win] += np.where(valid, prob, 0.0)
+            seen[win] |= det
+            after = valid & seen[win]
+            sum_after[win] += np.where(after, prob, 0.0)
+            cnt_after[win] += after
+
+    covered = n_valid > 0
+    persist_prob = np.where(
+        cnt_after > 0,
+        sum_after / np.maximum(cnt_after, 1),
+        sum_all / np.maximum(n_valid, 1),
+    ).astype(np.float32)
+    required = np.minimum(n_valid, min_pairs)
+    burned = covered & (n_det >= required) & (persist_prob >= prob_threshold)
+
+    cls_out = np.where(covered, burned, CLASS_NODATA).astype(np.uint16)
+    prob_out = np.where(covered, persist_prob, PROBABILITY_NODATA).astype(np.float32)
+
+    profile = {
+        "driver": "GTiff", "count": 1, "height": height, "width": width,
+        "crs": crs, "transform": grid, "compress": "lzw",
+    }
+    with rio.open(output_path, "w", **profile, dtype="uint16", nodata=CLASS_NODATA) as dst:
+        dst.write(cls_out[np.newaxis])
+    with rio.open(
+            probability_path(output_path), "w", **profile, dtype="float32", nodata=PROBABILITY_NODATA,
+    ) as dst:
+        dst.write(prob_out[np.newaxis])
+
+
+def merge_probability_rasters(tile_paths: list[Path], merged_path: Path) -> Path | None:
+    """Merge the ``*_prob.tif`` siblings of ``tile_paths`` next to ``merged_path``.
+
+    Plain average of the valid (non-nodata) probabilities of the overlapping
+    tiles: no probability threshold or other filtering is applied, and masked
+    pixels (water, invalid) stay nodata. The output is the ``*_prob.tif`` sibling
+    of ``merged_path`` (see :func:`probability_path`).
+
+    Returns the written path, or ``None`` when a tile has no probability raster
+    (a partial mosaic would silently under-cover the class raster).
+    """
+    prob_paths = [probability_path(p) for p in tile_paths]
+    missing = [p for p in prob_paths if not p.exists()]
+    if missing:
+        logger.warning(
+            "Probability merge skipped for %s: %d/%d probability raster(s) missing (e.g. %s).",
+            merged_path.name, len(missing), len(prob_paths), missing[0].name,
+        )
+        return None
+    prob_merged_path = probability_path(merged_path)
+    chunked_merge(prob_paths, prob_merged_path)
+    return prob_merged_path
+
+
+def merge_predictions(  # noqa: PLR0913
+        group_tile_paths: dict[tuple[str, ...], list[Path]],
+        event_all_tile_paths: dict[str, list[Path]],
+        *,
+        write_merged_all: bool = True,
+        merged_all_min_pairs: int = DEFAULT_MERGED_ALL_MIN_PAIRS,
+        merged_all_prob_threshold: float = DEFAULT_MERGED_ALL_PROB_THRESHOLD,
 ) -> None:
     """Merge tiles in two passes.
 
-    1. Per event/pre-post pair/beam/pass → one self-describing GeoTIFF
-    2. All tiles in the event/date dir    → merged_all.tif (skipped when
-       ``write_merged_all`` is False, e.g. benchmark layout where it would mix
-       unrelated pre/post pairs)
+    1. Per event/pre-post pair/beam/pass → one self-describing GeoTIFF, plus its
+       ``*_prob.tif`` (plain average of the cells' probabilities, no filtering)
+    2. Per event/date dir **and beam/satellite pass** →
+       ``merged_all_beam-<beam>_pass-<pass>.tif`` (+ ``*_prob.tif``), built by
+       :func:`temporal_confirmation_merge` over the pairs sorted by post date.
+       Skipped when ``write_merged_all`` is False (e.g. benchmark layout).
 
-    Uses :func:`chunked_merge` to handle large tile counts without
+    Pass 1 uses :func:`chunked_merge` to handle large tile counts without
     exceeding the OS open-file descriptor limit.
     """
     # --- Pass 1 : merge par paire pré/post et configuration SAR ---
     for (
-        event_date_dir_str,
-        event_id,
-        event_start_date,
-        event_end_date,
-        group_pre,
-        group_date_pre,
-        group_post,
-        group_date_post,
-        beam,
-        sat_pass,
+            event_date_dir_str,
+            event_id,
+            event_start_date,
+            event_end_date,
+            group_pre,
+            group_date_pre,
+            group_post,
+            group_date_post,
+            beam,
+            sat_pass,
     ), tile_paths in group_tile_paths.items():
         event_date_dir = Path(event_date_dir_str)
         if len(tile_paths) == 1:
@@ -423,6 +617,9 @@ def merge_predictions(
         try:
             chunked_merge(tile_paths, merged_path)
             logger.info("Saved merged group to %s", merged_path)
+            prob_merged_path = merge_probability_rasters(tile_paths, merged_path)
+            if prob_merged_path is not None:
+                logger.info("Saved merged group probability to %s", prob_merged_path)
         except Exception:
             logger.exception(
                 "Failed to merge event %s, group %s/%s, beam %s, pass %s in %s",
@@ -436,20 +633,34 @@ def merge_predictions(
         logger.info("Global merge (merged_all.tif) disabled — skipping pass 2.")
         return
 
-    # --- Pass 2 : merge global par EVENT_ID / PREDICTION_DATE ---
-    for event_date_dir_str, tile_paths in event_all_tile_paths.items():
+    # --- Pass 2 : par EVENT_ID / PREDICTION_DATE / beam / pass, confirmation temporelle ---
+    # key = (event_date_dir, event_id, start, end, g_pre, date_pre, g_post, date_post, beam, pass)
+    by_config: dict[tuple[str, str, str], list[tuple[str, str, list[Path]]]] = defaultdict(list)
+    for key, tile_paths in group_tile_paths.items():
+        event_date_dir_str, group_date_pre, group_date_post, beam, sat_pass = (
+            key[0], key[5], key[7], key[8], key[9]
+        )
+        by_config[(event_date_dir_str, beam, sat_pass)].append(
+            (merge_date(group_date_post), merge_date(group_date_pre), tile_paths),
+        )
+
+    for (event_date_dir_str, beam, sat_pass), entries in by_config.items():
         event_date_dir = Path(event_date_dir_str)
-        if len(tile_paths) < 2:
-            logger.info(
-                "Skipping global merge for %s (only %d tile)", event_date_dir, len(tile_paths),
-            )
+        if len(event_all_tile_paths.get(event_date_dir_str, [])) < 2:  # noqa: PLR2004
+            logger.info("Skipping global merge for %s (fewer than 2 tiles)", event_date_dir)
             continue
 
-        merged_path = event_date_dir / "merged_all.tif"
-        logger.info("Merging all %d tiles → %s", len(tile_paths), merged_path)
-
+        entries.sort(key=lambda e: (e[0], e[1]))  # chronological: post date, then pre date
+        merged_path = event_date_dir / merged_all_filename(beam, sat_pass)
+        logger.info(
+            "Temporal-confirmation merge of %d pairs (min_pairs=%d, threshold=%.2f) → %s",
+            len(entries), merged_all_min_pairs, merged_all_prob_threshold, merged_path,
+        )
         try:
-            chunked_merge(tile_paths, merged_path)
+            temporal_confirmation_merge(
+                [paths for _, _, paths in entries], merged_path,
+                min_pairs=merged_all_min_pairs, prob_threshold=merged_all_prob_threshold,
+            )
             logger.info("Saved global merge to %s", merged_path)
         except Exception:
-            logger.exception("Failed to create global merge in %s", event_date_dir)
+            logger.exception("Failed to create global merge %s", merged_path)
