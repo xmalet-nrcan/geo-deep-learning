@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sequentially train the "geo-deep-learning" (ChangeFormer) service once per
+# Sequentially train the "geo-deep-learning" service once per
 # band-combo config, saving each run's full log and appending its test
 # metrics + best checkpoint path to a single CSV.
 #
@@ -7,6 +7,12 @@
 #   ./scripts/run_band_sweep.sh                 # detached (default)
 #   ./scripts/run_band_sweep.sh --foreground    # attached/blocking
 #   ./scripts/run_band_sweep.sh --status
+#   ./scripts/run_band_sweep.sh --dry-run       # generate configs, no Docker
+#   ./scripts/run_band_sweep.sh --legacy        # original five ChangeFormer configs
+#
+# Default: FarSeg INTENSITY, MCHI, MCHI+INTENSITY, trained from scratch.
+# All9 is excluded unless --include-all9 is supplied. Base YAML stays unchanged.
+# Host requirements: Bash, python3 + PyYAML; Docker Compose for training only.
 #
 # Env overrides:
 #   SERVICE       docker-compose service to run       (default: geo-deep-learning)
@@ -15,6 +21,10 @@
 #   LOG_DIR       directory for per-run raw logs        (default: logs/band_sweep)
 #   SWEEP_LOG     detached process log                   (default: logs/band_sweep/sweep.log)
 #   PID_FILE      detached process PID file              (default: run/band_sweep.pid)
+#   BASE_CONFIG   base for generated configs (default: configs/rcm_change_detection_changestar_farseg.yaml)
+#   PYTHON        host Python executable (default: python3)
+# Generated YAMLs/raw logs live in LOG_DIR/<timestamp>_<pid>/; TensorBoard and
+# checkpoint paths get band_sweep/<timestamp>_<pid>/<combo> suffixes.
 #
 # Relies on docker-compose.yaml's ${TRAIN_CONFIG:-...} volume substitution for
 # the geo-deep-learning service's /app/configs/model_conf.yaml mount, and on
@@ -34,20 +44,37 @@ SWEEP_LOG="${SWEEP_LOG:-$LOG_DIR/sweep.log}"
 PID_FILE="${PID_FILE:-run/band_sweep.pid}"
 LOCK_DIR="${PID_FILE}.lock"
 SCRIPT_PATH="$REPO_ROOT/scripts/$(basename "${BASH_SOURCE[0]}")"
+BASE_CONFIG="${BASE_CONFIG:-configs/rcm_change_detection_changestar_farseg.yaml}"
+PYTHON="${PYTHON:-python3}"
 
 mode="detach"
-case "${1:-}" in
-  ""|-d|--detach) mode="detach" ;;
+legacy=0
+include_all9=0
+dry_run=0
+sweep_args=()
+while [[ $# -gt 0 ]]; do
+case "$1" in
+  -d|--detach) mode="detach" ;;
   -f|--foreground) mode="foreground" ;;
   --status) mode="status" ;;
+  --legacy) legacy=1; sweep_args+=("$1") ;;
+  --include-all9) include_all9=1; sweep_args+=("$1") ;;
+  --dry-run) dry_run=1 ;;
   -h|--help)
     cat <<EOF
-Usage: $0 [--detach|--foreground|--status]
+Usage: $0 [--detach|--foreground|--status] [--include-all9|--legacy] [--dry-run]
 
   -d, --detach      Launch the complete sweep in the background (default).
   -f, --foreground  Run synchronously and stream output in this terminal.
       --status      Report whether a sweep is currently running.
   -h, --help        Show this help.
+      --include-all9  Add All9 to the three FarSeg subsets (default: excluded).
+      --legacy       Run the original five ChangeFormer configs unchanged.
+      --dry-run      Generate/list configs only; never start Docker or training.
+
+Default base: $BASE_CONFIG (override with BASE_CONFIG).
+Generated runs clear weights_from_checkpoint_path and ckpt_path: no All9 resume.
+Host Python: $PYTHON (requires PyYAML). Existing env/path overrides still apply.
 EOF
     exit 0
     ;;
@@ -57,6 +84,13 @@ EOF
     exit 2
     ;;
 esac
+shift
+done
+
+if [[ "$legacy" == 1 && "$include_all9" == 1 ]]; then
+  echo "--include-all9 cannot be combined with --legacy (already includes All9)." >&2
+  exit 2
+fi
 
 running_pid() {
   local pid
@@ -88,7 +122,7 @@ fi
 mkdir -p "$LOG_DIR" "$(dirname "$METRICS_CSV")" "$(dirname "$PID_FILE")" "$(dirname "$SWEEP_LOG")"
 clear_stale_state
 
-if [[ "$mode" == "detach" ]]; then
+if [[ "$mode" == "detach" && "$dry_run" == 0 ]]; then
   if pid="$(running_pid)"; then
     echo "A band sweep is already running (PID $pid). Log: $SWEEP_LOG" >&2
     exit 1
@@ -104,8 +138,8 @@ if [[ "$mode" == "detach" ]]; then
   printf '\n=== [%s] Launching detached band sweep ===\n' "$(date -Is)" >> "$SWEEP_LOG"
   BAND_SWEEP_LOCK_HELD=1 nohup bash -c '
     while [[ ! -r "$1" ]] || [[ "$(<"$1")" != "$$" ]]; do sleep 0.05; done
-    exec bash "$2" --foreground
-  ' _ "$PID_FILE" "$SCRIPT_PATH" </dev/null >> "$SWEEP_LOG" 2>&1 &
+    exec bash "$2" --foreground "${@:3}"
+  ' _ "$PID_FILE" "$SCRIPT_PATH" "${sweep_args[@]}" </dev/null >> "$SWEEP_LOG" 2>&1 &
   child_pid=$!
   printf '%s\n' "$child_pid" > "$PID_FILE"
 
@@ -115,6 +149,7 @@ if [[ "$mode" == "detach" ]]; then
   exit 0
 fi
 
+if [[ "$dry_run" == 0 ]]; then
 if [[ "${BAND_SWEEP_LOCK_HELD:-0}" != "1" ]]; then
   if pid="$(running_pid)"; then
     echo "A band sweep is already running (PID $pid). Log: $SWEEP_LOG" >&2
@@ -138,6 +173,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+fi
 
 CONFIGS=(
   "configs/rcm_change_detection_changeformer_all9bands.yaml"
@@ -147,9 +183,29 @@ CONFIGS=(
   "configs/rcm_change_detection_changeformer_mchi_rrrl7bands.yaml"
 )
 
+if [[ "$legacy" == 0 ]]; then
+  run_id="$(date +%Y%m%dT%H%M%S)_$$"
+  LOG_DIR="$LOG_DIR/$run_id"
+  mkdir -p "$LOG_DIR/configs"
+  generator_args=()
+  [[ "$include_all9" == 0 ]] || generator_args+=(--include-all9)
+  "$PYTHON" scripts/generate_band_sweep_configs.py "$BASE_CONFIG" "$LOG_DIR/configs" \
+    --run-id "$run_id" "${generator_args[@]}" > "$LOG_DIR/configs.txt"
+  CONFIGS=()
+  while IFS= read -r cfg; do
+    CONFIGS+=("${cfg%$'\r'}")
+  done < "$LOG_DIR/configs.txt"
+fi
+
 compose() { docker compose -f "$COMPOSE_FILE" "$@"; }
 
 echo "=== Band sweep: ${#CONFIGS[@]} configs, service=$SERVICE, csv=$METRICS_CSV ==="
+
+if [[ "$dry_run" == 1 ]]; then
+  printf 'Config: %s\n' "${CONFIGS[@]}"
+  echo "Dry run: no Docker/training/metrics extraction."
+  exit 0
+fi
 
 failures=()
 
@@ -167,7 +223,11 @@ for cfg in "${CONFIGS[@]}"; do
 
   # Absolute host path required: the compose volume mount needs a real path,
   # not one relative to the container's working directory.
-  export TRAIN_CONFIG="$REPO_ROOT/$cfg"
+  if [[ "$cfg" == /* ]]; then
+    export TRAIN_CONFIG="$cfg"
+  else
+    export TRAIN_CONFIG="$REPO_ROOT/$cfg"
+  fi
 
   # Remove any stray container from a previous run that shares container_name.
   compose rm -f -s "$SERVICE" >/dev/null 2>&1 || true
@@ -188,7 +248,7 @@ for cfg in "${CONFIGS[@]}"; do
 
   compose rm -f -s "$SERVICE" >/dev/null 2>&1 || true
 
-  if ! python3 scripts/extract_test_metrics.py "$log_file" --csv "$METRICS_CSV" --label "$name"; then
+  if ! "$PYTHON" scripts/extract_test_metrics.py "$log_file" --csv "$METRICS_CSV" --label "$name"; then
     echo "!! No test metrics found for $cfg — see $log_file" >&2
     failures+=("$cfg (no metrics)")
   fi

@@ -155,9 +155,6 @@ class PredictOutputMixin:
             if key in batch:
                 result[key] = batch[key]
 
-        if batch.get("has_mask", torch.tensor(False)).any():
-            result["mask"] = batch["mask"]
-
         return result
 
     @staticmethod
